@@ -1,0 +1,48 @@
+# OpenAI Codex runtime.
+
+[runtime]
+name = "codex"
+
+[runtime.fields]
+model   = { type = "string", required = false }
+persona = { type = "file",   required = false }
+prompt  = { type = "string", required = false, default = "" }
+
+[runtime.command]
+cmd = ["codex", "{prompt_file}"]
+
+[[runtime.command.optional]]
+when = "model"
+args = ["--model", "{model}"]
+
+[[runtime.files]]
+from = "{persona}"
+to   = "{workspace}/.codex/system-prompt.md"
+
+[runtime.env]
+OPENAI_API_KEY = "{secret:openai_api_key}"
+
+[[runtime.proxy]]
+env      = "OPENAI_BASE_URL"
+provider = "openai"
+target   = "https://api.openai.com"
+
+[[runtime.metrics]]
+name   = "input_tokens"
+type   = "counter"
+source = "proxy"
+
+[[runtime.metrics]]
+name   = "output_tokens"
+type   = "counter"
+source = "proxy"
+
+[[runtime.metrics]]
+name   = "api_calls"
+type   = "counter"
+source = "proxy"
+
+[[runtime.metrics]]
+name   = "response_latency_ms"
+type   = "histogram"
+source = "proxy"

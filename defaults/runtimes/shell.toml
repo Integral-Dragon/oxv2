@@ -1,0 +1,19 @@
+# Shell runtime — runs a bash command.
+# Useful for scripted steps, build steps, and testing.
+#
+# One-shot: runs bash -c with the prompt as the command.
+# Interactive (tty = true): opens a bash session.
+#
+#   [step.runtime]
+#   type = "shell"
+#   prompt = "echo hello && ox-rt done pass"
+
+[runtime]
+name = "shell"
+
+[runtime.fields]
+prompt = { type = "string", required = false, default = "echo 'no command'; exit 1" }
+
+[runtime.command]
+cmd = ["bash", "-c", "{prompt}"]
+interactive_cmd = ["bash"]

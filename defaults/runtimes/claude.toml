@@ -1,0 +1,69 @@
+# Claude Code runtime.
+#
+# One-shot mode (default): runs claude -p with the assembled prompt file.
+# Interactive mode (tty = true): runs claude in interactive session.
+#
+# The step spec selects the mode:
+#   [step.runtime]
+#   type = "claude"
+#   model = "sonnet"
+#   persona = "inspired/software-engineer"
+#   prompt = "Implement the feature."
+#
+# For interactive steps:
+#   [step.runtime]
+#   type = "claude"
+#   tty = true
+
+[runtime]
+name = "claude"
+
+[runtime.fields]
+model   = { type = "string", required = false }
+persona = { type = "file",   required = false }
+prompt  = { type = "string", required = false, default = "" }
+
+[runtime.command]
+cmd = ["claude", "-p", "{prompt_file}", "--output-format", "text"]
+interactive_cmd = ["claude"]
+
+[[runtime.command.optional]]
+when = "model"
+args = ["--model", "{model}"]
+
+[[runtime.files]]
+from = "{persona}"
+to   = "{workspace}/CLAUDE.md"
+
+[runtime.env]
+ANTHROPIC_API_KEY = "{secret:anthropic_api_key}"
+
+[[runtime.proxy]]
+env      = "ANTHROPIC_BASE_URL"
+provider = "anthropic"
+target   = "https://api.anthropic.com"
+
+[[runtime.metrics]]
+name   = "input_tokens"
+type   = "counter"
+source = "proxy"
+
+[[runtime.metrics]]
+name   = "output_tokens"
+type   = "counter"
+source = "proxy"
+
+[[runtime.metrics]]
+name   = "api_calls"
+type   = "counter"
+source = "proxy"
+
+[[runtime.metrics]]
+name   = "response_latency_ms"
+type   = "histogram"
+source = "proxy"
+
+[[runtime.metrics]]
+name   = "model"
+type   = "label"
+source = "proxy"

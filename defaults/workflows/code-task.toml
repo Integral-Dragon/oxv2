@@ -1,0 +1,169 @@
+# Code task workflow: propose → review plan → implement → review code → merge
+#
+# Uses claude in one-shot mode for agent steps and interactive mode for
+# human tiebreaker steps.
+
+[workflow]
+name        = "code-task"
+description = "Propose → review plan → implement → review code → merge"
+
+# ── Agent steps ──────────────────────────────────────────────────────
+
+[[step]]
+name      = "propose"
+output    = "diff"
+max_visits      = 3
+max_visits_goto = "plan-tiebreak"
+
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
+[step.runtime]
+type    = "claude"
+model   = "sonnet"
+persona = "inspired/software-engineer"
+prompt  = "Read the task spec, explore the codebase, write a proposal."
+
+[[step.artifact]]
+name = "proposal"
+
+# ── Review plan ──────────────────────────────────────────────────────
+
+[[step]]
+name        = "review-plan"
+output      = "verdict"
+max_retries = 1
+
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
+[step.runtime]
+type    = "claude"
+model   = "sonnet"
+persona = "inspired/tech-lead"
+prompt  = "Review the proposal. Output pass or fail."
+
+[[step.transition]]
+match = "pass"
+goto  = "implement"
+
+[[step.transition]]
+match = "fail"
+goto  = "propose"
+
+[[step.transition]]
+match = "*"
+goto  = "escalate"
+
+# ── Implement ────────────────────────────────────────────────────────
+
+[[step]]
+name      = "implement"
+output    = "diff"
+max_visits      = 3
+max_visits_goto = "code-tiebreak"
+
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
+[step.runtime]
+type    = "claude"
+model   = "sonnet"
+persona = "inspired/software-engineer"
+prompt  = "Implement the task following the approved proposal."
+
+# ── Review code ──────────────────────────────────────────────────────
+
+[[step]]
+name        = "review-code"
+output      = "verdict"
+max_retries = 2
+
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
+[step.runtime]
+type    = "claude"
+model   = "sonnet"
+persona = "inspired/reviewer"
+prompt  = "Review the implementation. Output pass or fail."
+
+[[step.transition]]
+match = "pass"
+goto  = "merge"
+
+[[step.transition]]
+match = "fail"
+goto  = "implement"
+
+[[step.transition]]
+match = "*"
+goto  = "escalate"
+
+# ── Merge ────────────────────────────────────────────────────────────
+
+[[step]]
+name        = "merge"
+action      = "merge_to_main"
+on_fail     = "implement"
+max_retries = 2
+
+[step.workspace]
+branch = "{task_id}"
+
+# ── Tiebreakers (interactive human steps) ────────────────────────────
+
+[[step]]
+name = "plan-tiebreak"
+
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
+[step.runtime]
+type = "claude"
+tty  = true
+
+[[step.transition]]
+match = "pass"
+goto  = "review-plan"
+
+[[step.transition]]
+match = "*"
+goto  = "escalate"
+
+[[step]]
+name = "code-tiebreak"
+
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
+[step.runtime]
+type = "claude"
+tty  = true
+
+[[step.transition]]
+match = "pass"
+goto  = "review-code"
+
+[[step.transition]]
+match = "*"
+goto  = "escalate"
+
+# ── Triggers ─────────────────────────────────────────────────────────
+
+[[trigger]]
+on       = "cx.task_ready"
+tag      = "workflow:code-task"
+workflow = "code-task"
