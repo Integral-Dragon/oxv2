@@ -1,0 +1,12 @@
+[package]
+name = "ox-runner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ox-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

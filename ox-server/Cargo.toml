@@ -1,0 +1,21 @@
+[package]
+name = "ox-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ox-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+rusqlite = { workspace = true }
+clap = { workspace = true }
+async-stream = { workspace = true }
+futures-util = { workspace = true }

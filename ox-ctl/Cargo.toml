@@ -1,0 +1,11 @@
+[package]
+name = "ox-ctl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ox-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
