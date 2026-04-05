@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::AppState;
+use crate::artifacts;
 use crate::db;
 use crate::projections;
 
@@ -58,6 +59,23 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/executions/{id}/steps/{step}/advance",
             post(step_advance),
+        )
+        // Artifacts
+        .route(
+            "/api/executions/{id}/steps/{step}/artifacts",
+            get(list_step_artifacts),
+        )
+        .route(
+            "/api/executions/{id}/steps/{step}/artifacts/{name}",
+            get(get_artifact),
+        )
+        .route(
+            "/api/executions/{id}/steps/{step}/artifacts/{name}/chunks",
+            post(write_artifact_chunk),
+        )
+        .route(
+            "/api/executions/{id}/steps/{step}/artifacts/{name}/close",
+            post(close_artifact),
         )
 }
 
@@ -615,5 +633,129 @@ async fn step_advance(
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
+    StatusCode::NO_CONTENT
+}
+
+// ── Artifacts ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ArtifactPathParams {
+    id: String,
+    step: String,
+    name: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ArtifactQuery {
+    attempt: Option<u32>,
+}
+
+async fn list_step_artifacts(
+    State(state): State<AppState>,
+    Path(params): Path<StepPathParams>,
+    Query(query): Query<ArtifactQuery>,
+) -> Json<serde_json::Value> {
+    let result = state.bus.with_conn(|conn| {
+        artifacts::list_artifacts(conn, &params.id, &params.step, query.attempt)
+    });
+    match result {
+        Ok(arts) => Json(serde_json::to_value(arts).unwrap()),
+        Err(_) => Json(serde_json::json!([])),
+    }
+}
+
+async fn get_artifact(
+    State(state): State<AppState>,
+    Path(params): Path<ArtifactPathParams>,
+    Query(query): Query<ArtifactQuery>,
+) -> Result<axum::body::Bytes, StatusCode> {
+    let attempt = query.attempt.unwrap_or(1);
+    let result = state.bus.with_conn(|conn| {
+        artifacts::fetch_artifact(conn, &params.id, &params.step, attempt, &params.name)
+    });
+    match result {
+        Ok(data) => Ok(axum::body::Bytes::from(data)),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChunkQuery {
+    attempt: u32,
+    offset: u64,
+}
+
+async fn write_artifact_chunk(
+    State(state): State<AppState>,
+    Path(params): Path<ArtifactPathParams>,
+    Query(query): Query<ChunkQuery>,
+    body: axum::body::Bytes,
+) -> StatusCode {
+    // Auto-declare if not yet declared
+    state.bus.with_conn(|conn| {
+        let _ = artifacts::declare_artifact(
+            conn,
+            &params.id,
+            &params.step,
+            query.attempt,
+            &params.name,
+            "file",
+            true,
+        );
+        artifacts::write_chunk(
+            conn,
+            &params.id,
+            &params.step,
+            query.attempt,
+            &params.name,
+            query.offset,
+            &body,
+        )
+        .unwrap();
+    });
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct CloseArtifactRequest {
+    attempt: u32,
+    size: u64,
+    sha256: String,
+}
+
+async fn close_artifact(
+    State(state): State<AppState>,
+    Path(params): Path<ArtifactPathParams>,
+    Json(req): Json<CloseArtifactRequest>,
+) -> StatusCode {
+    state.bus.with_conn(|conn| {
+        artifacts::close_artifact(
+            conn,
+            &params.id,
+            &params.step,
+            req.attempt,
+            &params.name,
+            req.size,
+            &req.sha256,
+        )
+        .unwrap();
+    });
+
+    // Emit artifact.closed event
+    let data = ArtifactClosedData {
+        execution_id: ExecutionId(params.id),
+        step: params.step,
+        artifact: params.name,
+        size: req.size,
+        sha256: req.sha256,
+    };
+    state
+        .bus
+        .append(
+            EventType::ArtifactClosed,
+            serde_json::to_value(data).unwrap(),
+        )
+        .unwrap();
+
     StatusCode::NO_CONTENT
 }

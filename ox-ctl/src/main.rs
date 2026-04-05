@@ -1,3 +1,447 @@
-fn main() {
-    println!("ox-ctl");
+mod output;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use ox_core::client::OxClient;
+
+#[derive(Parser)]
+#[command(name = "ox-ctl")]
+struct Cli {
+    /// ox-server URL.
+    #[arg(long, env = "OX_SERVER", default_value = "http://localhost:4840", global = true)]
+    server: String,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Show server status.
+    Status,
+
+    /// Manage executions.
+    Exec {
+        #[command(subcommand)]
+        command: ExecCommands,
+    },
+
+    /// Manage runners.
+    Runners {
+        #[command(subcommand)]
+        command: RunnerCommands,
+    },
+
+    /// Manage secrets.
+    Secrets {
+        #[command(subcommand)]
+        command: SecretCommands,
+    },
+
+    /// List loaded workflows.
+    Workflows,
+
+    /// Tail the event stream.
+    Events {
+        /// Start from this sequence number.
+        #[arg(long)]
+        since: Option<u64>,
+
+        /// Filter by event type prefix.
+        #[arg(long, name = "type")]
+        type_filter: Option<String>,
+    },
+
+    /// Trigger a workflow for a cx node.
+    Trigger {
+        /// cx node ID.
+        node_id: String,
+
+        /// Bypass dedup check.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExecCommands {
+    /// List executions.
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
+    },
+    /// Show execution detail.
+    Show {
+        /// Execution ID.
+        id: String,
+    },
+    /// Cancel an execution.
+    Cancel {
+        /// Execution ID.
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunnerCommands {
+    /// List runners.
+    List,
+    /// Drain a runner.
+    Drain {
+        /// Runner ID.
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretCommands {
+    /// List secret names.
+    List,
+    /// Set a secret.
+    Set {
+        /// Secret name.
+        name: String,
+        /// Secret value. If omitted, reads from stdin.
+        #[arg(long)]
+        value: Option<String>,
+    },
+    /// Delete a secret.
+    Delete {
+        /// Secret name.
+        name: String,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let client = OxClient::new(&cli.server);
+    let json = cli.json;
+
+    match cli.command {
+        Commands::Status => cmd_status(&client, json).await,
+        Commands::Exec { command } => match command {
+            ExecCommands::List { status, workflow, task } => {
+                cmd_exec_list(&client, json, status, workflow, task).await
+            }
+            ExecCommands::Show { id } => cmd_exec_show(&client, json, &id).await,
+            ExecCommands::Cancel { id } => cmd_exec_cancel(&client, &id).await,
+        },
+        Commands::Runners { command } => match command {
+            RunnerCommands::List => cmd_runners_list(&client, json).await,
+            RunnerCommands::Drain { id } => cmd_runners_drain(&client, &id).await,
+        },
+        Commands::Secrets { command } => match command {
+            SecretCommands::List => cmd_secrets_list(&client, json).await,
+            SecretCommands::Set { name, value } => cmd_secrets_set(&client, &name, value).await,
+            SecretCommands::Delete { name } => cmd_secrets_delete(&client, &name).await,
+        },
+        Commands::Workflows => cmd_workflows(&client, json).await,
+        Commands::Events { since, type_filter } => {
+            cmd_events(&cli.server, json, since, type_filter).await
+        }
+        Commands::Trigger { node_id, force } => cmd_trigger(&client, &node_id, force).await,
+    }
+}
+
+// ── Status ──────────────────────────────────────────────────────────
+
+async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
+    let s = client.status().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "status": s.status,
+            "pool_size": s.pool_size,
+            "pool_executing": s.pool_executing,
+            "pool_idle": s.pool_idle,
+            "executions_running": s.executions_running,
+            "workflows_loaded": s.workflows_loaded,
+            "event_seq": s.event_seq,
+        }))?);
+    } else {
+        println!("ox-server   {}   seq {}", s.status, s.event_seq);
+        println!(
+            "pool        {} runners ({} executing, {} idle)",
+            s.pool_size, s.pool_executing, s.pool_idle
+        );
+        println!("executions  {} running", s.executions_running);
+        println!("workflows   {} loaded", s.workflows_loaded);
+    }
+    Ok(())
+}
+
+// ── Executions ──────────────────────────────────────────────────────
+
+async fn cmd_exec_list(
+    client: &OxClient,
+    json: bool,
+    _status: Option<String>,
+    _workflow: Option<String>,
+    _task: Option<String>,
+) -> Result<()> {
+    let execs = client.list_executions().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&execs)?);
+    } else {
+        println!(
+            "{:<14} {:<8} {:<16} {:<14} {:<12}",
+            "ID", "TASK", "WORKFLOW", "STEP", "STATUS"
+        );
+        for e in &execs {
+            println!(
+                "{:<14} {:<8} {:<16} {:<14} {:<12}",
+                e.get("id").and_then(|v| v.as_str()).unwrap_or("-"),
+                e.get("task_id").and_then(|v| v.as_str()).unwrap_or("-"),
+                e.get("workflow").and_then(|v| v.as_str()).unwrap_or("-"),
+                e.get("current_step").and_then(|v| v.as_str()).unwrap_or("-"),
+                e.get("status").and_then(|v| v.as_str()).unwrap_or("-"),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
+    let exec = client.get_execution(id).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "id": exec.id,
+            "task_id": exec.task_id,
+            "workflow": exec.workflow,
+            "status": exec.status,
+            "current_step": exec.current_step,
+            "attempts": exec.attempts,
+        }))?);
+    } else {
+        println!("Execution: {}", exec.id);
+        println!("Task:      {}", exec.task_id);
+        println!("Workflow:  {}", exec.workflow);
+        println!("Status:    {}", exec.status);
+        println!();
+        println!(
+            "{:<4} {:<14} {:<8} {:<10} {:<10} {:<12} {:<16}",
+            "#", "STEP", "ATTEMPT", "STATUS", "RUNNER", "OUTPUT", "TRANSITION"
+        );
+        for (i, a) in exec.attempts.iter().enumerate() {
+            println!(
+                "{:<4} {:<14} {:<8} {:<10} {:<10} {:<12} {:<16}",
+                i + 1,
+                a.step,
+                a.attempt,
+                a.status,
+                a.runner_id.as_deref().unwrap_or("-"),
+                a.output.as_deref().unwrap_or("-"),
+                a.transition
+                    .as_deref()
+                    .map(|t| format!("→ {t}"))
+                    .unwrap_or_else(|| "-".into()),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_exec_cancel(client: &OxClient, id: &str) -> Result<()> {
+    client.cancel_execution(id).await?;
+    println!("Cancelled {id}");
+    Ok(())
+}
+
+// ── Runners ─────────────────────────────────────────────────────────
+
+async fn cmd_runners_list(client: &OxClient, json: bool) -> Result<()> {
+    let resp = client.status().await?; // pool state from status for now
+    // Use the raw pool state endpoint
+    let pool: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/api/state/pool", client.base_url()))
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pool)?);
+    } else {
+        let _ = resp;
+        let runners = pool
+            .get("runners")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        println!(
+            "{:<12} {:<12} {:<12} {:<24}",
+            "ID", "ENVIRONMENT", "STATUS", "STEP"
+        );
+        for r in &runners {
+            println!(
+                "{:<12} {:<12} {:<12} {:<24}",
+                r.get("id").and_then(|v| v.as_str()).unwrap_or("-"),
+                r.get("environment").and_then(|v| v.as_str()).unwrap_or("-"),
+                r.get("status").and_then(|v| v.as_str()).unwrap_or("-"),
+                r.get("current_step").and_then(|v| v.as_str()).unwrap_or("-"),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_runners_drain(client: &OxClient, id: &str) -> Result<()> {
+    client
+        .drain_runner(&ox_core::types::RunnerId(id.to_string()))
+        .await?;
+    println!("Drained {id}");
+    Ok(())
+}
+
+// ── Secrets ─────────────────────────────────────────────────────────
+
+async fn cmd_secrets_list(client: &OxClient, json: bool) -> Result<()> {
+    let secrets = client.list_secrets().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&secrets
+            .iter()
+            .map(|s| serde_json::json!({"name": s.name}))
+            .collect::<Vec<_>>())?);
+    } else {
+        println!("NAME");
+        for s in &secrets {
+            println!("{}", s.name);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_secrets_set(client: &OxClient, name: &str, value: Option<String>) -> Result<()> {
+    let value = match value {
+        Some(v) => v,
+        None => {
+            // Read from stdin
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf.trim_end().to_string()
+        }
+    };
+    client.set_secret(name, &value).await?;
+    println!("Set {name}");
+    Ok(())
+}
+
+async fn cmd_secrets_delete(client: &OxClient, name: &str) -> Result<()> {
+    client.delete_secret(name).await?;
+    println!("Deleted {name}");
+    Ok(())
+}
+
+// ── Workflows ───────────────────────────────────────────────────────
+
+async fn cmd_workflows(client: &OxClient, json: bool) -> Result<()> {
+    let workflows = client.list_workflows().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&workflows
+            .iter()
+            .map(|w| serde_json::json!({"name": w.name, "steps": w.steps}))
+            .collect::<Vec<_>>())?);
+    } else {
+        println!("{:<20} {:<8} STEPS", "NAME", "COUNT");
+        for w in &workflows {
+            println!("{:<20} {:<8} {}", w.name, w.steps.len(), w.steps.join(", "));
+        }
+    }
+    Ok(())
+}
+
+// ── Events ──────────────────────────────────────────────────────────
+
+async fn cmd_events(
+    server_url: &str,
+    json: bool,
+    since: Option<u64>,
+    type_filter: Option<String>,
+) -> Result<()> {
+    use futures_util::StreamExt;
+    use reqwest_eventsource::{Event as SseEvent, EventSource};
+
+    let url = match since {
+        Some(seq) => format!("{server_url}/api/events/stream?last_event_id={seq}"),
+        None => format!("{server_url}/api/events/stream"),
+    };
+    let mut es = EventSource::get(&url);
+
+    loop {
+        match es.next().await {
+            Some(Ok(SseEvent::Message(msg))) => {
+                // Apply type filter
+                if let Some(ref filter) = type_filter {
+                    if !msg.event.starts_with(filter) {
+                        continue;
+                    }
+                }
+
+                if json {
+                    println!("{}", msg.data);
+                } else {
+                    // Parse for summary
+                    let seq = &msg.id;
+                    let event_type = &msg.event;
+                    let summary = event_summary(&msg.data);
+                    println!("{:<6} {:<24} {}", seq, event_type, summary);
+                }
+            }
+            Some(Ok(SseEvent::Open)) => {}
+            Some(Err(reqwest_eventsource::Error::StreamEnded)) => break,
+            Some(Err(e)) => {
+                eprintln!("SSE error: {e}");
+                break;
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+fn event_summary(data: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(data) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let d = v.get("data").unwrap_or(&v);
+
+    // Build a brief summary from common fields
+    let mut parts = vec![];
+    if let Some(eid) = d.get("execution_id").and_then(|v| v.as_str()) {
+        parts.push(eid.to_string());
+    }
+    if let Some(rid) = d.get("runner_id").and_then(|v| v.as_str()) {
+        parts.push(rid.to_string());
+    }
+    if let Some(s) = d.get("step").and_then(|v| v.as_str()) {
+        parts.push(s.to_string());
+    }
+    if let Some(o) = d.get("output").and_then(|v| v.as_str()) {
+        parts.push(format!("output={o}"));
+    }
+    if let Some(n) = d.get("name").and_then(|v| v.as_str()) {
+        parts.push(n.to_string());
+    }
+    if let Some(e) = d.get("error").and_then(|v| v.as_str()) {
+        parts.push(format!("error={e}"));
+    }
+    parts.join(" ")
+}
+
+// ── Trigger ─────────────────────────────────────────────────────────
+
+async fn cmd_trigger(client: &OxClient, node_id: &str, force: bool) -> Result<()> {
+    let resp = client.trigger(node_id, force).await?;
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(())
 }

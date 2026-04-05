@@ -1098,7 +1098,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-util",
  "ox-core",
+ "reqwest",
+ "reqwest-eventsource",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

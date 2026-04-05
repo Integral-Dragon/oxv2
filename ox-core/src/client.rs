@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+// All response types derive both Serialize and Deserialize for flexibility.
 use std::collections::HashMap;
 
 use crate::types::{ExecutionId, RunnerId};
@@ -13,7 +14,7 @@ pub struct OxClient {
 
 // ── Response types ──────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub status: String,
     pub pool_size: usize,
@@ -24,17 +25,17 @@ pub struct StatusResponse {
     pub event_seq: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterResponse {
     pub runner_id: RunnerId,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateExecutionResponse {
     pub execution_id: ExecutionId,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExecutionDetail {
     pub id: String,
     pub task_id: String,
@@ -46,7 +47,7 @@ pub struct ExecutionDetail {
     pub attempts: Vec<StepAttemptDetail>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StepAttemptDetail {
     pub step: String,
     pub attempt: u32,
@@ -60,12 +61,12 @@ pub struct StepAttemptDetail {
     pub completed_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SecretEntry {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WorkflowEntry {
     pub name: String,
     pub steps: Vec<String>,
@@ -136,6 +137,10 @@ impl OxClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             http: Client::new(),
         }
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     fn url(&self, path: &str) -> String {

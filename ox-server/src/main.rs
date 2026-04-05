@@ -1,4 +1,5 @@
 mod api;
+mod artifacts;
 mod db;
 mod events;
 mod projections;
