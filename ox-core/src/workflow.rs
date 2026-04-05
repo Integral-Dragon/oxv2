@@ -238,6 +238,7 @@ pub fn transition_matches(pattern: &str, output: &str) -> bool {
 // ── Retry Tracker ───────────────────────────────────────────────────
 
 /// Tracks retry budgets per step. Resets when a different step is dispatched.
+#[derive(Debug)]
 pub struct RetryTracker {
     counts: HashMap<String, u32>,
     last_step: Option<String>,
