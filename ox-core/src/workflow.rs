@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 /// A complete workflow definition, loaded from TOML.
@@ -13,6 +14,42 @@ pub struct WorkflowDef {
     pub steps: Vec<StepDef>,
     #[serde(default, rename = "trigger")]
     pub triggers: Vec<TriggerDef>,
+}
+
+/// TOML file layout: [workflow] header + [[step]] + [[trigger]] arrays.
+#[derive(Debug, Deserialize)]
+struct WorkflowFile {
+    workflow: WorkflowHeader,
+    #[serde(default)]
+    step: Vec<StepDef>,
+    #[serde(default)]
+    trigger: Vec<TriggerDef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowHeader {
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+
+impl WorkflowDef {
+    /// Parse a workflow definition from a TOML string.
+    pub fn from_toml(toml_str: &str) -> Result<Self, toml::de::Error> {
+        let file: WorkflowFile = toml::from_str(toml_str)?;
+        Ok(Self {
+            name: file.workflow.name,
+            description: file.workflow.description,
+            steps: file.step,
+            triggers: file.trigger,
+        })
+    }
+
+    /// Load a workflow definition from a TOML file.
+    pub fn from_file(path: &Path) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        Ok(Self::from_toml(&content)?)
+    }
 }
 
 /// A single step in a workflow.
@@ -198,6 +235,61 @@ pub fn transition_matches(pattern: &str, output: &str) -> bool {
     output == pattern || output.starts_with(&format!("{pattern}:"))
 }
 
+// ── Retry Tracker ───────────────────────────────────────────────────
+
+/// Tracks retry budgets per step. Resets when a different step is dispatched.
+pub struct RetryTracker {
+    counts: HashMap<String, u32>,
+    last_step: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RetryDecision {
+    /// Retry the step with the given attempt number.
+    Retry { attempt: u32 },
+    /// Retries exhausted.
+    Exhausted,
+}
+
+const DEFAULT_MAX_RETRIES: u32 = 3;
+
+impl RetryTracker {
+    pub fn new() -> Self {
+        Self {
+            counts: HashMap::new(),
+            last_step: None,
+        }
+    }
+
+    /// Record a step failure and decide whether to retry.
+    pub fn record_failure(&mut self, step: &str, max_retries: Option<u32>) -> RetryDecision {
+        let max = max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
+
+        // Reset if we moved to a different step
+        if self.last_step.as_deref() != Some(step) {
+            self.counts.clear();
+            self.last_step = Some(step.to_string());
+        }
+
+        let count = self.counts.entry(step.to_string()).or_insert(0);
+        *count += 1;
+
+        if *count <= max {
+            RetryDecision::Retry {
+                attempt: *count + 1,
+            }
+        } else {
+            RetryDecision::Exhausted
+        }
+    }
+
+    /// Reset tracker state (e.g. when a step succeeds and we advance).
+    pub fn reset(&mut self) {
+        self.counts.clear();
+        self.last_step = None;
+    }
+}
+
 // ── Duration serde helper ───────────────────────────────────────────
 
 mod option_duration_secs {
@@ -363,6 +455,117 @@ mod tests {
     #[test]
     fn first_step() {
         let engine = make_engine();
+        assert_eq!(engine.first_step(), Some("propose"));
+    }
+
+    #[test]
+    fn retry_within_budget() {
+        let mut tracker = RetryTracker::new();
+        assert_eq!(
+            tracker.record_failure("propose", Some(2)),
+            RetryDecision::Retry { attempt: 2 }
+        );
+        assert_eq!(
+            tracker.record_failure("propose", Some(2)),
+            RetryDecision::Retry { attempt: 3 }
+        );
+        assert_eq!(
+            tracker.record_failure("propose", Some(2)),
+            RetryDecision::Exhausted
+        );
+    }
+
+    #[test]
+    fn retry_resets_on_step_change() {
+        let mut tracker = RetryTracker::new();
+        tracker.record_failure("propose", Some(1));
+        // Moving to a different step resets the count
+        assert_eq!(
+            tracker.record_failure("review", Some(1)),
+            RetryDecision::Retry { attempt: 2 }
+        );
+    }
+
+    #[test]
+    fn retry_default_budget() {
+        let mut tracker = RetryTracker::new();
+        for _ in 0..3 {
+            assert!(matches!(
+                tracker.record_failure("step", None),
+                RetryDecision::Retry { .. }
+            ));
+        }
+        assert_eq!(
+            tracker.record_failure("step", None),
+            RetryDecision::Exhausted
+        );
+    }
+
+    #[test]
+    fn parse_workflow_toml() {
+        let toml = r#"
+[workflow]
+name = "code-task"
+description = "Propose → review → implement → merge"
+
+[[step]]
+name = "propose"
+output = "diff"
+max_visits = 3
+max_visits_goto = "tiebreak"
+
+[step.workspace]
+git_clone = true
+branch = "{task_id}"
+push = true
+
+[step.runtime]
+type = "claude"
+model = "sonnet"
+persona = "inspired/engineer"
+prompt = "Write a proposal."
+
+[[step]]
+name = "review"
+output = "verdict"
+
+[[step.transition]]
+match = "pass"
+goto = "implement"
+
+[[step.transition]]
+match = "fail"
+goto = "propose"
+
+[[step]]
+name = "implement"
+
+[[step]]
+name = "merge"
+action = "merge_to_main"
+
+[[trigger]]
+on = "cx.task_ready"
+tag = "workflow:code-task"
+workflow = "code-task"
+"#;
+
+        let def = WorkflowDef::from_toml(toml).unwrap();
+        assert_eq!(def.name, "code-task");
+        assert_eq!(def.steps.len(), 4);
+        assert_eq!(def.steps[0].name, "propose");
+        assert_eq!(def.steps[0].max_visits, Some(3));
+        assert!(def.steps[0].runtime.is_some());
+        let rt = def.steps[0].runtime.as_ref().unwrap();
+        assert_eq!(rt.runtime_type, "claude");
+        assert_eq!(def.steps[1].transitions.len(), 2);
+        assert_eq!(def.steps[1].transitions[0].match_pattern, "pass");
+        assert_eq!(def.steps[3].action.as_deref(), Some("merge_to_main"));
+        assert_eq!(def.triggers.len(), 1);
+        assert_eq!(def.triggers[0].on, "cx.task_ready");
+
+        // Verify it can be used as engine
+        let engine = WorkflowEngine::from_def(def);
         assert_eq!(engine.first_step(), Some("propose"));
     }
 }

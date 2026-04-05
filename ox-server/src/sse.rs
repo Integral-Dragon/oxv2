@@ -20,16 +20,15 @@ struct SseQuery {
 }
 
 async fn sse_handler(
-    State(bus): State<AppState>,
+    State(state): State<AppState>,
     Query(query): Query<SseQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let after_seq = query.last_event_id.unwrap_or(0);
-    let mut rx = bus.subscribe();
+    let mut rx = state.bus.subscribe();
 
-    // Replay historical events, then stream live
     let stream = async_stream::stream! {
         // Replay events after the given seq
-        if let Ok(replayed) = bus.replay_after(after_seq) {
+        if let Ok(replayed) = state.bus.replay_after(after_seq) {
             for envelope in replayed {
                 let data = serde_json::to_string(&envelope).unwrap_or_default();
                 let event_type = serde_json::to_value(&envelope.event_type)
@@ -61,8 +60,6 @@ async fn sse_handler(
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(n, "SSE subscriber lagged, events dropped");
-                    // Continue receiving — subscriber missed some events
-                    // They can reconnect with Last-Event-ID to catch up
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     break;

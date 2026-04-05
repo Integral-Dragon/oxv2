@@ -3,6 +3,7 @@ mod db;
 mod events;
 mod projections;
 mod sse;
+mod state;
 
 use anyhow::Result;
 use axum::Router;
@@ -22,9 +23,13 @@ struct Args {
     /// Path to SQLite database.
     #[arg(long, default_value = "ox.db")]
     db: String,
+
+    /// Path to the managed repository.
+    #[arg(long, default_value = ".")]
+    repo: String,
 }
 
-pub type AppState = Arc<events::EventBus>;
+pub type AppState = Arc<state::ServerState>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,19 +40,22 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let conn = Connection::open(&args.db)?;
-    let bus = Arc::new(events::EventBus::new(conn)?);
+    let server_state = state::ServerState::new(conn, &args.repo)?;
 
     tracing::info!(
-        seq = bus.current_seq(),
-        pool = bus.projections.pool().runners.len(),
-        "projections rebuilt from event log"
+        seq = server_state.bus.current_seq(),
+        pool = server_state.bus.projections.pool().runners.len(),
+        workflows = server_state.workflows.len(),
+        "ox-server started"
     );
+
+    let state = Arc::new(server_state);
 
     let app = Router::new()
         .merge(api::router())
         .merge(sse::router())
         .layer(TraceLayer::new_for_http())
-        .with_state(bus.clone());
+        .with_state(state);
 
     let addr = format!("0.0.0.0:{}", args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
