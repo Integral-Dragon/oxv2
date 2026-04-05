@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# ox-rt — runtime interface helper
+# Usage: ox-rt done pass
+#        ox-rt done pass:7
+#        ox-rt metric input_tokens 14523
+#        echo "content" | ox-rt artifact proposal
+#        ox-rt artifact-done proposal
+
+set -euo pipefail
+
+if [ -z "${OX_SOCKET:-}" ]; then
+  echo "error: OX_SOCKET not set" >&2
+  exit 1
+fi
+
+if [ $# -lt 1 ]; then
+  echo "usage: ox-rt <command> [args...]" >&2
+  echo "commands: done, metric, artifact, artifact-done" >&2
+  exit 1
+fi
+
+cmd="$1"; shift
+
+send() {
+  local msg="$1"
+  local resp
+  resp=$(echo "$msg" | socat - UNIX-CONNECT:"$OX_SOCKET" 2>/dev/null) || {
+    echo "error: failed to connect to $OX_SOCKET" >&2
+    exit 1
+  }
+  if [[ "$resp" == error:* ]]; then
+    echo "$resp" >&2
+    exit 1
+  fi
+}
+
+case "$cmd" in
+  done)
+    send "done $*"
+    ;;
+  metric)
+    send "metric $*"
+    ;;
+  artifact)
+    name="$1"; shift
+    if [ $# -gt 0 ]; then
+      data=$(echo -n "$*" | base64 -w0)
+    else
+      data=$(base64 -w0)
+    fi
+    send "artifact $name $data"
+    ;;
+  artifact-done)
+    send "artifact-done $1"
+    ;;
+  *)
+    echo "error: unknown command: $cmd" >&2
+    exit 1
+    ;;
+esac
