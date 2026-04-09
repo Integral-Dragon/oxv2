@@ -511,7 +511,6 @@ impl Runner {
             self.client.step_fail(exec_id, step, attempt, &error).await?;
         } else {
             // 12. Confirm step
-            // The agent is responsible for git push — the runner does not push.
             let proxy_metrics = proxy::collect_proxy_metrics(&proxy_handles);
 
             let metrics = serde_json::json!({
