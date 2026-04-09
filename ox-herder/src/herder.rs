@@ -584,19 +584,34 @@ impl Herder {
                     }
                 }
 
-                // Dedup check: is there already a running execution for this (task_id, workflow)?
-                let already_running = self.executions.values().any(|e| {
+                // Dedup: skip if there's already a running or completed execution
+                let dominated = self.executions.values().any(|e| {
                     e.task_id == node_id
                         && e.workflow == trigger.workflow
-                        && e.status == "running"
+                        && (e.status == "running"
+                            || e.status == "completed"
+                            || e.status == "escalated")
                 });
-                if already_running {
+                if dominated {
                     tracing::debug!(
                         node = %node_id,
                         workflow = %trigger.workflow,
-                        "trigger suppressed: active execution exists"
+                        "trigger suppressed: execution already exists"
                     );
                     continue;
+                }
+
+                // Check current cx state: don't trigger for integrated or shadowed nodes
+                let cx_state = get_cx_node_state(&self.server_url, node_id).await;
+                if let Some(ref state) = cx_state {
+                    if state == "integrated" || state == "shadowed" {
+                        tracing::debug!(
+                            node = %node_id,
+                            state = %state,
+                            "trigger suppressed: node is {state}"
+                        );
+                        continue;
+                    }
                 }
 
                 tracing::info!(
@@ -725,4 +740,21 @@ impl Herder {
         // TODO: heartbeat liveness checks (Phase 3 tick — check last_seen timestamps
         // from /api/state/pool and re-dispatch steps from stale runners)
     }
+}
+
+/// Check the current state of a cx node by calling `cx show --json`.
+/// Returns None if the node can't be found or the command fails.
+async fn get_cx_node_state(server_url: &str, node_id: &str) -> Option<String> {
+    // Use the cx state projection from ox-server
+    let url = format!("{server_url}/api/state/cx");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .ok()?;
+    let cx_state: serde_json::Value = resp.json().await.ok()?;
+    // Look for the node in the projection
+    let nodes = cx_state.get("nodes")?.as_object()?;
+    let node = nodes.get(node_id)?;
+    node.get("state").and_then(|s| s.as_str()).map(String::from)
 }
