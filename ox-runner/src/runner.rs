@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
+use crate::proxy;
 use crate::socket::{self, RuntimeCommand};
 
 pub struct Runner {
@@ -83,6 +84,9 @@ impl Runner {
 
         tracing::info!("subscribed to SSE, waiting for step assignments");
 
+        let mut backoff_secs: u64 = 1;
+        const MAX_BACKOFF: u64 = 30;
+
         loop {
             match es.next().await {
                 Some(Ok(SseEvent::Message(msg))) => {
@@ -99,15 +103,17 @@ impl Runner {
                         }
                     }
                 }
-                Some(Ok(SseEvent::Open)) => {}
+                Some(Ok(SseEvent::Open)) => {
+                    backoff_secs = 1;
+                }
                 Some(Err(reqwest_eventsource::Error::StreamEnded)) => {
                     tracing::warn!("SSE stream ended, reconnecting...");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                     es = EventSource::get(&url);
                 }
                 Some(Err(e)) => {
-                    tracing::warn!(err = %e, "SSE error, reconnecting...");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tracing::warn!(err = %e, backoff = backoff_secs, "SSE error, reconnecting...");
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
                     es = EventSource::get(&url);
                 }
                 None => break,
@@ -164,21 +170,96 @@ impl Runner {
         let attempt = assignment.attempt;
         let start = Instant::now();
 
-        // 1. Provision workspace
         let work_dir = self.workspace_dir.join("current");
         let tmp_dir = self.workspace_dir.join("tmp");
-        std::fs::create_dir_all(&work_dir)?;
+
+        // Clean any leftover workspace from a previous step
+        let _ = std::fs::remove_dir_all(&work_dir);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
         std::fs::create_dir_all(&tmp_dir)?;
 
+        // 1. Provision workspace via git clone from ox-server
+        let clone_head = if assignment.workspace.git_clone {
+            let git_url = format!("{}/git/", self.server_url);
+            let branch = assignment
+                .workspace
+                .branch
+                .as_deref()
+                .unwrap_or("main");
+
+            tracing::info!(url = %git_url, branch = %branch, "cloning workspace from ox-server");
+
+            let clone_status = std::process::Command::new("git")
+                .args(["clone", &git_url, "--branch", branch, "--single-branch"])
+                .arg(&work_dir)
+                .status();
+
+            match clone_status {
+                Ok(s) if s.success() => {
+                    tracing::info!(branch = %branch, "workspace cloned");
+                }
+                Ok(s) => {
+                    // Branch might not exist yet — clone main and create it
+                    tracing::debug!(code = ?s.code(), "branch clone failed, trying main + checkout -b");
+
+                    let clone2 = std::process::Command::new("git")
+                        .args(["clone", &git_url])
+                        .arg(&work_dir)
+                        .status();
+
+                    match clone2 {
+                        Ok(s2) if s2.success() => {
+                            // Create the branch
+                            let checkout = std::process::Command::new("git")
+                                .args(["checkout", "-b", branch])
+                                .current_dir(&work_dir)
+                                .status();
+                            if let Err(e) = checkout {
+                                tracing::warn!(err = %e, "failed to create branch {branch}");
+                            }
+                        }
+                        _ => {
+                            let err = "git clone from ox-server failed";
+                            tracing::error!(err);
+                            self.client
+                                .step_fail(exec_id, step, attempt, err)
+                                .await?;
+                            cleanup(&work_dir, &tmp_dir);
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e) => {
+                    let err = format!("git clone failed: {e}");
+                    tracing::error!(err = %err);
+                    self.client
+                        .step_fail(exec_id, step, attempt, &err)
+                        .await?;
+                    cleanup(&work_dir, &tmp_dir);
+                    return Ok(());
+                }
+            }
+
+            // Record HEAD before runtime runs (for no_commits detection)
+            git_head(&work_dir)
+        } else {
+            // No git clone — just create an empty workspace
+            std::fs::create_dir_all(&work_dir)?;
+            None
+        };
+
         // 2. Place files from resolved spec
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let work_dir_str = work_dir.to_string_lossy().to_string();
+        let tmp_dir_str = tmp_dir.to_string_lossy().to_string();
+
         if let Some(ref resolved) = assignment.resolved {
             for file in &resolved.files {
-                let target = work_dir.join(&file.to);
+                let target = resolve_file_path(&file.to, &work_dir_str, &tmp_dir_str, &home);
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&target, &file.content)?;
-                // Set file mode if specified
                 #[cfg(unix)]
                 if file.mode != "0644" {
                     use std::os::unix::fs::PermissionsExt;
@@ -186,7 +267,7 @@ impl Runner {
                         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))?;
                     }
                 }
-                tracing::debug!(file = %file.to, "placed file");
+                tracing::debug!(file = %target.display(), "placed file");
             }
         }
 
@@ -201,16 +282,54 @@ impl Runner {
         let (mut cmd_rx, socket_handle) = socket::start_socket_server(&socket_path)?;
         tracing::debug!(socket = %socket_path.display(), "socket server started");
 
-        // 4. Build command and env
-        let (cmd_args, env_vars) = if let Some(ref resolved) = assignment.resolved {
+        // 4. Start API proxies
+        let mut proxy_handles = vec![];
+        let mut proxy_env_overrides = HashMap::new();
+        if let Some(ref resolved) = assignment.resolved {
+            for proxy_def in &resolved.proxy {
+                match proxy::start_proxy(
+                    proxy_def.target.clone(),
+                    proxy_def.provider.clone(),
+                )
+                .await
+                {
+                    Ok(handle) => {
+                        let proxy_url = format!("http://{}", handle.local_addr);
+                        tracing::info!(
+                            env = %proxy_def.env,
+                            proxy_url = %proxy_url,
+                            provider = %proxy_def.provider,
+                            "started API proxy"
+                        );
+                        proxy_env_overrides.insert(proxy_def.env.clone(), proxy_url);
+                        proxy_handles.push(handle);
+                    }
+                    Err(e) => {
+                        tracing::warn!(err = %e, "failed to start API proxy");
+                    }
+                }
+            }
+        }
+
+        // 5. Build command and env
+        let (cmd_args, mut env_vars) = if let Some(ref resolved) = assignment.resolved {
             (resolved.command.clone(), resolved.env.clone())
         } else {
-            // Fallback: just run a shell that waits
             (vec!["sh".into(), "-c".into(), "echo 'no resolved spec'; exit 1".into()], HashMap::new())
         };
 
+        // Apply proxy env overrides
+        for (k, v) in proxy_env_overrides {
+            env_vars.insert(k, v);
+        }
+
+        // Resolve runner-local placeholders in command args
+        let cmd_args: Vec<String> = cmd_args
+            .iter()
+            .map(|a| resolve_placeholders(a, &work_dir_str, &tmp_dir_str, &home))
+            .collect();
+
         if cmd_args.is_empty() {
-            // No command — report failure
             self.client
                 .step_fail(exec_id, step, attempt, "no command in resolved spec")
                 .await?;
@@ -218,7 +337,7 @@ impl Runner {
             return Ok(());
         }
 
-        // 5. Spawn the runtime process
+        // 6. Spawn the runtime process
         let mut cmd = Command::new(&cmd_args[0]);
         cmd.args(&cmd_args[1..])
             .current_dir(&work_dir)
@@ -230,8 +349,15 @@ impl Runner {
 
         tracing::info!(cmd = ?cmd_args, "spawning runtime process");
 
-        let mut child = match cmd.stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+        // Set up log file for stdout/stderr capture
+        let log_file_path = tmp_dir.join("step.log");
+        let log_file = std::fs::File::create(&log_file_path)?;
+        let log_file_err = log_file.try_clone()?;
+
+        let mut child = match cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_file_err))
             .spawn()
         {
             Ok(c) => c,
@@ -245,11 +371,36 @@ impl Runner {
             }
         };
 
-        // 6. Wait for runtime: process socket commands until process exits
+        // Spawn log pusher — tails the log file and ships chunks to ox-server
+        let log_pos = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let log_pusher_client = OxClient::new(&self.server_url);
+        let log_exec_id = exec_id.to_string();
+        let log_step = step.to_string();
+        let log_path = log_file_path.clone();
+        let log_pos_clone = log_pos.clone();
+        let log_pusher = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let pos = log_pos_clone.load(std::sync::atomic::Ordering::Relaxed);
+                let new_pos = flush_log_chunk(
+                    &log_pusher_client,
+                    &log_exec_id,
+                    &log_step,
+                    attempt,
+                    &log_path,
+                    pos,
+                )
+                .await;
+                log_pos_clone.store(new_pos, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+
+        // 7. Wait for runtime: process socket commands until process exits
         let mut got_done = false;
         let mut output = String::new();
 
-        // Spawn a task to drain socket commands
         let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<String>();
         let socket_task = tokio::spawn(async move {
             let mut done_tx = Some(done_tx);
@@ -273,11 +424,14 @@ impl Runner {
             }
         });
 
-        // Wait for process to exit
         let status = child.wait().await?;
         tracing::info!(exit_code = status.code(), "runtime process exited");
 
-        // Check if done was received
+        // Final log flush — send anything written since the last periodic push
+        log_pusher.abort();
+        let final_pos = log_pos.load(std::sync::atomic::Ordering::Relaxed);
+        flush_log_chunk(&self.client, exec_id, step, attempt, &log_file_path, final_pos).await;
+
         if let Ok(o) = done_rx.try_recv() {
             got_done = true;
             output = o;
@@ -286,9 +440,18 @@ impl Runner {
 
         socket_task.abort();
 
-        // 7. Collect signals
+        // 8. Collect signals
         let duration = start.elapsed();
         let mut signals = vec![];
+
+        // If the process exited 0 but never called ox-rt done, treat as implicit done.
+        // Output is empty — the workflow engine will fall through to the next step
+        // by declaration order, or the step's transitions can match on "".
+        if !got_done && status.success() {
+            tracing::info!("runtime exited 0 without calling ox-rt done, inferring done");
+            got_done = true;
+            output = String::new();
+        }
 
         if !got_done {
             signals.push("exited_silent".to_string());
@@ -298,22 +461,29 @@ impl Runner {
         }
 
         // Check for no_commits if push was expected
-        // (simplified — in real impl we'd check git log)
         if assignment.workspace.push {
-            // TODO: check if HEAD advanced
+            let post_head = git_head(&work_dir);
+            if clone_head.is_some() && clone_head == post_head {
+                signals.push("no_commits".to_string());
+            }
         }
 
-        // 8. Report done (if runtime called done)
+        // Check for dirty workspace
+        if assignment.workspace.git_clone && is_workspace_dirty(&work_dir) {
+            signals.push("dirty_workspace".to_string());
+        }
+
+        // 9. Report done (if runtime called done)
         if got_done {
             self.client.step_done(exec_id, step, attempt, &output).await?;
         }
 
-        // 9. Report signals
+        // 10. Report signals
         self.client
             .step_signals(exec_id, step, attempt, signals.clone())
             .await?;
 
-        // 10. Check signal failure rules
+        // 11. Check signal failure rules
         let has_failure_signal = signals.iter().any(|s| {
             s == "exited_silent" || s == "no_commits" || s == "dirty_workspace"
         });
@@ -327,11 +497,66 @@ impl Runner {
             tracing::warn!(exec = %exec_id, step = %step, error = %error, "step failed due to signal");
             self.client.step_fail(exec_id, step, attempt, &error).await?;
         } else {
-            // 11. Confirm step
+            // 12. Push branch to ox-server (if workspace.push is set)
+            if assignment.workspace.push && assignment.workspace.git_clone {
+                let branch = assignment
+                    .workspace
+                    .branch
+                    .as_deref()
+                    .unwrap_or("main");
+
+                tracing::info!(branch = %branch, "pushing branch to ox-server");
+
+                let push_result = std::process::Command::new("git")
+                    .args(["push", "origin", branch])
+                    .current_dir(&work_dir)
+                    .status();
+
+                match push_result {
+                    Ok(s) if s.success() => {
+                        tracing::info!(branch = %branch, "branch pushed successfully");
+                    }
+                    Ok(s) => {
+                        let err = format!("git push failed with exit code {:?}", s.code());
+                        tracing::error!(err = %err);
+                        self.client
+                            .step_fail(exec_id, step, attempt, &format!("runner:push_failed: {err}"))
+                            .await?;
+
+                        // Cleanup and return — don't confirm
+                        for handle in proxy_handles {
+                            handle.task.abort();
+                        }
+                        socket_handle.abort();
+                        cleanup(&work_dir, &tmp_dir);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let err = format!("git push failed: {e}");
+                        tracing::error!(err = %err);
+                        self.client
+                            .step_fail(exec_id, step, attempt, &format!("runner:push_failed: {err}"))
+                            .await?;
+
+                        for handle in proxy_handles {
+                            handle.task.abort();
+                        }
+                        socket_handle.abort();
+                        cleanup(&work_dir, &tmp_dir);
+                        return Ok(());
+                    }
+                }
+            }
+
+            // 13. Confirm step
+            let proxy_metrics = proxy::collect_proxy_metrics(&proxy_handles);
+
             let metrics = serde_json::json!({
                 "runner": {
                     "duration_ms": duration.as_millis() as u64,
-                }
+                    "exit_code": status.code(),
+                },
+                "proxy": proxy_metrics,
             });
             self.client
                 .step_confirm(exec_id, step, attempt, Some(metrics))
@@ -339,7 +564,10 @@ impl Runner {
             tracing::info!(exec = %exec_id, step = %step, "step confirmed");
         }
 
-        // 12. Cleanup
+        // 14. Cleanup: stop proxies, socket, and workspace
+        for handle in proxy_handles {
+            handle.task.abort();
+        }
         socket_handle.abort();
         cleanup(&work_dir, &tmp_dir);
 
@@ -347,7 +575,80 @@ impl Runner {
     }
 }
 
+/// Get the current HEAD commit hash in a workspace.
+fn git_head(work_dir: &Path) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(work_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Check if the workspace has uncommitted changes.
+fn is_workspace_dirty(work_dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(work_dir)
+        .output()
+        .ok()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 fn cleanup(work_dir: &Path, tmp_dir: &Path) {
     let _ = std::fs::remove_dir_all(work_dir);
     let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+/// Resolve {workspace}, {tmp_dir}, {home} placeholders in a string.
+fn resolve_placeholders(s: &str, work_dir: &str, tmp_dir: &str, home: &str) -> String {
+    s.replace("{workspace}", work_dir)
+        .replace("{tmp_dir}", tmp_dir)
+        .replace("{home}", home)
+}
+
+/// Resolve a file destination path. Bare names (no placeholders) go to tmp_dir.
+fn resolve_file_path(to: &str, work_dir: &str, tmp_dir: &str, home: &str) -> PathBuf {
+    let resolved = resolve_placeholders(to, work_dir, tmp_dir, home);
+    let path = Path::new(&resolved);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        // Bare relative paths go in tmp_dir
+        PathBuf::from(tmp_dir).join(&resolved)
+    }
+}
+
+/// Read new data from a log file starting at `pos` and push it to ox-server.
+/// Returns the new position.
+async fn flush_log_chunk(
+    client: &OxClient,
+    execution_id: &str,
+    step: &str,
+    attempt: u32,
+    log_path: &Path,
+    pos: u64,
+) -> u64 {
+    let contents = match std::fs::read(log_path) {
+        Ok(c) => c,
+        Err(_) => return pos,
+    };
+
+    let file_len = contents.len() as u64;
+    // Handle truncation
+    let pos = if file_len < pos { 0 } else { pos };
+
+    if file_len <= pos {
+        return pos;
+    }
+
+    let new_data = &contents[pos as usize..];
+    let chunk = String::from_utf8_lossy(new_data);
+
+    match client.push_log_chunk(execution_id, step, attempt, &chunk).await {
+        Ok(()) => file_len,
+        Err(_) => pos, // retry next tick
+    }
 }

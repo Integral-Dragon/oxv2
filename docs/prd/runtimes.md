@@ -30,50 +30,38 @@ persona = { type = "file",   required = false }
 prompt  = { type = "string", required = false, default = "" }
 
 [runtime.command]
-cmd = ["claude", "-p", "{prompt}"]
+cmd = [
+    "claude",
+    "-p", "{prompt_file}",
+    "--dangerously-skip-permissions",
+    "--verbose",
+    "--output-format", "stream-json",
+]
 interactive_cmd = ["claude"]
 
 [[runtime.command.optional]]
 when = "model"
 args = ["--model", "{model}"]
 
+# Inject OAuth credentials from secrets
 [[runtime.files]]
-from = "{persona}"
-to   = "{workspace}/CLAUDE.md"
-
-[runtime.env]
-CLAUDE_MODEL = "{model}"
-
-[[runtime.proxy]]
-env      = "ANTHROPIC_BASE_URL"
-provider = "anthropic"
-target   = "https://api.anthropic.com"
-
-[[runtime.metrics]]
-name   = "input_tokens"
-type   = "counter"
-source = "proxy"
-
-[[runtime.metrics]]
-name   = "output_tokens"
-type   = "counter"
-source = "proxy"
-
-[[runtime.metrics]]
-name   = "api_calls"
-type   = "counter"
-source = "proxy"
-
-[[runtime.metrics]]
-name   = "response_latency_ms"
-type   = "histogram"
-source = "proxy"
-
-[[runtime.metrics]]
-name   = "model"
-type   = "label"
-source = "proxy"
+content = "{secret:claude_credentials}"
+to      = "{home}/.claude/.credentials.json"
 ```
+
+Claude Code manages its own authentication via OAuth credentials
+stored in `~/.claude/.credentials.json`. The credentials JSON is
+injected as a secret — no API key environment variable or proxy
+needed:
+
+```bash
+ox-ctl secrets set claude_credentials --value "$(cat ~/.claude/.credentials.json)"
+```
+
+The `persona` field (type `file`) is loaded from the search path
+under `personas/` and prepended to the prompt content. The combined
+persona + prompt is written to a single prompt file passed via `-p`.
+See [Prompt Assembly](#prompt-assembly) below.
 
 ```toml
 # .ox/runtimes/codex.toml
@@ -144,12 +132,15 @@ command templates, file mappings, and environment variables.
 
 ### Built-in Variables
 
-These are always available, provided by ox-runner:
+These are always available, resolved by ox-runner at execution time:
 
 | Variable | Value |
 |----------|-------|
-| `{workspace}` | Path to the provisioned workspace |
-| `{prompt_file}` | Path to a temp file containing the rendered prompt |
+| `{workspace}` | Absolute path to the provisioned workspace (work_dir) |
+| `{tmp_dir}` | Absolute path to the runner's temp directory (outside git) |
+| `{home}` | Runner process HOME directory |
+| `{prompt_file}` | Absolute path to the assembled prompt file (in tmp_dir) |
+| `{task_id}` | The cx node ID for this execution |
 
 ### Secret References
 
@@ -234,36 +225,43 @@ args = ["--verbose"]
 
 ### Files
 
-**`runtime.files`** — file placement rules. Each entry copies a file
-into the workspace before the runtime starts.
+**`runtime.files`** — file placement rules. Each entry writes a file
+before the runtime starts. The `to` path uses placeholders that the
+runner resolves:
+
+| Placeholder | Resolves to |
+|-------------|-------------|
+| `{workspace}` | The step workspace (git work_dir) |
+| `{tmp_dir}` | Runner's temp directory (outside git, cleaned after step) |
+| `{home}` | Runner's HOME directory |
+
+Bare relative paths (no placeholder prefix) are placed in `{tmp_dir}`.
+
+A file entry has either `from` (copy from search path) or `content`
+(inline content with interpolation), not both. `mode` is an optional
+POSIX permission string (default: `"0644"`).
 
 ```toml
+# Copy a file from the search path into the workspace
 [[runtime.files]]
 from = "{persona}"
 to   = "{workspace}/CLAUDE.md"
-```
 
-`from` is resolved via the configuration search path for `file` type fields.
-`to` is typically relative to `{workspace}`. Both support interpolation.
-If `from` references an absent optional field, the mapping is skipped.
+# Write secret content to the runner's home directory
+[[runtime.files]]
+content = "{secret:claude_credentials}"
+to      = "{home}/.claude/.credentials.json"
 
-Alternatively, `content` provides inline content instead of copying
-from a file. This is used with secrets to write credential files:
-
-```toml
+# Write a secret key with restricted permissions
 [[runtime.files]]
 content = "{secret:ssh_private_key}"
-to      = "{workspace}/.ssh/id_ed25519"
+to      = "{home}/.ssh/id_ed25519"
 mode    = "0600"
 ```
 
-A file entry has either `from` or `content`, not both. `mode` is an
-optional POSIX permission string (default: `"0644"`).
-
-This is how persona loading works — it is not special-cased by
-ox-runner. A runtime that needs a persona file placed in the workspace
-declares a `file` field and a file mapping. A runtime that doesn't use
-personas simply doesn't declare one.
+`from` is resolved via the configuration search path for `file` type
+fields. If it references an absent optional field, the mapping is
+skipped. `content` supports `{secret:NAME}` interpolation.
 
 ### Environment
 
@@ -355,6 +353,33 @@ description metadata.
 
 ---
 
+## Prompt Assembly
+
+When a runtime declares a `prompt` field (type `string`) and a `persona`
+field (type `file`), ox-server assembles them into a single prompt file:
+
+1. Load the persona file from the search path under `personas/`
+2. Load the step's `prompt` value
+3. Concatenate: persona content + `---` separator + prompt
+4. Write to `{tmp_dir}/ox-prompt`
+5. Set `{prompt_file}` to the absolute path
+
+The prompt file lives in the runner's temp directory, not the workspace,
+so it does not dirty the git working tree.
+
+If only a prompt is provided (no persona), the prompt file contains
+just the prompt text. If only a persona is provided (no prompt), the
+file contains just the persona content.
+
+The command template references the assembled file via `{prompt_file}`:
+
+```toml
+[runtime.command]
+cmd = ["claude", "-p", "{prompt_file}"]
+```
+
+---
+
 ## Step Runtime Fields
 
 The step's `[step.runtime]` block passes parameters to the runtime
@@ -442,22 +467,47 @@ configuration search path.
 
 ox-runner receives a fully-resolved step spec and executes it:
 
-1. Places files from the spec (persona content, secret-derived files)
+1. Places files from the spec, resolving `{workspace}`, `{tmp_dir}`,
+   `{home}` placeholders to actual paths
 2. Starts API proxies declared in the spec
-3. Sets environment variables (runtime env, secret env, proxy overrides)
-4. Spawns the process from the resolved command
-5. Attaches stdout/stderr to the `log` artifact
-6. On exit: reads proxy metrics, computes derived metrics, stops proxies
+3. Resolves placeholders in command args (e.g. `{tmp_dir}/ox-prompt`)
+4. Sets environment variables (runtime env, secret env, proxy overrides)
+5. Spawns the process with stdin null, stdout/stderr to a log file
+6. Ships log chunks to ox-server every 5 seconds via
+   `POST /api/executions/{id}/steps/{step}/log/chunk`
+7. On exit: final log flush, reads proxy metrics, stops proxies
 
-The runtime communicates with ox-runner through the runtime interface —
-it reports completion (`done` with an output value), writes artifact
-content, and reports metrics. If the runtime exits without calling
-`done`, the runner detects `exited_silent` and fails the step.
+### Completion signaling
 
-If `tty = true`, ox-runner allocates a PTY and uses the interactive
-command. The runtime interface works identically inside interactive
-sessions. Signals, artifacts, and two-phase confirmation are the same
-regardless of whether a TTY is present.
+The runtime communicates with ox-runner through the runtime interface
+(ox-rt / unix socket). It reports completion with `ox-rt done <output>`,
+where the output value is used for transition matching (e.g. `pass`,
+`fail`, `pass:7`).
+
+If the runtime exits with code 0 without calling `ox-rt done`, the
+runner infers `done ""` (empty output). The workflow engine will
+advance to the next step by declaration order since no transition
+pattern matches the empty string. This allows runtimes that don't
+know about ox-rt to still complete successfully.
+
+If the runtime exits with a non-zero code without calling `ox-rt done`,
+the `exited_silent` signal fires and the step fails.
+
+### Log viewing
+
+Step logs are stored on the server and viewable via:
+
+```bash
+ox-ctl exec logs <execution-id> <step>           # full log
+ox-ctl exec logs <execution-id> <step> -n 50     # last 50 lines
+ox-ctl exec logs <execution-id> <step> -f         # follow (like tail -f)
+ox-ctl exec logs <execution-id> <step> --attempt 2  # specific attempt
+```
+
+### TTY mode
+
+If `tty = true`, ox-runner uses the interactive command. The runtime
+interface works identically inside interactive sessions.
 
 ox-runner has no concept of "human step" vs "agent step" — only whether
 a TTY is needed. The distinction is purely in the runtime definition.

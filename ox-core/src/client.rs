@@ -91,6 +91,7 @@ struct CreateExecutionRequest {
 struct DispatchRequest {
     runner_id: RunnerId,
     attempt: u32,
+    task_id: String,
     runtime: serde_json::Value,
     workspace: serde_json::Value,
 }
@@ -252,6 +253,30 @@ impl OxClient {
         Ok(())
     }
 
+    pub async fn complete_execution(&self, id: &str) -> Result<()> {
+        self.http
+            .post(self.url(&format!("/api/executions/{id}/complete")))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn escalate_execution(
+        &self,
+        id: &str,
+        step: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.http
+            .post(self.url(&format!("/api/executions/{id}/escalate")))
+            .json(&serde_json::json!({ "step": step, "reason": reason }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     // ── Steps ───────────────────────────────────────────────────────
 
     pub async fn dispatch_step(
@@ -260,6 +285,7 @@ impl OxClient {
         step: &str,
         runner_id: &RunnerId,
         attempt: u32,
+        task_id: &str,
         runtime: serde_json::Value,
         workspace: serde_json::Value,
     ) -> Result<()> {
@@ -270,9 +296,31 @@ impl OxClient {
             .json(&DispatchRequest {
                 runner_id: runner_id.clone(),
                 attempt,
+                task_id: task_id.to_string(),
                 runtime,
                 workspace,
             })
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn push_log_chunk(
+        &self,
+        execution_id: &str,
+        step: &str,
+        attempt: u32,
+        data: &str,
+    ) -> Result<()> {
+        self.http
+            .post(self.url(&format!(
+                "/api/executions/{execution_id}/steps/{step}/log/chunk"
+            )))
+            .json(&serde_json::json!({
+                "attempt": attempt,
+                "data": data,
+            }))
             .send()
             .await?
             .error_for_status()?;
@@ -434,5 +482,26 @@ impl OxClient {
             .json()
             .await
             .context("parsing trigger response")
+    }
+
+    // ── Merge ──────────────────────────────────────────────────────
+
+    pub async fn merge_to_main(
+        &self,
+        execution_id: &str,
+        step: &str,
+        branch: &str,
+    ) -> Result<serde_json::Value> {
+        self.http
+            .post(self.url(&format!(
+                "/api/executions/{execution_id}/steps/{step}/merge"
+            )))
+            .json(&serde_json::json!({ "branch": branch }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("parsing merge response")
     }
 }

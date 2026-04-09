@@ -3,6 +3,11 @@
 # One-shot mode (default): runs claude -p with the assembled prompt file.
 # Interactive mode (tty = true): runs claude in interactive session.
 #
+# Claude Code authenticates via ~/.claude/.credentials.json (OAuth).
+# The credentials JSON is injected via the `claude_credentials` secret.
+#
+#   ox-ctl secrets set claude_credentials --value "$(cat ~/.claude/.credentials.json)"
+#
 # The step spec selects the mode:
 #   [step.runtime]
 #   type = "claude"
@@ -24,46 +29,21 @@ persona = { type = "file",   required = false }
 prompt  = { type = "string", required = false, default = "" }
 
 [runtime.command]
-cmd = ["claude", "-p", "{prompt_file}", "--output-format", "text"]
+cmd = [
+    "claude",
+    "-p", "{prompt_file}",
+    "--dangerously-skip-permissions",
+    "--verbose",
+    "--output-format", "stream-json",
+]
 interactive_cmd = ["claude"]
 
 [[runtime.command.optional]]
 when = "model"
 args = ["--model", "{model}"]
 
+# Inject OAuth credentials from secrets into the runner's home directory.
+# The runner resolves {home} to the process HOME before placing files.
 [[runtime.files]]
-from = "{persona}"
-to   = "{workspace}/CLAUDE.md"
-
-[runtime.env]
-ANTHROPIC_API_KEY = "{secret:anthropic_api_key}"
-
-[[runtime.proxy]]
-env      = "ANTHROPIC_BASE_URL"
-provider = "anthropic"
-target   = "https://api.anthropic.com"
-
-[[runtime.metrics]]
-name   = "input_tokens"
-type   = "counter"
-source = "proxy"
-
-[[runtime.metrics]]
-name   = "output_tokens"
-type   = "counter"
-source = "proxy"
-
-[[runtime.metrics]]
-name   = "api_calls"
-type   = "counter"
-source = "proxy"
-
-[[runtime.metrics]]
-name   = "response_latency_ms"
-type   = "histogram"
-source = "proxy"
-
-[[runtime.metrics]]
-name   = "model"
-type   = "label"
-source = "proxy"
+content = "{secret:claude_credentials}"
+to      = "{home}/.claude/.credentials.json"

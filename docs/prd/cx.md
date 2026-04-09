@@ -44,41 +44,56 @@ to main's `.complex/`.
 
 ---
 
-## git log as Event Source
+## cx log as Event Source
 
-cx has its own event log (`events/`). It is not used by ox.
-
-Instead, ox-server derives cx events from the git log. Every cx mutation
-is a commit that touches `.complex/`. When a branch merges to main,
-ox-server diffs `.complex/` against the previous HEAD and emits cx events
-based on what changed.
+ox-server derives cx events by running `cx log --json`, which returns
+structured change entries from the git history of `.complex/`. This is
+used both for background polling and for post-merge event derivation.
 
 This approach:
 
-- **Eliminates merge conflicts** — cx's `events/` files are append-only
-  logs that conflict when multiple branches merge. git's object model
-  handles JSON node files cleanly as long as different branches touch
-  different nodes.
-- **Removes redundancy** — git already records the full mutation history.
-  A separate event log is a duplicate that can diverge.
-- **Ties cx state to code state** — a cx mutation and its associated code
-  change land on main atomically in the same merge commit.
+- **Eliminates merge conflicts** — no separate event log files that
+  conflict when multiple branches merge.
+- **Uses cx's own diffing** — `cx log` understands node JSON, comment
+  files, and body files natively. ox-server doesn't parse `.complex/`
+  internals.
+- **Catches direct cx mutations** — a user running `cx surface` on the
+  repo is detected by the poll loop, not only changes arriving via merge.
 
-### How ox-server processes cx changes
+### Background poll loop
 
-On every merge to main, ox-server runs:
+ox-server runs a poll loop every 10 seconds:
 
-```
-git diff <previous_main> <new_main> -- .complex/nodes/
-```
+1. Read the cx cursor (last-seen commit SHA) from the `kv` table
+2. Run `cx log --json --since <cursor>` in the repo directory
+3. Map changes to ox events (state transitions, new comments)
+4. Append derived events to the ox event log
+5. Store the latest commit SHA as the new cursor
 
-It parses the diff to determine what changed per node: state transitions,
-new tags, new comments. It then emits the corresponding cx events into
-the ox event log.
+On first run (no cursor), ox-server fetches the full `cx log --json`
+to catch up on all existing cx state. This means starting ox-server
+against a repo with existing cx issues will immediately detect any
+`ready` nodes and trigger workflows.
+
+### Post-merge event derivation
+
+After `merge_to_main`, ox-server also runs `cx log --json --since
+<pre_merge_sha>` to immediately derive events from the merge without
+waiting for the next poll tick.
+
+### cx log change format
+
+`cx log --json` returns an array of commit entries, each with a
+`changes` array of structured diffs:
+
+| Action | Fields | Maps to |
+|--------|--------|---------|
+| `created` | `node_id`, `state`, `title`, `tags` | `cx.task_ready` if state=ready |
+| `modified` | `node_id`, `fields.state.{from,to}` | `cx.task_ready/claimed/integrated` |
+| `comment_added` | `node_id`, `tag`, `author`, `body` | `cx.comment_added` |
 
 ox-server also maintains a cx projection (`GET /api/state/cx`) derived
-from these events — a live mirror of the current state of `.complex/` on
-main.
+from these events.
 
 ---
 

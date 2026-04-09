@@ -761,6 +761,9 @@ let app = Router::new()
     .route("/api/executions/{id}/steps/{step}/confirm", post(step_confirm))
     .route("/api/executions/{id}/steps/{step}/fail", post(step_fail))
     .route("/api/executions/{id}/steps/{step}/advance", post(step_advance))
+    // Step logs
+    .route("/api/executions/{id}/steps/{step}/log/chunk", post(push_log_chunk))
+    .route("/api/executions/{id}/steps/{step}/log", get(get_step_log))
     // Artifacts
     .route("/api/executions/{id}/steps/{step}/artifacts", get(list_artifacts))
     .route("/api/executions/{id}/steps/{step}/artifacts/{name}", get(get_artifact))

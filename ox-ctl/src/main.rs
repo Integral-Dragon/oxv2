@@ -88,6 +88,22 @@ enum ExecCommands {
         /// Execution ID.
         id: String,
     },
+    /// Show step logs.
+    Logs {
+        /// Execution ID.
+        id: String,
+        /// Step name.
+        step: String,
+        /// Attempt number (defaults to most recent).
+        #[arg(long)]
+        attempt: Option<u32>,
+        /// Show last N lines.
+        #[arg(long, short = 'n')]
+        lines: Option<usize>,
+        /// Follow log output (like tail -f).
+        #[arg(long, short = 'f')]
+        follow: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -134,6 +150,9 @@ async fn main() -> Result<()> {
             }
             ExecCommands::Show { id } => cmd_exec_show(&client, json, &id).await,
             ExecCommands::Cancel { id } => cmd_exec_cancel(&client, &id).await,
+            ExecCommands::Logs { id, step, attempt, lines, follow } => {
+                cmd_logs(&cli.server, &id, &step, attempt, lines, follow).await
+            }
         },
         Commands::Runners { command } => match command {
             RunnerCommands::List => cmd_runners_list(&client, json).await,
@@ -436,6 +455,102 @@ fn event_summary(data: &str) -> String {
         parts.push(format!("error={e}"));
     }
     parts.join(" ")
+}
+
+// ── Logs ────────────────────────────────────────────────────────────
+
+async fn cmd_logs(
+    server_url: &str,
+    execution_id: &str,
+    step: &str,
+    attempt: Option<u32>,
+    lines: Option<usize>,
+    follow: bool,
+) -> Result<()> {
+    let client = reqwest::Client::new();
+    let base_url = format!("{server_url}/api/executions/{execution_id}/steps/{step}/log");
+
+    let mut params = vec![];
+    if let Some(a) = attempt {
+        params.push(format!("attempt={a}"));
+    }
+    if let Some(n) = lines {
+        params.push(format!("lines={n}"));
+    }
+
+    let url = if params.is_empty() {
+        base_url.clone()
+    } else {
+        format!("{}?{}", base_url, params.join("&"))
+    };
+
+    let resp = client.get(&url).send().await?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        if !follow {
+            eprintln!("No logs found for {execution_id} step {step}");
+            return Ok(());
+        }
+        // In follow mode, wait for logs to appear
+    } else {
+        let text = resp.error_for_status()?.text().await?;
+        print!("{text}");
+
+        if !follow {
+            return Ok(());
+        }
+    }
+
+    // Follow mode: poll for new content
+    let mut known_len: usize = 0;
+    // Compute initial length from what we already printed
+    {
+        let mut check_params = vec![];
+        if let Some(a) = attempt {
+            check_params.push(format!("attempt={a}"));
+        }
+        let check_url = if check_params.is_empty() {
+            base_url.clone()
+        } else {
+            format!("{}?{}", base_url, check_params.join("&"))
+        };
+        if let Ok(resp) = client.get(&check_url).send().await {
+            if let Ok(text) = resp.text().await {
+                known_len = text.len();
+            }
+        }
+    }
+
+    let mut poll_params = vec![];
+    if let Some(a) = attempt {
+        poll_params.push(format!("attempt={a}"));
+    }
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let poll_url = if poll_params.is_empty() {
+            base_url.clone()
+        } else {
+            format!("{}?{}", base_url, poll_params.join("&"))
+        };
+
+        let resp = match client.get(&poll_url).send().await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            continue;
+        }
+
+        if let Ok(text) = resp.text().await {
+            if text.len() > known_len {
+                print!("{}", &text[known_len..]);
+                known_len = text.len();
+            }
+        }
+    }
 }
 
 // ── Trigger ─────────────────────────────────────────────────────────

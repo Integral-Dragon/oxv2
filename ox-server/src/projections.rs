@@ -87,6 +87,23 @@ pub struct SecretsState {
     pub secrets: HashMap<String, String>,
 }
 
+// ── cx Projection ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CxState {
+    pub nodes: HashMap<String, CxNodeState>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CxNodeState {
+    pub node_id: String,
+    pub state: String,
+    pub tags: Vec<String>,
+    pub shadowed: bool,
+    pub shadow_reason: Option<String>,
+    pub comment_count: usize,
+}
+
 // ── Combined Projections ────────────────────────────────────────────
 
 /// Thread-safe container for all projections.
@@ -94,6 +111,7 @@ pub struct Projections {
     pool: RwLock<PoolState>,
     executions: RwLock<ExecutionsState>,
     secrets: RwLock<SecretsState>,
+    cx: RwLock<CxState>,
 }
 
 impl Default for Projections {
@@ -102,6 +120,7 @@ impl Default for Projections {
             pool: RwLock::new(PoolState::default()),
             executions: RwLock::new(ExecutionsState::default()),
             secrets: RwLock::new(SecretsState::default()),
+            cx: RwLock::new(CxState::default()),
         }
     }
 }
@@ -321,7 +340,65 @@ impl Projections {
                 }
             }
 
-            // Other events don't affect Phase 1 projections
+            // cx events
+            EventType::CxTaskReady => {
+                if let Ok(data) = serde_json::from_value::<CxTaskReadyData>(event.data.clone()) {
+                    let mut cx = self.cx.write().unwrap();
+                    let node = cx.nodes.entry(data.node_id.clone()).or_insert_with(|| {
+                        CxNodeState {
+                            node_id: data.node_id.clone(),
+                            state: String::new(),
+                            tags: vec![],
+                            shadowed: false,
+                            shadow_reason: None,
+                            comment_count: 0,
+                        }
+                    });
+                    node.state = "ready".into();
+                    node.tags = data.tags;
+                }
+            }
+            EventType::CxTaskClaimed => {
+                if let Ok(data) = serde_json::from_value::<CxTaskClaimedData>(event.data.clone()) {
+                    let mut cx = self.cx.write().unwrap();
+                    if let Some(node) = cx.nodes.get_mut(&data.node_id) {
+                        node.state = "claimed".into();
+                    }
+                }
+            }
+            EventType::CxTaskIntegrated => {
+                if let Ok(data) =
+                    serde_json::from_value::<CxTaskIntegratedData>(event.data.clone())
+                {
+                    let mut cx = self.cx.write().unwrap();
+                    if let Some(node) = cx.nodes.get_mut(&data.node_id) {
+                        node.state = "integrated".into();
+                    }
+                }
+            }
+            EventType::CxTaskShadowed => {
+                if let Ok(data) =
+                    serde_json::from_value::<CxTaskShadowedData>(event.data.clone())
+                {
+                    let mut cx = self.cx.write().unwrap();
+                    if let Some(node) = cx.nodes.get_mut(&data.node_id) {
+                        node.shadowed = true;
+                        node.shadow_reason = Some(data.reason);
+                    }
+                }
+            }
+            EventType::CxCommentAdded => {
+                if let Ok(data) =
+                    serde_json::from_value::<CxCommentAddedData>(event.data.clone())
+                {
+                    let mut cx = self.cx.write().unwrap();
+                    if let Some(node) = cx.nodes.get_mut(&data.node_id) {
+                        node.comment_count += 1;
+                    }
+                }
+            }
+
+            // Other events don't update projections
             _ => {}
         }
     }
@@ -336,5 +413,9 @@ impl Projections {
 
     pub fn secrets(&self) -> SecretsState {
         self.secrets.read().unwrap().clone()
+    }
+
+    pub fn cx(&self) -> CxState {
+        self.cx.read().unwrap().clone()
     }
 }

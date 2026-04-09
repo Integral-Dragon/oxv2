@@ -6,12 +6,13 @@ use ox_core::types::*;
 use ox_core::workflow::{RetryDecision, RetryTracker, StepAdvance, WorkflowDef, WorkflowEngine};
 use reqwest_eventsource::{Event as SseEvent, EventSource};
 use std::collections::{HashMap, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A step waiting to be dispatched to an idle runner.
 #[derive(Debug)]
 struct PendingStep {
     execution_id: String,
+    task_id: String,
     step: String,
     attempt: u32,
     runtime: serde_json::Value,
@@ -56,6 +57,9 @@ pub struct Herder {
     workflows: HashMap<String, WorkflowEngine>,
     pending: VecDeque<PendingStep>,
     last_seq: u64,
+    /// Track last-fired times for poll triggers: (workflow_name, trigger_index) -> Instant
+    #[allow(dead_code)]
+    poll_trigger_times: HashMap<(String, usize), Instant>,
 }
 
 impl Herder {
@@ -76,6 +80,7 @@ impl Herder {
             workflows: HashMap::new(),
             pending: VecDeque::new(),
             last_seq: 0,
+            poll_trigger_times: HashMap::new(),
         }
     }
 
@@ -92,12 +97,16 @@ impl Herder {
 
         tracing::info!("connected to SSE, entering event loop");
 
+        let mut backoff_secs: u64 = 1;
+        const MAX_BACKOFF: u64 = 30;
+
         loop {
             tokio::select! {
                 Some(event) = es.next() => {
                     match event {
                         Ok(SseEvent::Open) => {
                             tracing::debug!("SSE connection opened");
+                            backoff_secs = 1; // reset on successful connection
                         }
                         Ok(SseEvent::Message(msg)) => {
                             if let Err(e) = self.handle_sse_message(&msg.event, &msg.data).await {
@@ -112,8 +121,9 @@ impl Herder {
                             ));
                         }
                         Err(e) => {
-                            tracing::warn!(err = %e, "SSE error, reconnecting in 1s...");
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            tracing::warn!(err = %e, backoff = backoff_secs, "SSE error, reconnecting...");
+                            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                            backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
                             es = EventSource::get(format!(
                                 "{}/api/events/stream?last_event_id={}",
                                 self.server_url, self.last_seq
@@ -280,8 +290,38 @@ impl Herder {
                 // Already handled by our own advance call — just update local state
             }
 
+            // cx events — evaluate triggers
+            "cx.task_ready" => {
+                let d: CxTaskReadyData = serde_json::from_value(envelope.data)?;
+                tracing::info!(node = %d.node_id, tags = ?d.tags, "cx.task_ready");
+                self.evaluate_triggers_for_node(&d.node_id, "cx.task_ready", &d.tags)
+                    .await;
+            }
+            "cx.task_claimed" => {
+                let d: CxTaskClaimedData = serde_json::from_value(envelope.data)?;
+                tracing::info!(node = %d.node_id, "cx.task_claimed");
+            }
+            "cx.task_integrated" => {
+                let d: CxTaskIntegratedData = serde_json::from_value(envelope.data)?;
+                tracing::info!(node = %d.node_id, "cx.task_integrated");
+            }
+            "cx.task_shadowed" => {
+                let d: CxTaskShadowedData = serde_json::from_value(envelope.data)?;
+                tracing::info!(node = %d.node_id, reason = %d.reason, "cx.task_shadowed");
+            }
+
+            // Git events
+            "git.merged" => {
+                let d: GitMergedData = serde_json::from_value(envelope.data)?;
+                tracing::info!(branch = %d.branch, sha = %d.sha, exec = %d.execution_id, "git.merged");
+            }
+            "git.merge_failed" => {
+                let d: GitMergeFailedData = serde_json::from_value(envelope.data)?;
+                tracing::warn!(branch = %d.branch, reason = %d.reason, exec = %d.execution_id, "git.merge_failed");
+            }
+
             _ => {
-                // Other events (artifact, cx, git, secret) — ignored by herder for now
+                // Other events (artifact, secret, etc.) — not handled by herder
             }
         }
 
@@ -309,12 +349,42 @@ impl Herder {
     }
 
     async fn enqueue_step(&mut self, execution_id: &str, step: &str, attempt: u32) {
+        // Check if this is an action step (merge_to_main) that doesn't need a runner
+        if self.try_handle_action_step(execution_id, step).await {
+            return;
+        }
+
+        // Look up execution info, then step def from workflow
+        let exec_view = self.executions.get(execution_id);
+        let task_id = exec_view.map(|e| e.task_id.clone()).unwrap_or_default();
+        let workflow_name = exec_view.map(|e| e.workflow.clone());
+
+        let (runtime, workspace) = workflow_name
+            .as_deref()
+            .and_then(|wf| self.workflows.get(wf))
+            .and_then(|engine| engine.steps.get(step))
+            .map(|step_def| {
+                let runtime = step_def
+                    .runtime
+                    .as_ref()
+                    .map(|r| serde_json::to_value(r).unwrap_or_default())
+                    .unwrap_or_default();
+                let workspace = step_def
+                    .workspace
+                    .as_ref()
+                    .map(|w| serde_json::to_value(w).unwrap_or_default())
+                    .unwrap_or_default();
+                (runtime, workspace)
+            })
+            .unwrap_or_else(|| (serde_json::json!({}), serde_json::json!({})));
+
         let pending = PendingStep {
             execution_id: execution_id.to_string(),
+            task_id,
             step: step.to_string(),
             attempt,
-            runtime: serde_json::json!({}),
-            workspace: serde_json::json!({}),
+            runtime,
+            workspace,
         };
 
         self.pending.push_back(pending);
@@ -339,6 +409,7 @@ impl Herder {
                         &pending.step,
                         &idle_runner_id,
                         pending.attempt,
+                        &pending.task_id,
                         pending.runtime,
                         pending.workspace,
                     )
@@ -419,18 +490,22 @@ impl Herder {
             }
             StepAdvance::Complete => {
                 tracing::info!(exec = %execution_id, "workflow complete");
-                if let Err(e) = self.client.cancel_execution(execution_id).await {
-                    // TODO: need a complete endpoint, using cancel for now
+                if let Err(e) = self.client.complete_execution(execution_id).await {
                     tracing::error!(err = %e, "failed to complete execution");
                 }
-                // Mark locally
                 if let Some(exec) = self.executions.get_mut(execution_id) {
                     exec.status = "completed".into();
                 }
             }
             StepAdvance::Escalate => {
                 tracing::warn!(exec = %execution_id, step = %current_step, "escalating");
-                // TODO: emit execution.escalated via a proper endpoint
+                if let Err(e) = self
+                    .client
+                    .escalate_execution(execution_id, current_step, "max visits exceeded or wildcard escalation")
+                    .await
+                {
+                    tracing::error!(err = %e, "failed to escalate execution");
+                }
                 if let Some(exec) = self.executions.get_mut(execution_id) {
                     exec.status = "escalated".into();
                 }
@@ -484,6 +559,141 @@ impl Herder {
                     }
                 }
             }
+        }
+    }
+
+    // ── Triggers ───────────────────────────────────────────────────
+
+    async fn evaluate_triggers_for_node(
+        &mut self,
+        node_id: &str,
+        event_type: &str,
+        tags: &[String],
+    ) {
+        for (_workflow_name, engine) in &self.workflows {
+            for trigger in &engine.triggers {
+                // Check event type match
+                if trigger.on != event_type {
+                    continue;
+                }
+
+                // Check tag match
+                if let Some(ref tag_pattern) = trigger.tag {
+                    if !tags.iter().any(|t| t == tag_pattern) {
+                        continue;
+                    }
+                }
+
+                // Dedup check: is there already a running execution for this (task_id, workflow)?
+                let already_running = self.executions.values().any(|e| {
+                    e.task_id == node_id
+                        && e.workflow == trigger.workflow
+                        && e.status == "running"
+                });
+                if already_running {
+                    tracing::debug!(
+                        node = %node_id,
+                        workflow = %trigger.workflow,
+                        "trigger suppressed: active execution exists"
+                    );
+                    continue;
+                }
+
+                tracing::info!(
+                    node = %node_id,
+                    workflow = %trigger.workflow,
+                    "trigger matched, creating execution"
+                );
+
+                match self
+                    .client
+                    .create_execution(node_id, &trigger.workflow, &trigger.on)
+                    .await
+                {
+                    Ok(exec_id) => {
+                        tracing::info!(exec = %exec_id, "execution created by trigger");
+                    }
+                    Err(e) => {
+                        tracing::error!(err = %e, "failed to create execution from trigger");
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Action Steps ───────────────────────────────────────────────
+
+    /// Check if a step has the `merge_to_main` action and handle it.
+    /// Returns true if the step was an action step (no dispatch needed).
+    async fn try_handle_action_step(
+        &mut self,
+        execution_id: &str,
+        step: &str,
+    ) -> bool {
+        let workflow_name = match self.executions.get(execution_id) {
+            Some(e) => e.workflow.clone(),
+            None => return false,
+        };
+
+        let engine = match self.workflows.get(&workflow_name) {
+            Some(e) => e,
+            None => return false,
+        };
+
+        let step_def = match engine.steps.get(step) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        match step_def.action.as_deref() {
+            Some("merge_to_main") => {
+                tracing::info!(exec = %execution_id, step = %step, "executing merge_to_main action");
+
+                // Derive branch name from execution's task_id
+                let task_id = match self.executions.get(execution_id) {
+                    Some(e) => e.task_id.clone(),
+                    None => return true,
+                };
+
+                // Request merge via server API
+                match self
+                    .client
+                    .merge_to_main(execution_id, step, &task_id)
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(exec = %execution_id, "merge_to_main succeeded");
+                        // Report done+confirm so workflow can advance
+                        if let Err(e) = self
+                            .client
+                            .step_done(execution_id, step, 1, "pass")
+                            .await
+                        {
+                            tracing::error!(err = %e, "failed to report merge done");
+                        }
+                        if let Err(e) = self
+                            .client
+                            .step_confirm(execution_id, step, 1, None)
+                            .await
+                        {
+                            tracing::error!(err = %e, "failed to confirm merge step");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(err = %e, "merge_to_main failed");
+                        if let Err(e2) = self
+                            .client
+                            .step_fail(execution_id, step, 1, &e.to_string())
+                            .await
+                        {
+                            tracing::error!(err = %e2, "failed to report merge failure");
+                        }
+                    }
+                }
+
+                true
+            }
+            _ => false,
         }
     }
 

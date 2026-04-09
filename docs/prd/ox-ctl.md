@@ -127,6 +127,27 @@ ox-ctl exec cancel <id>
 Emits `execution.cancelled`. The currently assigned runner completes its
 signal collection and abandons the step without confirming.
 
+### `ox-ctl exec logs <id> <step>`
+
+Show step logs (stdout/stderr from the runtime process).
+
+```
+ox-ctl exec logs <id> <step>                  # full log, latest attempt
+ox-ctl exec logs <id> <step> -n 50            # last 50 lines
+ox-ctl exec logs <id> <step> -f               # follow (like tail -f)
+ox-ctl exec logs <id> <step> --attempt 2      # specific attempt
+```
+
+| Flag | Description |
+|------|-------------|
+| `-n <lines>` | Show last N lines |
+| `-f`, `--follow` | Follow log output, polling every 2 seconds |
+| `--attempt <n>` | Read a specific attempt (defaults to most recent) |
+
+Logs are pushed by the runner to ox-server during execution. The
+`--follow` flag polls the server for new content — it works while
+the step is running or after completion.
+
 ---
 
 ## Triggers

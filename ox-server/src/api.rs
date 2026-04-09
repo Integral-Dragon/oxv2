@@ -12,7 +12,9 @@ use std::collections::HashMap;
 
 use crate::AppState;
 use crate::artifacts;
+use crate::cx;
 use crate::db;
+use crate::merge;
 use crate::projections;
 
 pub fn router() -> Router<AppState> {
@@ -26,6 +28,7 @@ pub fn router() -> Router<AppState> {
         // State projections
         .route("/api/state/pool", get(get_pool_state))
         .route("/api/state/executions", get(get_executions_state))
+        .route("/api/state/cx", get(get_cx_state))
         // Secrets
         .route("/api/secrets", get(list_secrets))
         .route("/api/secrets/{name}", put(set_secret).delete(delete_secret))
@@ -35,6 +38,35 @@ pub fn router() -> Router<AppState> {
         .route("/api/executions", get(list_executions).post(create_execution))
         .route("/api/executions/{id}", get(get_execution))
         .route("/api/executions/{id}/cancel", post(cancel_execution))
+        .route(
+            "/api/executions/{id}/complete",
+            post(complete_execution),
+        )
+        .route(
+            "/api/executions/{id}/escalate",
+            post(escalate_execution),
+        )
+        // Merge
+        .route(
+            "/api/executions/{id}/steps/{step}/merge",
+            post(merge_step),
+        )
+        // Triggers
+        .route("/api/triggers/evaluate", post(evaluate_triggers))
+        // Metrics
+        .route(
+            "/api/executions/{id}/steps/{step}/metrics",
+            get(get_step_metrics),
+        )
+        // Step logs
+        .route(
+            "/api/executions/{id}/steps/{step}/log/chunk",
+            post(push_log_chunk),
+        )
+        .route(
+            "/api/executions/{id}/steps/{step}/log",
+            get(get_step_log),
+        )
         // Steps
         .route(
             "/api/executions/{id}/steps/{step}/dispatch",
@@ -478,6 +510,8 @@ struct StepPathParams {
 struct DispatchStepRequest {
     runner_id: RunnerId,
     attempt: u32,
+    #[serde(default)]
+    task_id: String,
     runtime: serde_json::Value,
     workspace: serde_json::Value,
     #[serde(default)]
@@ -489,14 +523,70 @@ async fn dispatch_step(
     Path(params): Path<StepPathParams>,
     Json(req): Json<DispatchStepRequest>,
 ) -> StatusCode {
+    use ox_core::runtime::{collect_secret_refs, resolve_step_spec};
+    use ox_core::workflow::RuntimeSpec;
+
+    // Try to resolve the runtime spec if a runtime type is provided
+    let step_runtime: Option<RuntimeSpec> = serde_json::from_value(req.runtime.clone()).ok();
+
+    let (runtime_value, secret_refs) = if let Some(ref step_rt) = step_runtime {
+        // Look up the runtime definition
+        if let Some(runtime_def) = state.runtimes.get(&step_rt.runtime_type) {
+            let secrets = state.bus.projections.secrets();
+
+            // Build context variables
+            let mut context_vars = std::collections::HashMap::new();
+            context_vars.insert("task_id".to_string(), req.task_id.clone());
+            context_vars.insert("workspace".to_string(), ".".to_string());
+
+            let secret_refs = collect_secret_refs(runtime_def, step_rt);
+
+            match resolve_step_spec(
+                runtime_def,
+                step_rt,
+                &secrets.secrets,
+                &state.search_path,
+                &context_vars,
+            ) {
+                Ok(resolved) => {
+                    // Wrap the original runtime with the resolved spec
+                    let mut rt = req.runtime.clone();
+                    if let Some(obj) = rt.as_object_mut() {
+                        obj.insert(
+                            "resolved".to_string(),
+                            serde_json::to_value(&resolved).unwrap(),
+                        );
+                    } else {
+                        rt = serde_json::json!({
+                            "resolved": resolved,
+                        });
+                    }
+                    (rt, secret_refs)
+                }
+                Err(e) => {
+                    tracing::warn!(err = %e, "failed to resolve runtime spec, sending unresolved");
+                    (req.runtime.clone(), secret_refs)
+                }
+            }
+        } else {
+            tracing::warn!(runtime_type = %step_rt.runtime_type, "unknown runtime type");
+            (req.runtime.clone(), vec![])
+        }
+    } else {
+        (req.runtime.clone(), vec![])
+    };
+
+    // Interpolate workspace fields (e.g. branch = "{task_id}")
+    let workspace_value = interpolate_workspace(&req.workspace, &req.task_id);
+
     let data = StepDispatchedData {
         execution_id: ExecutionId(params.id),
         step: params.step,
         attempt: req.attempt,
         runner_id: req.runner_id,
-        secret_refs: vec![], // TODO: resolve in Phase 4 when full runtime resolution is implemented
-        runtime: req.runtime,
-        workspace: req.workspace,
+        secret_refs,
+        runtime: runtime_value,
+        workspace: workspace_value,
         artifacts: req.artifacts,
     };
 
@@ -508,6 +598,13 @@ async fn dispatch_step(
         )
         .unwrap();
     StatusCode::NO_CONTENT
+}
+
+/// Interpolate `{task_id}` in workspace fields (e.g. branch).
+fn interpolate_workspace(workspace: &serde_json::Value, task_id: &str) -> serde_json::Value {
+    let s = serde_json::to_string(workspace).unwrap_or_default();
+    let interpolated = s.replace("{task_id}", task_id);
+    serde_json::from_str(&interpolated).unwrap_or_else(|_| workspace.clone())
 }
 
 #[derive(Deserialize)]
@@ -636,6 +733,270 @@ async fn step_advance(
     StatusCode::NO_CONTENT
 }
 
+// ── cx State ───────────────────────────────────────────────────────
+
+async fn get_cx_state(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let cx = state.bus.projections.cx();
+    Json(serde_json::to_value(&cx).unwrap())
+}
+
+// ── Complete / Escalate ────────────────────────────────────────────
+
+async fn complete_execution(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    let data = ExecutionCompletedData {
+        execution_id: ExecutionId(id),
+    };
+    state
+        .bus
+        .append(
+            EventType::ExecutionCompleted,
+            serde_json::to_value(data).unwrap(),
+        )
+        .unwrap();
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct EscalateRequest {
+    step: String,
+    reason: String,
+}
+
+async fn escalate_execution(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<EscalateRequest>,
+) -> StatusCode {
+    let data = ExecutionEscalatedData {
+        execution_id: ExecutionId(id),
+        step: req.step,
+        reason: req.reason,
+    };
+    state
+        .bus
+        .append(
+            EventType::ExecutionEscalated,
+            serde_json::to_value(data).unwrap(),
+        )
+        .unwrap();
+    StatusCode::NO_CONTENT
+}
+
+// ── Merge ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MergeRequest {
+    branch: String,
+}
+
+async fn merge_step(
+    State(state): State<AppState>,
+    Path(params): Path<StepPathParams>,
+    Json(req): Json<MergeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let execution_id = ExecutionId(params.id);
+
+    match merge::merge_to_main(&state.repo_path, &req.branch) {
+        Ok(result) => {
+            let (prev_head, new_head) = match &result {
+                merge::MergeResult::FastForward {
+                    prev_head,
+                    new_head,
+                } => (prev_head.clone(), new_head.clone()),
+                merge::MergeResult::MergeCommit {
+                    prev_head,
+                    new_head,
+                } => (prev_head.clone(), new_head.clone()),
+            };
+
+            // Emit git.merged event
+            let merged_data = GitMergedData {
+                branch: req.branch.clone(),
+                into: "main".into(),
+                sha: new_head.clone(),
+                execution_id: execution_id.clone(),
+            };
+            state
+                .bus
+                .append(
+                    EventType::GitMerged,
+                    serde_json::to_value(merged_data).unwrap(),
+                )
+                .unwrap();
+
+            // Derive and append cx events from the merge diff
+            match cx::derive_cx_events_for_merge(&state.repo_path, &prev_head) {
+                Ok(cx_events) => {
+                    for cx_event in cx_events {
+                        state
+                            .bus
+                            .append(cx_event.event_type, cx_event.data)
+                            .unwrap();
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(err = %e, "failed to derive cx events from merge");
+                }
+            }
+
+            Ok(Json(serde_json::json!({
+                "status": "merged",
+                "prev_head": prev_head,
+                "new_head": new_head,
+            })))
+        }
+        Err(e) => {
+            // Emit git.merge_failed event
+            let fail_data = GitMergeFailedData {
+                branch: req.branch,
+                into: "main".into(),
+                reason: e.to_string(),
+                execution_id,
+            };
+            state
+                .bus
+                .append(
+                    EventType::GitMergeFailed,
+                    serde_json::to_value(fail_data).unwrap(),
+                )
+                .unwrap();
+
+            Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ))
+        }
+    }
+}
+
+// ── Triggers ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TriggerRequest {
+    node_id: String,
+    #[serde(default)]
+    force: bool,
+}
+
+async fn evaluate_triggers(
+    State(state): State<AppState>,
+    Json(req): Json<TriggerRequest>,
+) -> Json<serde_json::Value> {
+    let cx = state.bus.projections.cx();
+    let execs = state.bus.projections.executions();
+
+    let node = cx.nodes.get(&req.node_id);
+
+    // Check if node is shadowed (skip unless force)
+    if !req.force {
+        if let Some(n) = node {
+            if n.shadowed {
+                return Json(serde_json::json!({
+                    "triggered": [],
+                    "skipped": "node is shadowed",
+                }));
+            }
+        }
+    }
+
+    let node_tags: Vec<String> = node.map(|n| n.tags.clone()).unwrap_or_default();
+
+    let mut triggered = vec![];
+
+    for (workflow_name, engine) in &state.workflows {
+        for trigger in &engine.triggers {
+            // Check event type match
+            if trigger.on != "cx.task_ready" {
+                continue;
+            }
+
+            // Check tag match
+            if let Some(ref tag_pattern) = trigger.tag {
+                if !node_tags.iter().any(|t| t == tag_pattern) {
+                    continue;
+                }
+            }
+
+            // Dedup check: is there already a running execution for this (task_id, workflow)?
+            if !req.force {
+                let already_running = execs.executions.values().any(|e| {
+                    e.task_id == req.node_id
+                        && e.workflow == *workflow_name
+                        && e.status == projections::ExecutionStatus::Running
+                });
+                if already_running {
+                    continue;
+                }
+            }
+
+            // Create execution
+            let n = execs
+                .executions
+                .values()
+                .filter(|e| e.task_id == req.node_id)
+                .count()
+                + 1;
+            let execution_id = ExecutionId(format!("{}-e{n}", req.node_id));
+
+            let data = ExecutionCreatedData {
+                execution_id: execution_id.clone(),
+                task_id: req.node_id.clone(),
+                workflow: workflow_name.clone(),
+                trigger: trigger.on.clone(),
+            };
+
+            state
+                .bus
+                .append(
+                    EventType::ExecutionCreated,
+                    serde_json::to_value(data).unwrap(),
+                )
+                .unwrap();
+
+            triggered.push(serde_json::json!({
+                "execution_id": execution_id,
+                "workflow": workflow_name,
+            }));
+        }
+    }
+
+    Json(serde_json::json!({ "triggered": triggered }))
+}
+
+// ── Metrics ────────────────────────────────────────────────────────
+
+async fn get_step_metrics(
+    State(state): State<AppState>,
+    Path(params): Path<StepPathParams>,
+) -> Json<serde_json::Value> {
+    let execs = state.bus.projections.executions();
+    let exec = match execs.executions.get(&params.id) {
+        Some(e) => e,
+        None => return Json(serde_json::json!(null)),
+    };
+
+    // Find the latest confirmed attempt for this step with metrics
+    // We need to look at the event log for the actual metrics
+    // For now, return the attempt info
+    let attempts: Vec<serde_json::Value> = exec
+        .attempts
+        .iter()
+        .filter(|a| a.step == params.step)
+        .map(|a| {
+            serde_json::json!({
+                "step": a.step,
+                "attempt": a.attempt,
+                "status": format!("{:?}", a.status).to_lowercase(),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({ "attempts": attempts }))
+}
+
 // ── Artifacts ───────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -758,4 +1119,156 @@ async fn close_artifact(
         .unwrap();
 
     StatusCode::NO_CONTENT
+}
+
+// ── Step Logs ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct LogChunkPayload {
+    attempt: u32,
+    data: String,
+}
+
+/// POST /api/executions/{id}/steps/{step}/log/chunk — runner pushes log chunks
+async fn push_log_chunk(
+    State(state): State<AppState>,
+    Path(params): Path<StepPathParams>,
+    Json(payload): Json<LogChunkPayload>,
+) -> StatusCode {
+    if payload.data.is_empty() {
+        return StatusCode::NO_CONTENT;
+    }
+
+    let log_path = step_log_path(&state.repo_path, &params.id, &params.step, payload.attempt);
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            if let Err(e) = file.write_all(payload.data.as_bytes()) {
+                tracing::warn!(err = %e, "failed to write log chunk");
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(err = %e, "failed to open log file");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct LogQuery {
+    attempt: Option<u32>,
+    lines: Option<usize>,
+}
+
+/// GET /api/executions/{id}/steps/{step}/log — read step log
+async fn get_step_log(
+    State(state): State<AppState>,
+    Path(params): Path<StepPathParams>,
+    Query(q): Query<LogQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let log_path = if let Some(attempt) = q.attempt {
+        step_log_path(&state.repo_path, &params.id, &params.step, attempt)
+    } else {
+        match find_most_recent_log(&state.repo_path, &params.id, &params.step) {
+            Some(p) => p,
+            None => {
+                return (StatusCode::NOT_FOUND, "no logs found").into_response();
+            }
+        }
+    };
+
+    if !log_path.exists() {
+        return (StatusCode::NOT_FOUND, "no logs found").into_response();
+    }
+
+    let contents = match std::fs::read_to_string(&log_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read log: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(n) = q.lines {
+        let all_lines: Vec<&str> = contents.lines().collect();
+        let start = all_lines.len().saturating_sub(n);
+        let tail = all_lines[start..].join("\n");
+        return (
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            tail,
+        )
+            .into_response();
+    }
+
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        contents,
+    )
+        .into_response()
+}
+
+fn step_log_path(
+    repo_path: &std::path::Path,
+    execution_id: &str,
+    step: &str,
+    attempt: u32,
+) -> std::path::PathBuf {
+    repo_path
+        .join(".ox")
+        .join("run")
+        .join("logs")
+        .join(execution_id)
+        .join(format!("{step}-attempt-{attempt}.log"))
+}
+
+fn find_most_recent_log(
+    repo_path: &std::path::Path,
+    execution_id: &str,
+    step: &str,
+) -> Option<std::path::PathBuf> {
+    let dir = repo_path
+        .join(".ox")
+        .join("run")
+        .join("logs")
+        .join(execution_id);
+    if !dir.exists() {
+        return None;
+    }
+
+    let prefix = format!("{step}-attempt-");
+    let mut best: Option<(std::path::PathBuf, u32)> = None;
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(rest) = name.strip_prefix(&prefix) {
+                if let Some(num_str) = rest.strip_suffix(".log") {
+                    if let Ok(n) = num_str.parse::<u32>() {
+                        if best.as_ref().map(|(_, prev)| n > *prev).unwrap_or(true) {
+                            best = Some((entry.path(), n));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(p, _)| p)
 }

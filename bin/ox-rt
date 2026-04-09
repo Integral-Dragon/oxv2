@@ -24,7 +24,15 @@ cmd="$1"; shift
 send() {
   local msg="$1"
   local resp
-  resp=$(echo "$msg" | socat - UNIX-CONNECT:"$OX_SOCKET" 2>/dev/null) || {
+  resp=$(python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('$OX_SOCKET')
+s.sendall(('$msg' + '\n').encode())
+data = s.recv(4096)
+s.close()
+sys.stdout.write(data.decode())
+" 2>/dev/null) || {
     echo "error: failed to connect to $OX_SOCKET" >&2
     exit 1
   }

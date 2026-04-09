@@ -1,3 +1,4 @@
+mod proxy;
 mod runner;
 mod socket;
 
@@ -37,5 +38,36 @@ async fn main() -> Result<()> {
     );
 
     let mut r = runner::Runner::new(&args.server, &args.environment, &args.workspace_dir);
-    r.run().await
+
+    tokio::select! {
+        result = r.run() => result,
+        _ = shutdown_signal() => {
+            tracing::info!("ox-runner shut down gracefully");
+            Ok(())
+        }
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => { tracing::info!("received Ctrl+C"); }
+        _ = terminate => { tracing::info!("received SIGTERM"); }
+    }
 }

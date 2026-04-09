@@ -16,3 +16,6 @@ clap = { workspace = true }
 reqwest = { workspace = true }
 reqwest-eventsource = { workspace = true }
 futures-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }

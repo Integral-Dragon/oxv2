@@ -37,6 +37,9 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Git
+git2 = "0.20"
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
@@ -45,6 +48,11 @@ async-stream = "0.3"
 futures-util = "0.3"
 reqwest-eventsource = "0.6"
 eventsource-stream = "0.2"
+
+# HTTP proxy
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 # ox-core
 ox-core = { path = "ox-core" }

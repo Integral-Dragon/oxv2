@@ -63,8 +63,11 @@ When the runtime process exits, the runner:
 4. Emits `step.signals`
 
 If the runtime called `done` before exiting, a `step.done` event was
-already emitted (pending). If not, the runner emits `step.failed` with
-`error = "signal:exited_silent"`.
+already emitted (pending). If the runtime exited with code 0 without
+calling `done`, the runner infers `done ""` (empty output) — the
+workflow engine advances to the next step by declaration order. If the
+runtime exited with a non-zero code without calling `done`, the runner
+emits `step.failed` with `error = "signal:exited_silent"`.
 
 ### 5. Confirm
 
