@@ -15,18 +15,20 @@ pub struct CxPollResult {
     pub latest_hash: Option<String>,
 }
 
-/// Run `cx log --json [--since <sha>]` in the repo and derive ox events
-/// from the structured change entries. If `since_sha` is None, fetches the
-/// full log (used on first run to catch up on existing cx state).
+/// Run `cx log --json --since <sha>` in the repo and derive ox events.
+/// If `since_sha` is None (first boot), snapshot current ready nodes instead
+/// of replaying the full history.
 pub fn poll_cx_log(repo_path: &Path, since_sha: Option<&str>) -> Result<CxPollResult> {
-    let mut args = vec!["log", "--json"];
-    if let Some(sha) = since_sha {
-        args.push("--since");
-        args.push(sha);
-    }
+    let since = match since_sha {
+        Some(sha) => sha,
+        None => {
+            // First boot: snapshot current state instead of replaying history
+            return snapshot_current_ready_nodes(repo_path);
+        }
+    };
 
     let output = std::process::Command::new("cx")
-        .args(&args)
+        .args(["log", "--json", "--since", since])
         .current_dir(repo_path)
         .output()
         .context("running cx log")?;
@@ -152,6 +154,66 @@ fn extract_tags(_repo_path: &Path, _node_id: &str, change: &serde_json::Value) -
             .collect();
     }
     vec![]
+}
+
+/// On first boot, snapshot the current cx state instead of replaying history.
+/// Emits cx.task_ready only for nodes that are currently ready.
+fn snapshot_current_ready_nodes(repo_path: &Path) -> Result<CxPollResult> {
+    // Get current HEAD as the cursor
+    let head_output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .context("git rev-parse HEAD")?;
+    let head = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
+
+    // List all nodes with their current state
+    let output = std::process::Command::new("cx")
+        .args(["list", "--json"])
+        .current_dir(repo_path)
+        .output()
+        .context("running cx list --json")?;
+
+    if !output.status.success() {
+        // cx might not be initialized — that's fine, no events
+        return Ok(CxPollResult {
+            events: vec![],
+            latest_hash: Some(head),
+        });
+    }
+
+    let nodes: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).unwrap_or_default();
+
+    let mut events = vec![];
+    for node in &nodes {
+        let state = node["state"].as_str().unwrap_or("");
+        let node_id = node["id"].as_str().unwrap_or("");
+        if state != "ready" || node_id.is_empty() {
+            continue;
+        }
+        let tags: Vec<String> = node["tags"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        events.push(DerivedCxEvent {
+            event_type: EventType::CxTaskReady,
+            data: serde_json::to_value(CxTaskReadyData {
+                node_id: node_id.to_string(),
+                tags,
+                workflow: None,
+            })
+            .unwrap(),
+        });
+    }
+
+    tracing::info!(ready_count = events.len(), "cx snapshot: initial ready nodes");
+
+    Ok(CxPollResult {
+        events,
+        latest_hash: Some(head),
+    })
 }
 
 #[derive(serde::Deserialize)]
