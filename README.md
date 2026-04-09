@@ -100,8 +100,9 @@ workspace and shared ox binaries.
 Use the pool manager to start several runners:
 
 ```bash
-# Start 3 runners in seguro VMs (default)
-OX_SERVER=http://localhost:4840 ox-pool start 3
+# Start 3 runners in seguro VMs
+# Note: use 10.0.2.2 (QEMU gateway) since VMs can't reach localhost
+OX_SERVER=http://10.0.2.2:4840 ox-pool start 3
 
 # Check status / stop
 ox-pool status
@@ -372,8 +373,8 @@ OX_HOME=/path/to/oxv2/defaults ./target/debug/ox-server --repo /path/to/project
 # Terminal 2: herder
 OX_HOME=/path/to/oxv2/defaults ./target/debug/ox-herder
 
-# Terminal 3: runners (seguro VMs)
-OX_SERVER=http://localhost:4840 ./bin/ox-pool start 2
+# Terminal 3: runners (seguro VMs — use 10.0.2.2, the QEMU gateway to host)
+OX_SERVER=http://10.0.2.2:4840 ./bin/ox-pool start 2
 
 # Terminal 4: set secrets and go
 ./target/debug/ox-ctl secrets set claude_credentials --value "$(cat ~/.claude/.credentials.json)"
