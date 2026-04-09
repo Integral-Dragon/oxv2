@@ -237,7 +237,10 @@ pub fn resolve_step_spec(
         }
     }
 
-    // 3. Assemble prompt file: persona content + step prompt
+    // 3. Build interpolation context (needed for prompt assembly and everything after)
+    let ctx = InterpolationContext::new(field_values.clone(), secrets.clone());
+
+    // 4. Assemble prompt file: persona content + step prompt, with interpolation
     {
         let persona_content = field_values.get("persona_content").cloned().unwrap_or_default();
         let prompt = field_values.get("prompt").cloned().unwrap_or_default();
@@ -245,11 +248,17 @@ pub fn resolve_step_spec(
         if !persona_content.is_empty() || !prompt.is_empty() {
             let mut full_prompt = String::new();
             if !persona_content.is_empty() {
-                full_prompt.push_str(&persona_content);
+                // Interpolate {task_id} etc. in persona content
+                let resolved = ctx.interpolate(&persona_content)
+                    .unwrap_or(persona_content);
+                full_prompt.push_str(&resolved);
                 full_prompt.push_str("\n\n---\n\n");
             }
             if !prompt.is_empty() {
-                full_prompt.push_str(&prompt);
+                // Interpolate {task_id} etc. in step prompt
+                let resolved = ctx.interpolate(&prompt)
+                    .unwrap_or(prompt);
+                full_prompt.push_str(&resolved);
             }
 
             let prompt_path = format!("{{tmp_dir}}/{PROMPT_FILE_NAME}");
@@ -262,7 +271,7 @@ pub fn resolve_step_spec(
         }
     }
 
-    // 4. Build interpolation context with secrets
+    // Rebuild context now that prompt_file is set
     let ctx = InterpolationContext::new(field_values.clone(), secrets.clone());
 
     // 4b. Resolve content-based file mappings (e.g. credentials from secrets)

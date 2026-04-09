@@ -171,7 +171,8 @@ impl Runner {
         let start = Instant::now();
 
         let work_dir = self.workspace_dir.join("current");
-        let tmp_dir = self.workspace_dir.join("tmp");
+        // Use local filesystem for tmp (sockets don't work on 9p/virtiofs mounts)
+        let tmp_dir = PathBuf::from("/tmp").join(format!("ox-step-{}-{}-{}", exec_id, step, attempt));
 
         // Clean any leftover workspace from a previous step
         let _ = std::fs::remove_dir_all(&work_dir);
@@ -341,7 +342,21 @@ impl Runner {
         let mut cmd = Command::new(&cmd_args[0]);
         cmd.args(&cmd_args[1..])
             .current_dir(&work_dir)
-            .env("OX_SOCKET", &socket_path);
+            .env("OX_SOCKET", &socket_path)
+            .env("OX_TASK_ID", &assignment.execution_id.split('-').next().unwrap_or(""));
+
+        // Add ox bin directory to PATH so ox-rt is available
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        if let Ok(exe) = std::env::current_exe() {
+            // ox-runner is at target/debug/ox-runner, ox-rt is at bin/ox-rt
+            // Go up to the project root and find bin/
+            if let Some(project_root) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+                let bin_dir = project_root.join("bin");
+                if bin_dir.join("ox-rt").exists() {
+                    cmd.env("PATH", format!("{}:{}", bin_dir.display(), current_path));
+                }
+            }
+        }
 
         for (k, v) in &env_vars {
             cmd.env(k, v);
@@ -484,71 +499,19 @@ impl Runner {
             .await?;
 
         // 11. Check signal failure rules
-        let has_failure_signal = signals.iter().any(|s| {
-            s == "exited_silent" || s == "no_commits" || s == "dirty_workspace"
-        });
+        // Only exited_silent is a hard failure — the agent never signaled
+        // completion. Workspace signals (no_commits, dirty_workspace) are
+        // informational: the agent manages its own git flow and calls
+        // ox-rt done when it's finished.
+        let has_failure_signal = signals.contains(&"exited_silent".to_string());
 
         if has_failure_signal {
-            let error = signals
-                .iter()
-                .find(|s| *s == "exited_silent" || *s == "no_commits" || *s == "dirty_workspace")
-                .map(|s| format!("signal:{s}"))
-                .unwrap_or_default();
+            let error = "signal:exited_silent".to_string();
             tracing::warn!(exec = %exec_id, step = %step, error = %error, "step failed due to signal");
             self.client.step_fail(exec_id, step, attempt, &error).await?;
         } else {
-            // 12. Push branch to ox-server (if workspace.push is set)
-            if assignment.workspace.push && assignment.workspace.git_clone {
-                let branch = assignment
-                    .workspace
-                    .branch
-                    .as_deref()
-                    .unwrap_or("main");
-
-                tracing::info!(branch = %branch, "pushing branch to ox-server");
-
-                let push_result = std::process::Command::new("git")
-                    .args(["push", "origin", branch])
-                    .current_dir(&work_dir)
-                    .status();
-
-                match push_result {
-                    Ok(s) if s.success() => {
-                        tracing::info!(branch = %branch, "branch pushed successfully");
-                    }
-                    Ok(s) => {
-                        let err = format!("git push failed with exit code {:?}", s.code());
-                        tracing::error!(err = %err);
-                        self.client
-                            .step_fail(exec_id, step, attempt, &format!("runner:push_failed: {err}"))
-                            .await?;
-
-                        // Cleanup and return — don't confirm
-                        for handle in proxy_handles {
-                            handle.task.abort();
-                        }
-                        socket_handle.abort();
-                        cleanup(&work_dir, &tmp_dir);
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        let err = format!("git push failed: {e}");
-                        tracing::error!(err = %err);
-                        self.client
-                            .step_fail(exec_id, step, attempt, &format!("runner:push_failed: {err}"))
-                            .await?;
-
-                        for handle in proxy_handles {
-                            handle.task.abort();
-                        }
-                        socket_handle.abort();
-                        cleanup(&work_dir, &tmp_dir);
-                        return Ok(());
-                    }
-                }
-            }
-
-            // 13. Confirm step
+            // 12. Confirm step
+            // The agent is responsible for git push — the runner does not push.
             let proxy_metrics = proxy::collect_proxy_metrics(&proxy_handles);
 
             let metrics = serde_json::json!({
