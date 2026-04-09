@@ -40,8 +40,11 @@ pub enum MergeError {
 pub fn merge_to_main(repo_path: &Path, branch: &str) -> Result<MergeResult, MergeError> {
     let repo = Repository::open(repo_path).map_err(MergeError::Git)?;
 
-    // Precondition: worktree must be clean
-    let statuses = repo.statuses(None).map_err(MergeError::Git)?;
+    // Precondition: worktree must be clean (excluding gitignored files)
+    let mut status_opts = git2::StatusOptions::new();
+    status_opts.include_ignored(false);
+    status_opts.include_untracked(true);
+    let statuses = repo.statuses(Some(&mut status_opts)).map_err(MergeError::Git)?;
     if !statuses.is_empty() {
         return Err(MergeError::DirtyWorktree);
     }

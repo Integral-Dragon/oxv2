@@ -52,7 +52,7 @@ pub fn poll_cx_log(repo_path: &Path, since_sha: Option<&str>) -> Result<CxPollRe
     let mut events = vec![];
     for entry in &entries {
         for change in &entry.changes {
-            if let Some(ev) = derive_event(change) {
+            if let Some(ev) = derive_event(repo_path, change) {
                 events.push(ev);
             }
         }
@@ -73,7 +73,7 @@ pub fn derive_cx_events_for_merge(
     Ok(result.events)
 }
 
-fn derive_event(change: &serde_json::Value) -> Option<DerivedCxEvent> {
+fn derive_event(repo_path: &Path, change: &serde_json::Value) -> Option<DerivedCxEvent> {
     let action = change["action"].as_str()?;
     let node_id = change["node_id"].as_str()?;
 
@@ -91,7 +91,7 @@ fn derive_event(change: &serde_json::Value) -> Option<DerivedCxEvent> {
 
             let new_state = new_state.as_deref()?;
 
-            let tags = extract_tags(change);
+            let tags = extract_tags(repo_path, node_id, change);
 
             match new_state {
                 "ready" => Some(DerivedCxEvent {
@@ -135,17 +135,16 @@ fn derive_event(change: &serde_json::Value) -> Option<DerivedCxEvent> {
 }
 
 /// Extract tags from a cx log change entry.
-/// For "created": tags are directly on the entry.
-/// For "modified": tags are in fields.tags.to.
-fn extract_tags(change: &serde_json::Value) -> Vec<String> {
-    // Created — tags directly on the change
+/// cx log includes tags on both "created" and "modified" entries.
+fn extract_tags(_repo_path: &Path, _node_id: &str, change: &serde_json::Value) -> Vec<String> {
+    // Tags directly on the change (created or modified with state change)
     if let Some(tags) = change["tags"].as_array() {
         return tags
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
     }
-    // Modified — tag changes in fields
+    // Modified — tag changes in fields.tags.to
     if let Some(tags_to) = change["fields"]["tags"]["to"].as_array() {
         return tags_to
             .iter()
