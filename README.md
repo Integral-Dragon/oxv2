@@ -93,31 +93,32 @@ ox-herder --server http://localhost:4840
 
 ### 3. Start runners
 
-Start runners individually:
+Runners execute inside seguro VMs for isolation. The agent process (e.g.
+Claude Code) cannot access the host filesystem — it only sees the cloned
+workspace and shared ox binaries.
+
+Use the pool manager to start several runners:
 
 ```bash
-ox-runner --server http://localhost:4840 --workspace-dir /tmp/ox-work
-```
-
-| Flag              | Default                    | Description                     |
-|-------------------|----------------------------|---------------------------------|
-| `--server`        | `http://localhost:4840`    | Server URL                      |
-| `--environment`   | `local`                    | Environment label               |
-| `--workspace-dir` | `/tmp/ox-work`             | Base directory for step workspaces |
-
-Or use the pool manager to start several at once:
-
-```bash
-# Start 3 runners as local processes
-ox-pool start 3 --local
-
-# Start 3 runners in seguro VMs
+# Start 3 runners in seguro VMs (default)
 OX_SERVER=http://localhost:4840 ox-pool start 3
 
 # Check status / stop
 ox-pool status
 ox-pool stop
 ```
+
+Each runner:
+- Boots a seguro VM with ox binaries shared read-only
+- Connects to ox-server via QEMU gateway (`10.0.2.2`)
+- Clones workspaces from ox-server's git endpoint
+- Pushes completed work back via git
+
+| Flag              | Default                    | Description                     |
+|-------------------|----------------------------|---------------------------------|
+| `--server`        | `http://localhost:4840`    | Server URL                      |
+| `--environment`   | `seguro`                   | Environment label               |
+| `--workspace-dir` | `/tmp/ox-work`             | Base directory for step workspaces |
 
 ### 4. Set secrets
 
@@ -371,15 +372,17 @@ OX_HOME=/path/to/oxv2/defaults ./target/debug/ox-server --repo /path/to/project
 # Terminal 2: herder
 OX_HOME=/path/to/oxv2/defaults ./target/debug/ox-herder
 
-# Terminal 3: runners
-./bin/ox-pool start 2 --local
+# Terminal 3: runners (seguro VMs)
+OX_SERVER=http://localhost:4840 ./bin/ox-pool start 2
 
 # Terminal 4: set secrets and go
 ./target/debug/ox-ctl secrets set claude_credentials --value "$(cat ~/.claude/.credentials.json)"
 ./target/debug/ox-ctl status
 ```
 
-The server polls `cx log` every 10 seconds. When a cx node tagged
+The server polls `cx log` every 10 seconds. On first boot, it snapshots
+current cx state — only nodes that are currently `ready` trigger
+workflows (not historical transitions). When a cx node tagged
 `workflow:code-task` is surfaced to `ready`, the workflow starts
 automatically. Monitor with:
 
@@ -388,3 +391,7 @@ automatically. Monitor with:
 ./target/debug/ox-ctl exec list                    # list executions
 ./target/debug/ox-ctl exec logs <id> <step> -f     # follow step logs
 ```
+
+For project-specific setup, see the `ox-up` pattern used by ccstat: a
+single script that starts the server, herder, seeds credentials, and
+launches seguro runners pointed at the project repo.

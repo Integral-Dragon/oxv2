@@ -306,15 +306,17 @@ agent claims.
 | `fast_exit` | Step completed in under 30 seconds | runner |
 | `empty_log` | Runtime log artifact is zero bytes | runner |
 
-**Default failure rules** — applied before transition matching:
+**Default failure rules** — applied before transition matching.
+Only `exited_silent` is a hard failure; workspace signals are
+informational since the agent owns its git workflow.
 
 | Condition | Result |
 |-----------|--------|
-| `no_commits` and `push = true` | Step failure |
-| `dirty_workspace` | Step failure |
 | `exited_silent` | Step failure |
-| `fast_exit` alone | Informational only |
-| `empty_log` alone | Informational only |
+| `no_commits` | Informational — does not fail the step |
+| `dirty_workspace` | Informational — does not fail the step |
+| `fast_exit` | Informational only |
+| `empty_log` | Informational only |
 
 Signal-triggered failures set `error = "signal:<name>"` on the
 `step.failed` event. The `on_fail` handler runs as normal.

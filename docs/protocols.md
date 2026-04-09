@@ -72,8 +72,11 @@ After `done`, the runtime should exit. ox-runner ignores further
 commands after `done` except `metric` (which may arrive from cleanup
 code before exit).
 
-If the runtime exits without sending `done`, ox-runner detects
-`exited_silent` and fails the step.
+If the runtime exits with code 0 without sending `done`, ox-runner
+infers `done ""` (empty output) — the workflow engine advances to the
+next step by declaration order. If the runtime exits with a non-zero
+code without sending `done`, ox-runner detects `exited_silent` and
+fails the step.
 
 #### `artifact <name> <base64-data>`
 

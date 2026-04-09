@@ -146,16 +146,18 @@ observes the workspace state directly.
 
 ### Default failure rules
 
-Applied before transition matching. A signal can convert a successful
-runtime exit into a step failure:
+Applied before transition matching. Only `exited_silent` is a hard
+failure — the agent never signaled completion. Other signals are
+informational: the agent owns its git workflow and calls `ox-rt done`
+when finished.
 
 | Condition | Result |
 |-----------|--------|
-| `no_commits` and `push = true` | Step failure — `error = "signal:no_commits"` |
-| `dirty_workspace` | Step failure — `error = "signal:dirty_workspace"` |
 | `exited_silent` | Step failure — `error = "signal:exited_silent"` |
-| `fast_exit` alone | Informational only — no failure |
-| `empty_log` alone | Informational only — no failure |
+| `no_commits` | Informational — recorded but does not fail the step |
+| `dirty_workspace` | Informational — recorded but does not fail the step |
+| `fast_exit` | Informational only |
+| `empty_log` | Informational only |
 
 Signal-triggered failures emit `step.failed` and the `on_fail` handler
 runs as normal.
