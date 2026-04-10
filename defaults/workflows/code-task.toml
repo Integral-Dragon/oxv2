@@ -181,6 +181,14 @@ prompt  = """Implement the task following the approved proposal.
    git fetch origin main
    git rebase origin/main
    ```
+   If the rebase has conflicts, resolve them:
+   - Read the conflict markers in each file
+   - Understand what main changed (another task likely merged)
+   - Keep both changes where possible — your work AND main's changes
+   - `git add <resolved files>` then `git rebase --continue`
+   - Repeat for each conflicting commit until the rebase completes
+   - If a conflict is unresolvable, `git rebase --abort` and report
+     `ox-rt done fail` with a description of the conflict
 5. Write code and tests as specified in the proposal.
 6. Update documentation: if user-facing behavior or API surface changed,
    update the relevant docs (README, docs/, etc.) as identified in the
@@ -275,19 +283,32 @@ push      = true
 type    = "claude"
 model   = "sonnet"
 persona = "inspired/tech-lead"
-prompt  = """This task has failed code review 3 times. You are the tiebreaker.
+prompt  = """This task needs tiebreaking — either code review failed repeatedly or
+the merge had conflicts. You are the tiebreaker.
 
 1. Read the task spec: `cx show {task_id}`
-2. Read ALL code reviews: `cx comments {task_id} --tag code-review`
-3. Review the diff: `git diff origin/main..HEAD`
-4. Decide:
-   - If close: fix remaining issues yourself, commit, integrate:
-     `cx integrate {task_id} --reason "tiebreak: fixed remaining issues"`
-     `git add -A && git commit -m "tiebreak({task_id}): fix and integrate"`
+2. Read ALL comments: `cx comments {task_id}`
+3. Rebase onto main and resolve any conflicts:
+   ```
+   git fetch origin main
+   git rebase origin/main
+   ```
+   If the rebase has conflicts, resolve them:
+   - Read the conflict markers in each file
+   - Understand what main changed (another task likely merged first)
+   - Keep both changes — your branch's work AND main's new code
+   - `git add <resolved files>` then `git rebase --continue`
+   - Repeat until the rebase completes
+4. Review the diff: `git diff origin/main..HEAD`
+5. Verify the build: `cargo build && cargo test && cargo clippy`
+6. Decide:
+   - If the code works after rebase: integrate and report pass:
+     `cx integrate {task_id} --reason "tiebreak: resolved and integrated"`
+     `git add -A && git commit -m "tiebreak({task_id}): resolve and integrate"`
      `git push origin {task_id}`
      `ox-rt done pass`
-   - If fundamentally wrong: shadow it.
-     `cx shadow {task_id} --reason "implementation failed after 3 reviews"`
+   - If fundamentally broken: shadow it.
+     `cx shadow {task_id} --reason "implementation not salvageable"`
      `git add .complex/ && git commit -m "tiebreak({task_id}): not salvageable"`
      `git push origin {task_id}`
      `ox-rt done fail`
