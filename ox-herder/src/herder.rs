@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 enum ExecPhase {
     /// Step is in-flight on a runner — nothing to do.
-    AwaitingStep,
+    AwaitingStep { step: String, attempt: u32, runner: String },
     /// Step confirmed — scheduler should advance the workflow.
     NeedsAdvance { step: String },
     /// Step failed — scheduler should retry or escalate.
@@ -233,7 +233,7 @@ impl Herder {
                 // Re-ready the orphaned step if the runner was working on one
                 if let (Some(exec_id), Some(step), Some(attempt)) = (&d.execution_id, &d.step, d.attempt)
                     && let Some(exec) = self.executions.get_mut(exec_id)
-                        && matches!(exec.phase, ExecPhase::AwaitingStep) {
+                        && matches!(exec.phase, ExecPhase::AwaitingStep { .. }) {
                             tracing::info!(exec = %exec_id, step = %step, attempt, "re-dispatching orphaned step");
                             exec.phase = ExecPhase::Ready { step: step.clone(), attempt };
                         }
@@ -298,7 +298,11 @@ impl Herder {
                 }
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     if exec.status == "running" {
-                        exec.phase = ExecPhase::AwaitingStep;
+                        exec.phase = ExecPhase::AwaitingStep {
+                            step: d.step.clone(),
+                            attempt: d.attempt,
+                            runner: d.runner_id.0.clone(),
+                        };
                     }
                     // During replay, reconstruct visit_counts from dispatches
                     if self.replaying {
@@ -466,7 +470,22 @@ impl Herder {
                     false
                 }
             }
-            ExecPhase::AwaitingStep | ExecPhase::Done => false,
+            ExecPhase::AwaitingStep { ref step, attempt, ref runner } => {
+                // Check if the assigned runner is still busy with this step.
+                // If the runner is idle or gone, the step is orphaned — re-dispatch.
+                let runner_busy = self.runners.get(runner)
+                    .is_some_and(|r| !r.idle && r.current_execution.as_deref() == Some(exec_id));
+                if !runner_busy {
+                    let step = step.clone();
+                    tracing::warn!(exec = %exec_id, step = %step, runner = %runner, "runner no longer executing step — re-dispatching");
+                    if let Some(exec) = self.executions.get_mut(exec_id) {
+                        exec.phase = ExecPhase::Ready { step, attempt };
+                    }
+                    return true;
+                }
+                false
+            }
+            ExecPhase::Done => false,
         }
     }
 
@@ -811,11 +830,14 @@ impl Herder {
                 .await
             {
                 Ok(_) => {
-                    // Phase transitions to AwaitingStep when step.dispatched
-                    // event arrives back through SSE. But set it here too
-                    // so the scheduler doesn't try to dispatch again.
+                    // Set AwaitingStep immediately so the scheduler doesn't
+                    // try to dispatch again before step.dispatched arrives via SSE.
                     if let Some(exec) = self.executions.get_mut(&exec_id) {
-                        exec.phase = ExecPhase::AwaitingStep;
+                        exec.phase = ExecPhase::AwaitingStep {
+                            step: step.clone(),
+                            attempt,
+                            runner: runner_id.0.clone(),
+                        };
                     }
                 }
                 Err(e) => {
