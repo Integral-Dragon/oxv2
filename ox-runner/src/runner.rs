@@ -93,8 +93,12 @@ impl Runner {
             }
         });
 
-        // Subscribe to SSE
-        let url = format!("{}/api/events/stream", self.server_url);
+        // Subscribe to SSE from current seq — runner only needs live events,
+        // not historical replay. Old dispatches for recycled runner IDs must be ignored.
+        let current_seq = self.client.status().await
+            .map(|s| s.event_seq)
+            .unwrap_or(0);
+        let url = format!("{}/api/events/stream?last_event_id={}", self.server_url, current_seq);
         let mut es = EventSource::get(&url);
 
         tracing::info!("subscribed to SSE, waiting for step assignments");
