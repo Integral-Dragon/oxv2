@@ -103,6 +103,9 @@ enum ExecCommands {
         /// Follow log output (like tail -f).
         #[arg(long, short = 'f')]
         follow: bool,
+        /// Pretty-print Claude Code stream-json logs.
+        #[arg(long, short = 'p')]
+        pretty: bool,
     },
 }
 
@@ -150,8 +153,8 @@ async fn main() -> Result<()> {
             }
             ExecCommands::Show { id } => cmd_exec_show(&client, json, &id).await,
             ExecCommands::Cancel { id } => cmd_exec_cancel(&client, &id).await,
-            ExecCommands::Logs { id, step, attempt, lines, follow } => {
-                cmd_logs(&cli.server, &id, &step, attempt, lines, follow).await
+            ExecCommands::Logs { id, step, attempt, lines, follow, pretty } => {
+                cmd_logs(&cli.server, &id, &step, attempt, lines, follow, pretty).await
             }
         },
         Commands::Runners { command } => match command {
@@ -474,6 +477,7 @@ async fn cmd_logs(
     attempt: Option<u32>,
     lines: Option<usize>,
     follow: bool,
+    pretty: bool,
 ) -> Result<()> {
     let client = reqwest::Client::new();
     let base_url = format!("{server_url}/api/executions/{execution_id}/steps/{step}/log");
@@ -502,7 +506,11 @@ async fn cmd_logs(
         // In follow mode, wait for logs to appear
     } else {
         let text = resp.error_for_status()?.text().await?;
-        print!("{text}");
+        if pretty {
+            pretty_print_claude_log(&text);
+        } else {
+            print!("{text}");
+        }
 
         if !follow {
             return Ok(());
@@ -554,9 +562,149 @@ async fn cmd_logs(
 
         if let Ok(text) = resp.text().await {
             if text.len() > known_len {
-                print!("{}", &text[known_len..]);
+                let new_data = &text[known_len..];
+                if pretty {
+                    pretty_print_claude_log(new_data);
+                } else {
+                    print!("{new_data}");
+                }
                 known_len = text.len();
             }
+        }
+    }
+}
+
+/// Pretty-print Claude Code stream-json log output.
+/// Renders assistant text, tool calls, and tool results in a readable format.
+fn pretty_print_claude_log(text: &str) {
+    const DIM: &str = "\x1b[2m";
+    const BOLD: &str = "\x1b[1m";
+    const CYAN: &str = "\x1b[36m";
+    const RED: &str = "\x1b[31m";
+    const RESET: &str = "\x1b[0m";
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => {
+                println!("{line}");
+                continue;
+            }
+        };
+
+        match v["type"].as_str().unwrap_or("") {
+            "system" => {
+                if v["subtype"].as_str() == Some("init") {
+                    let model = v["model"].as_str().unwrap_or("?");
+                    let cwd = v["cwd"].as_str().unwrap_or("?");
+                    println!("{DIM}── session: model={model} cwd={cwd} ──{RESET}");
+                }
+            }
+            "assistant" => {
+                let content = v["message"]["content"].as_array();
+                if let Some(blocks) = content {
+                    for block in blocks {
+                        match block["type"].as_str().unwrap_or("") {
+                            "text" => {
+                                let text = block["text"].as_str().unwrap_or("");
+                                if !text.is_empty() {
+                                    println!("{BOLD}{text}{RESET}");
+                                }
+                            }
+                            "tool_use" => {
+                                let name = block["name"].as_str().unwrap_or("?");
+                                let input = &block["input"];
+                                match name {
+                                    "Bash" => {
+                                        let cmd = input["command"].as_str().unwrap_or("");
+                                        let desc = input["description"].as_str().unwrap_or("");
+                                        if !desc.is_empty() {
+                                            println!("{CYAN}$ {cmd}{RESET}  {DIM}# {desc}{RESET}");
+                                        } else {
+                                            println!("{CYAN}$ {cmd}{RESET}");
+                                        }
+                                    }
+                                    "Read" => {
+                                        let path = input["file_path"].as_str().unwrap_or("?");
+                                        println!("{CYAN}  read {path}{RESET}");
+                                    }
+                                    "Write" => {
+                                        let path = input["file_path"].as_str().unwrap_or("?");
+                                        println!("{CYAN}  write {path}{RESET}");
+                                    }
+                                    "Edit" => {
+                                        let path = input["file_path"].as_str().unwrap_or("?");
+                                        println!("{CYAN}  edit {path}{RESET}");
+                                    }
+                                    "Glob" => {
+                                        let pattern = input["pattern"].as_str().unwrap_or("?");
+                                        println!("{CYAN}  glob {pattern}{RESET}");
+                                    }
+                                    "Grep" => {
+                                        let pattern = input["pattern"].as_str().unwrap_or("?");
+                                        println!("{CYAN}  grep {pattern}{RESET}");
+                                    }
+                                    _ => {
+                                        let short = serde_json::to_string(input).unwrap_or_default();
+                                        let short = if short.len() > 80 {
+                                            format!("{}...", &short[..80])
+                                        } else {
+                                            short
+                                        };
+                                        println!("{CYAN}  {name}({short}){RESET}");
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "user" => {
+                let content = v["message"]["content"].as_array();
+                if let Some(blocks) = content {
+                    for block in blocks {
+                        if block["type"].as_str() == Some("tool_result") {
+                            let is_error = block["is_error"].as_bool().unwrap_or(false);
+                            let content_str = block["content"].as_str().unwrap_or("");
+                            if is_error {
+                                let short = if content_str.len() > 200 {
+                                    format!("{}...", &content_str[..200])
+                                } else {
+                                    content_str.to_string()
+                                };
+                                println!("{RED}  error: {short}{RESET}");
+                            } else if !content_str.is_empty() {
+                                // Show first line of output, dimmed
+                                let first_line = content_str.lines().next().unwrap_or("");
+                                let first_line = if first_line.len() > 120 {
+                                    format!("{}...", &first_line[..120])
+                                } else {
+                                    first_line.to_string()
+                                };
+                                println!("{DIM}  → {first_line}{RESET}");
+                            }
+                        }
+                    }
+                }
+            }
+            "result" => {
+                let cost = v["cost_usd"].as_f64();
+                let duration = v["duration_ms"].as_u64();
+                let tokens_in = v["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                let tokens_out = v["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                if let (Some(cost), Some(dur)) = (cost, duration) {
+                    println!(
+                        "{DIM}── done: {:.1}s, {tokens_in}in/{tokens_out}out, ${cost:.4} ──{RESET}",
+                        dur as f64 / 1000.0
+                    );
+                }
+            }
+            _ => {}
         }
     }
 }
