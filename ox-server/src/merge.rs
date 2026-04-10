@@ -32,18 +32,19 @@ impl From<String> for MergeError {
     }
 }
 
-/// Merge a branch into main using rebase + fast-forward.
+/// Merge a branch into main. Never leaves main's HEAD.
 ///
-/// 1. Record current main HEAD
-/// 2. Rebase the branch onto main (abort on conflicts)
-/// 3. Fast-forward main to the rebased branch
+/// Strategy:
+/// - 1 commit ahead → fast-forward (preserves the commit as-is)
+/// - >1 commits ahead + squash → `git merge --squash` (single commit on main)
+/// - >1 commits ahead + no squash → `git merge --no-ff` (merge commit)
 ///
-/// The repo is always left clean on main. If the rebase has conflicts,
-/// it is aborted and a Conflicts error is returned.
+/// All paths stay on main. No branch checkout. No rebase.
 pub fn merge_to_main(repo_path: &Path, branch: &str, squash: bool) -> Result<MergeResult, MergeError> {
-    // Precondition: must be on main with clean worktree.
-    // Abort any in-progress rebase from a previous failed attempt.
+    // Ensure we're on main with clean worktree.
+    // Abort any stale rebase/merge from a previous failed attempt.
     let _ = git(repo_path, &["rebase", "--abort"]);
+    let _ = git(repo_path, &["merge", "--abort"]);
     let current = git(repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if current != "main" {
         git(repo_path, &["checkout", "main"])
@@ -51,7 +52,6 @@ pub fn merge_to_main(repo_path: &Path, branch: &str, squash: bool) -> Result<Mer
     }
 
     let status = git(repo_path, &["status", "--porcelain", "--ignore-submodules"])?;
-    // Filter out ignored files (lines starting with !!)
     let dirty: Vec<&str> = status.lines().filter(|l| !l.starts_with("!!")).collect();
     if !dirty.is_empty() {
         return Err(MergeError::DirtyWorktree);
@@ -66,82 +66,85 @@ pub fn merge_to_main(repo_path: &Path, branch: &str, squash: bool) -> Result<Mer
 
     // Check branch has commits ahead of main
     let ahead = git(repo_path, &["rev-list", "--count", &format!("main..{branch}")])?;
-    if ahead.trim() == "0" {
+    let ahead_count: u32 = ahead.trim().parse().unwrap_or(0);
+    if ahead_count == 0 {
         return Err(MergeError::EmptyBranch);
     }
 
-    // Squash: if requested and branch has >1 commit ahead, collapse into one
-    let ahead_count: u32 = ahead.trim().parse().unwrap_or(0);
-    if squash && ahead_count > 1 {
-        // Collect all commit messages (oldest first)
+    // 1 commit ahead → fast-forward (preserves agent's commit message)
+    if ahead_count == 1 {
+        let result = Command::new("git")
+            .args(["merge", "--ff-only", branch])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| MergeError::Git(e.to_string()))?;
+
+        if !result.status.success() {
+            // ff-only failed — branch diverged from main
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            return Err(MergeError::Conflicts {
+                branch: format!("{branch} (ff-only failed: {stderr})"),
+            });
+        }
+
+        let new_head = git(repo_path, &["rev-parse", "main"])?;
+        return Ok(MergeResult { prev_head, new_head });
+    }
+
+    // >1 commits ahead + squash → squash merge (single commit on main)
+    if squash {
+        // Collect all commit messages for the squash commit
         let messages = git(
             repo_path,
             &["log", "--reverse", "--format=%B", &format!("main..{branch}")],
         )?;
 
-        // Checkout the branch, soft-reset to merge base, recommit
-        git(repo_path, &["checkout", branch])
-            .map_err(|e| MergeError::Git(format!("checkout branch for squash: {e}")))?;
-        let merge_base = git(repo_path, &["merge-base", "main", "HEAD"])?;
-        git(repo_path, &["reset", "--soft", &merge_base])
-            .map_err(|e| MergeError::Git(format!("soft reset for squash: {e}")))?;
+        let merge_result = Command::new("git")
+            .args(["merge", "--squash", branch])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| MergeError::Git(e.to_string()))?;
 
-        let squash_commit = Command::new("git")
+        if !merge_result.status.success() {
+            // Squash merge had conflicts — abort
+            let _ = git(repo_path, &["reset", "--hard", "HEAD"]);
+            return Err(MergeError::Conflicts {
+                branch: branch.to_string(),
+            });
+        }
+
+        // Commit the squashed changes with concatenated messages
+        let commit_result = Command::new("git")
             .args(["commit", "-m", messages.trim()])
             .current_dir(repo_path)
             .output()
             .map_err(|e| MergeError::Git(e.to_string()))?;
 
-        if !squash_commit.status.success() {
-            let stderr = String::from_utf8_lossy(&squash_commit.stderr);
+        if !commit_result.status.success() {
+            let stderr = String::from_utf8_lossy(&commit_result.stderr);
+            let _ = git(repo_path, &["reset", "--hard", "HEAD"]);
             return Err(MergeError::Git(format!("squash commit failed: {stderr}")));
         }
 
-        // Back to main for rebase
-        git(repo_path, &["checkout", "main"])
-            .map_err(|e| MergeError::Git(format!("checkout main after squash: {e}")))?;
+        let new_head = git(repo_path, &["rev-parse", "main"])?;
+        return Ok(MergeResult { prev_head, new_head });
     }
 
-    // Rebase branch onto main
-    let rebase = Command::new("git")
-        .args(["rebase", "main", branch])
+    // >1 commits ahead + no squash → merge commit
+    let merge_result = Command::new("git")
+        .args(["merge", "--no-ff", "--no-edit", branch])
         .current_dir(repo_path)
         .output()
         .map_err(|e| MergeError::Git(e.to_string()))?;
 
-    if !rebase.status.success() {
-        // Abort the failed rebase, return to main
-        let _ = Command::new("git")
-            .args(["rebase", "--abort"])
-            .current_dir(repo_path)
-            .output();
-        let _ = Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(repo_path)
-            .output();
+    if !merge_result.status.success() {
+        let _ = git(repo_path, &["merge", "--abort"]);
         return Err(MergeError::Conflicts {
             branch: branch.to_string(),
         });
     }
 
-    // Back to main
-    git(repo_path, &["checkout", "main"])
-        .map_err(|e| MergeError::Git(format!("checkout main after rebase: {e}")))?;
-
-    // Fast-forward merge — guaranteed to work after a successful rebase
-    let merge = Command::new("git")
-        .args(["merge", "--ff-only", branch])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| MergeError::Git(e.to_string()))?;
-
-    if !merge.status.success() {
-        let stderr = String::from_utf8_lossy(&merge.stderr);
-        return Err(MergeError::Git(format!("ff-only merge failed: {stderr}")));
-    }
-
     let new_head = git(repo_path, &["rev-parse", "main"])?;
-
     Ok(MergeResult { prev_head, new_head })
 }
 

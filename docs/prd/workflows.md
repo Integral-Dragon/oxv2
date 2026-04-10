@@ -260,14 +260,15 @@ recoverable error.
 silently drop, overwrite, or skip any commit from either the branch or
 main.
 
-**Merge strategy:**
-1. If `squash = true` and branch has >1 commit ahead of main: collect
-   all commit messages, soft-reset to merge base, create a single commit
-   with the concatenated messages. If the branch already has exactly one
-   commit, this is a no-op.
-2. Rebase the branch onto main. If conflicts exist, abort the rebase
-   and fail the step.
-3. Fast-forward main to the rebased branch (`--ff-only`).
+**Merge strategy — main never leaves HEAD:**
+1. If the branch has exactly 1 commit ahead → fast-forward
+   (`--ff-only`). Preserves the agent's commit as-is.
+2. If `squash = true` and >1 commits ahead → `git merge --squash`.
+   Creates a single commit on main with all commit messages
+   concatenated. No branch checkout.
+3. If `squash = false` and >1 commits ahead → `git merge --no-ff`.
+   Creates a merge commit. No branch checkout.
+4. Conflicts in any path → abort and fail the step.
 
 **Preconditions checked before merge:**
 - Worktree must be clean. Dirty worktree blocks all merges.

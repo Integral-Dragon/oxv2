@@ -281,47 +281,42 @@ It is the only path for code and cx state to land on main.
 
 ### Implementation
 
-Uses git CLI (not git2) for reliability:
+Uses git CLI. **Main never leaves HEAD** — no branch checkouts,
+no rebase. All operations happen on main.
 
 ```rust
 fn merge_to_main(repo_path: &Path, branch: &str, squash: bool)
     -> Result<MergeResult, MergeError>
 {
-    // Preconditions
-    // - Must be on main with clean worktree
-    // - Branch must exist and have commits ahead of main
+    // Preconditions: on main, clean worktree, branch exists + has commits
 
-    let ahead = git(&["rev-list", "--count", &format!("main..{branch}")])?;
+    let ahead = count_commits_ahead("main", branch);
 
-    // Optional squash: collapse all branch commits into one
-    if squash && ahead > 1 {
-        let messages = git(&["log", "--reverse", "--format=%B",
-                             &format!("main..{branch}")])?;
-        git(&["checkout", branch])?;
-        let merge_base = git(&["merge-base", "main", "HEAD"])?;
-        git(&["reset", "--soft", &merge_base])?;
-        git(&["commit", "-m", &messages])?;
-        git(&["checkout", "main"])?;
+    match ahead {
+        // 1 commit → fast-forward (preserves agent's commit)
+        1 => git(&["merge", "--ff-only", branch])?,
+
+        // >1 + squash → squash merge on main
+        n if squash => {
+            let messages = git(&["log", "--reverse", "--format=%B",
+                                 &format!("main..{branch}")])?;
+            git(&["merge", "--squash", branch])?;
+            git(&["commit", "-m", &messages])?;
+        }
+
+        // >1 + no squash → merge commit
+        _ => git(&["merge", "--no-ff", "--no-edit", branch])?,
     }
-
-    // Rebase branch onto main (abort on conflicts)
-    git(&["rebase", "main", branch])?;  // or abort + return Conflicts
-    git(&["checkout", "main"])?;
-
-    // Fast-forward — guaranteed after successful rebase
-    git(&["merge", "--ff-only", branch])?;
-
-    Ok(MergeResult { prev_head, new_head })
 }
 ```
 
 The `squash` flag is set per step in the workflow definition. When
-enabled, all branch commits are collapsed into a single commit whose
-message is the concatenation of all original commit messages. If the
-branch already has exactly one commit, the squash is a no-op.
+enabled and the branch has >1 commit, `git merge --squash` stages all
+changes on main and commits with concatenated messages. If the agent
+already squashed (1 commit ahead), fast-forward preserves it as-is.
 
-The squash happens before the rebase, so the rebased result is always
-a single commit that fast-forwards cleanly.
+On conflict in any path, the merge is aborted and the step fails.
+The repo is always left clean on main.
 
 ### Post-Merge: cx Event Derivation
 
