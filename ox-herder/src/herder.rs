@@ -5,19 +5,27 @@ use ox_core::events::*;
 use ox_core::types::*;
 use ox_core::workflow::{RetryDecision, RetryTracker, StepAdvance, WorkflowDef, WorkflowEngine};
 use reqwest_eventsource::{Event as SseEvent, EventSource};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// A step waiting to be dispatched to an idle runner.
-#[derive(Debug)]
-struct PendingStep {
-    execution_id: String,
-    task_id: String,
-    step: String,
-    attempt: u32,
-    runtime: serde_json::Value,
-    workspace: serde_json::Value,
+// ── Execution phase state machine ──────────────────────────────────
+
+/// What the scheduler needs to do for this execution.
+#[derive(Debug, Clone)]
+enum ExecPhase {
+    /// Step is in-flight on a runner — nothing to do.
+    AwaitingStep,
+    /// Step confirmed — scheduler should advance the workflow.
+    NeedsAdvance { step: String },
+    /// Step failed — scheduler should retry or escalate.
+    NeedsFailure { step: String, error: String },
+    /// Next step determined — needs dispatching (or inline action).
+    Ready { step: String, attempt: u32 },
+    /// Terminal — completed, escalated, or cancelled.
+    Done,
 }
+
+// ── Local state views ──────────────────────────────────────────────
 
 /// Local view of a runner's state, rebuilt from SSE events.
 #[derive(Debug)]
@@ -30,17 +38,23 @@ struct RunnerView {
 
 /// Local view of an execution, rebuilt from SSE events.
 #[derive(Debug)]
-#[allow(dead_code)]
 struct ExecutionView {
     id: String,
     task_id: String,
     workflow: String,
-    current_step: Option<String>,
-    current_attempt: u32,
     status: String, // "running", "completed", "escalated", "cancelled"
+    phase: ExecPhase,
     visit_counts: HashMap<String, u32>,
     last_output: Option<String>,
     retry_tracker: RetryTracker,
+}
+
+/// A pending trigger to evaluate in the next scheduling pass.
+#[derive(Debug)]
+struct PendingTrigger {
+    node_id: String,
+    event_type: String,
+    tags: Vec<String>,
 }
 
 pub struct Herder {
@@ -55,14 +69,13 @@ pub struct Herder {
     runners: HashMap<String, RunnerView>,
     executions: HashMap<String, ExecutionView>,
     workflows: HashMap<String, WorkflowEngine>,
-    pending: VecDeque<PendingStep>,
+    pending_triggers: Vec<PendingTrigger>,
     last_seq: u64,
-    /// True while replaying historical events — suppresses side effects
-    /// (creating executions, dispatching steps) until caught up.
+    /// True while replaying historical events — suppresses side effects.
     replaying: bool,
     /// The server's current seq at startup, used to detect end of replay.
     replay_target: u64,
-    /// Track last-fired times for poll triggers: (workflow_name, trigger_index) -> Instant
+    /// Track last-fired times for poll triggers.
     #[allow(dead_code)]
     poll_trigger_times: HashMap<(String, usize), Instant>,
 }
@@ -83,7 +96,7 @@ impl Herder {
             runners: HashMap::new(),
             executions: HashMap::new(),
             workflows: HashMap::new(),
-            pending: VecDeque::new(),
+            pending_triggers: Vec::new(),
             last_seq: 0,
             replaying: true,
             replay_target: 0,
@@ -92,7 +105,6 @@ impl Herder {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        // Load workflow definitions from server
         self.load_workflows().await?;
 
         // Get current server seq so we know when replay is done
@@ -125,7 +137,7 @@ impl Herder {
                     match event {
                         Ok(SseEvent::Open) => {
                             tracing::debug!("SSE connection opened");
-                            backoff_secs = 1; // reset on successful connection
+                            backoff_secs = 1;
                         }
                         Ok(SseEvent::Message(msg)) => {
                             if let Err(e) = self.handle_sse_message(&msg.event, &msg.data).await {
@@ -135,8 +147,7 @@ impl Herder {
                             if self.replaying && self.last_seq >= self.replay_target {
                                 self.replaying = false;
                                 tracing::info!(seq = self.last_seq, "replay complete, entering live mode");
-                                // Now dispatch any pending steps from restored executions
-                                self.try_dispatch_pending().await;
+                                self.schedule().await;
                             }
                         }
                         Err(reqwest_eventsource::Error::StreamEnded) => {
@@ -166,16 +177,8 @@ impl Herder {
 
     async fn load_workflows(&mut self) -> Result<()> {
         let workflows = self.client.list_workflows().await?;
-        // We need the full definitions to do transition matching.
-        // For now, fetch them via the list endpoint. The herder needs step+transition info
-        // which the list endpoint provides as names only. We need to enhance this.
-        // For Phase 3, we load workflow TOMLs from the same search path the server uses.
-        // TODO: Add a GET /api/workflows/{name} endpoint that returns the full definition.
-        // For now, the herder relies on knowing workflow step order from the server's list.
         tracing::info!(count = workflows.len(), "loaded workflows from server");
 
-        // We'll load workflow definitions from the config search path directly
-        // since the herder needs the full step graph for transition matching.
         let search_path = ox_core::config::resolve_search_path(std::path::Path::new("."));
         for (name, path) in ox_core::config::load_all_configs(&search_path, "workflows") {
             match WorkflowDef::from_file(&path) {
@@ -191,6 +194,8 @@ impl Herder {
 
         Ok(())
     }
+
+    // ── Event handlers — pure state updates ────────────────────────
 
     async fn handle_sse_message(&mut self, event_type: &str, data: &str) -> Result<()> {
         let envelope: EventEnvelope =
@@ -210,8 +215,6 @@ impl Herder {
                         current_step: None,
                     },
                 );
-                // Try to dispatch pending steps
-                self.try_dispatch_pending().await;
             }
             "runner.drained" => {
                 let d: RunnerDrainedData = serde_json::from_value(envelope.data)?;
@@ -222,30 +225,32 @@ impl Herder {
             "execution.created" => {
                 let d: ExecutionCreatedData = serde_json::from_value(envelope.data)?;
                 tracing::info!(exec = %d.execution_id, task = %d.task_id, workflow = %d.workflow, "execution created");
+
+                // Determine first step
+                let first_step = self.workflows.get(&d.workflow)
+                    .and_then(|e| e.first_step())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+
                 self.executions.insert(
                     d.execution_id.0.clone(),
                     ExecutionView {
                         id: d.execution_id.0.clone(),
                         task_id: d.task_id,
-                        workflow: d.workflow.clone(),
-                        current_step: None,
-                        current_attempt: 0,
+                        workflow: d.workflow,
                         status: "running".into(),
+                        phase: ExecPhase::Ready { step: first_step, attempt: 1 },
                         visit_counts: HashMap::new(),
                         last_output: None,
                         retry_tracker: RetryTracker::new(),
                     },
                 );
-                // Dispatch the first step (only in live mode — during replay,
-                // the step.dispatched event will rebuild the state)
-                if !self.replaying {
-                    self.dispatch_first_step(&d.execution_id.0, &d.workflow).await;
-                }
             }
             "execution.completed" => {
                 let d: ExecutionCompletedData = serde_json::from_value(envelope.data)?;
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     exec.status = "completed".into();
+                    exec.phase = ExecPhase::Done;
                 }
                 tracing::info!(exec = %d.execution_id, "execution completed");
             }
@@ -253,6 +258,7 @@ impl Herder {
                 let d: ExecutionEscalatedData = serde_json::from_value(envelope.data)?;
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     exec.status = "escalated".into();
+                    exec.phase = ExecPhase::Done;
                 }
                 tracing::info!(exec = %d.execution_id, step = %d.step, reason = %d.reason, "execution escalated");
             }
@@ -260,6 +266,7 @@ impl Herder {
                 let d: ExecutionCancelledData = serde_json::from_value(envelope.data)?;
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     exec.status = "cancelled".into();
+                    exec.phase = ExecPhase::Done;
                 }
             }
 
@@ -272,12 +279,8 @@ impl Herder {
                     runner.current_step = Some(d.step.clone());
                 }
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
-                    exec.current_step = Some(d.step.clone());
-                    exec.current_attempt = d.attempt;
+                    exec.phase = ExecPhase::AwaitingStep;
                     // During replay, reconstruct visit_counts from dispatches
-                    // (advance_workflow/handle_step_failure don't run in replay).
-                    // During live, those methods already increment visit_counts,
-                    // so skip here to avoid double-counting.
                     if self.replaying {
                         *exec.visit_counts.entry(d.step.clone()).or_insert(0) += 1;
                     }
@@ -285,7 +288,6 @@ impl Herder {
             }
             "step.done" => {
                 let d: StepDoneData = serde_json::from_value(envelope.data)?;
-                // Pending — herder waits for step.confirmed
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     exec.last_output = Some(d.output);
                 }
@@ -293,47 +295,34 @@ impl Herder {
             "step.confirmed" => {
                 let d: StepConfirmedData = serde_json::from_value(envelope.data)?;
                 tracing::info!(exec = %d.execution_id, step = %d.step, "step confirmed");
-
-                // Free the runner
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
-
-                // Reset retry tracker on success
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     exec.retry_tracker.reset();
-                }
-
-                // Advance the workflow (only in live mode)
-                if !self.replaying {
-                    self.advance_workflow(&d.execution_id.0, &d.step).await;
-                    self.try_dispatch_pending().await;
+                    exec.phase = ExecPhase::NeedsAdvance { step: d.step };
                 }
             }
             "step.failed" => {
                 let d: StepFailedData = serde_json::from_value(envelope.data)?;
                 tracing::warn!(exec = %d.execution_id, step = %d.step, error = %d.error, "step failed");
-
-                // Free the runner
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
-
-                // Handle retry or escalate (only in live mode)
-                if !self.replaying {
-                    self.handle_step_failure(&d.execution_id.0, &d.step, &d.error).await;
+                if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
+                    exec.phase = ExecPhase::NeedsFailure { step: d.step, error: d.error };
                 }
-
-                // Try dispatch pending
-                self.try_dispatch_pending().await;
             }
             "step.advanced" => {
-                // Already handled by our own advance call — just update local state
+                // Pure state — no action needed, scheduler already handled it
             }
 
-            // cx events — evaluate triggers (only in live mode)
+            // cx events — queue for trigger evaluation
             "cx.task_ready" => {
                 let d: CxTaskReadyData = serde_json::from_value(envelope.data)?;
                 tracing::info!(node = %d.node_id, tags = ?d.tags, replaying = self.replaying, "cx.task_ready");
                 if !self.replaying {
-                    self.evaluate_triggers_for_node(&d.node_id, "cx.task_ready", &d.tags)
-                        .await;
+                    self.pending_triggers.push(PendingTrigger {
+                        node_id: d.node_id,
+                        event_type: "cx.task_ready".into(),
+                        tags: d.tags,
+                    });
                 }
             }
             "cx.task_claimed" => {
@@ -359,128 +348,18 @@ impl Herder {
                 tracing::warn!(branch = %d.branch, reason = %d.reason, exec = %d.execution_id, "git.merge_failed");
             }
 
-            _ => {
-                // Other events (artifact, secret, etc.) — not handled by herder
-            }
+            _ => {}
+        }
+
+        // After every state update, run the scheduler (live mode only)
+        if !self.replaying {
+            self.schedule().await;
         }
 
         Ok(())
     }
 
-    // ── Dispatch ────────────────────────────────────────────────────
-
-    async fn dispatch_first_step(&mut self, execution_id: &str, workflow_name: &str) {
-        let first_step = match self.workflows.get(workflow_name) {
-            Some(engine) => match engine.first_step() {
-                Some(s) => s.to_string(),
-                None => {
-                    tracing::error!(workflow = %workflow_name, "workflow has no steps");
-                    return;
-                }
-            },
-            None => {
-                tracing::error!(workflow = %workflow_name, "unknown workflow");
-                return;
-            }
-        };
-
-        self.enqueue_step(execution_id, &first_step, 1).await;
-    }
-
-    async fn enqueue_step(&mut self, execution_id: &str, step: &str, attempt: u32) {
-        // Check if this is an action step (merge_to_main) that doesn't need a runner
-        if self.try_handle_action_step(execution_id, step, attempt).await {
-            return;
-        }
-
-        // Look up execution info, then step def from workflow
-        let exec_view = self.executions.get(execution_id);
-        let task_id = exec_view.map(|e| e.task_id.clone()).unwrap_or_default();
-        let workflow_name = exec_view.map(|e| e.workflow.clone());
-
-        let (runtime, workspace) = workflow_name
-            .as_deref()
-            .and_then(|wf| self.workflows.get(wf))
-            .and_then(|engine| engine.steps.get(step))
-            .map(|step_def| {
-                let runtime = step_def
-                    .runtime
-                    .as_ref()
-                    .map(|r| serde_json::to_value(r).unwrap_or_default())
-                    .unwrap_or_default();
-                let workspace = step_def
-                    .workspace
-                    .as_ref()
-                    .map(|w| serde_json::to_value(w).unwrap_or_default())
-                    .unwrap_or_default();
-                (runtime, workspace)
-            })
-            .unwrap_or_else(|| (serde_json::json!({}), serde_json::json!({})));
-
-        let pending = PendingStep {
-            execution_id: execution_id.to_string(),
-            task_id,
-            step: step.to_string(),
-            attempt,
-            runtime,
-            workspace,
-        };
-
-        self.pending.push_back(pending);
-        self.try_dispatch_pending().await;
-    }
-
-    async fn try_dispatch_pending(&mut self) {
-        while let Some(idle_runner_id) = self.find_idle_runner() {
-            if let Some(pending) = self.pending.pop_front() {
-                tracing::info!(
-                    exec = %pending.execution_id,
-                    step = %pending.step,
-                    attempt = pending.attempt,
-                    runner = %idle_runner_id,
-                    "dispatching step"
-                );
-
-                // Mark runner as busy immediately so we don't double-dispatch
-                if let Some(runner) = self.runners.get_mut(&idle_runner_id.0) {
-                    runner.idle = false;
-                    runner.current_execution = Some(pending.execution_id.clone());
-                    runner.current_step = Some(pending.step.clone());
-                }
-
-                if let Err(e) = self
-                    .client
-                    .dispatch_step(
-                        &pending.execution_id,
-                        &pending.step,
-                        &idle_runner_id,
-                        pending.attempt,
-                        &pending.task_id,
-                        pending.runtime,
-                        pending.workspace,
-                    )
-                    .await
-                {
-                    tracing::error!(err = %e, "failed to dispatch step");
-                    // Restore runner to idle since dispatch failed
-                    if let Some(runner) = self.runners.get_mut(&idle_runner_id.0) {
-                        runner.idle = true;
-                        runner.current_execution = None;
-                        runner.current_step = None;
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn find_idle_runner(&self) -> Option<RunnerId> {
-        self.runners
-            .values()
-            .find(|r| r.idle)
-            .map(|r| r.id.clone())
-    }
+    // ── Helpers ────────────────────────────────────────────────────
 
     fn free_runner_for_step(&mut self, execution_id: &str, step: &str) {
         for runner in self.runners.values_mut() {
@@ -495,11 +374,83 @@ impl Herder {
         }
     }
 
-    // ── Advance ─────────────────────────────────────────────────────
+    fn find_idle_runner(&self) -> Option<RunnerId> {
+        self.runners
+            .values()
+            .find(|r| r.idle)
+            .map(|r| r.id.clone())
+    }
 
-    async fn advance_workflow(&mut self, execution_id: &str, current_step: &str) {
+    /// Check if an execution already has a step in-flight on a runner.
+    fn has_active_runner(&self, execution_id: &str) -> bool {
+        self.runners.values().any(|r| {
+            !r.idle && r.current_execution.as_deref() == Some(execution_id)
+        })
+    }
+
+    // ── The Scheduler ──────────────────────────────────────────────
+
+    async fn schedule(&mut self) {
+        // Phase 1: Evaluate pending triggers
+        self.evaluate_pending_triggers().await;
+
+        // Phase 2: Process execution state machines (loop until stable)
+        loop {
+            let mut changed = false;
+
+            let exec_ids: Vec<String> = self.executions.keys()
+                .filter(|id| self.executions[*id].status == "running")
+                .cloned()
+                .collect();
+
+            for exec_id in exec_ids {
+                if self.process_execution(&exec_id).await {
+                    changed = true;
+                }
+            }
+
+            if !changed { break; }
+        }
+
+        // Phase 3: Dispatch — match Ready(runner step) to idle runners
+        self.dispatch_ready_steps().await;
+    }
+
+    /// Process a single execution's current phase. Returns true if state changed.
+    async fn process_execution(&mut self, exec_id: &str) -> bool {
+        let phase = match self.executions.get(exec_id) {
+            Some(e) => e.phase.clone(),
+            None => return false,
+        };
+
+        match phase {
+            ExecPhase::NeedsAdvance { step } => {
+                self.do_advance(exec_id, &step).await;
+                true
+            }
+            ExecPhase::NeedsFailure { step, error } => {
+                self.do_failure(exec_id, &step, &error).await;
+                true
+            }
+            ExecPhase::Ready { ref step, attempt } => {
+                // Only process action steps here — runner steps wait for dispatch phase
+                let is_action = self.is_action_step(exec_id, step);
+                if is_action {
+                    let step = step.clone();
+                    self.do_action_step(exec_id, &step, attempt).await;
+                    true
+                } else {
+                    false
+                }
+            }
+            ExecPhase::AwaitingStep | ExecPhase::Done => false,
+        }
+    }
+
+    /// Advance workflow after a step is confirmed.
+    async fn do_advance(&mut self, exec_id: &str, current_step: &str) {
         let (workflow_name, output, mut visit_counts) = {
-            let exec = match self.executions.get(execution_id) {
+            let exec = match self.executions.get(exec_id) {
                 Some(e) => e,
                 None => return,
             };
@@ -520,55 +471,57 @@ impl Herder {
 
         let advance = engine.next_step(current_step, &output, &mut visit_counts);
 
-        // Update visit counts back
-        if let Some(exec) = self.executions.get_mut(execution_id) {
+        // Write visit counts back
+        if let Some(exec) = self.executions.get_mut(exec_id) {
             exec.visit_counts = visit_counts;
         }
 
         match advance {
             StepAdvance::Goto(next_step) => {
-                tracing::info!(exec = %execution_id, from = %current_step, to = %next_step, "advancing");
+                tracing::info!(exec = %exec_id, from = %current_step, to = %next_step, "advancing");
                 // Emit advance event
                 if let Err(e) = self
                     .client
-                    .step_advance(execution_id, current_step, current_step, &next_step)
+                    .step_advance(exec_id, current_step, current_step, &next_step)
                     .await
                 {
                     tracing::error!(err = %e, "failed to emit step.advanced");
                 }
-                // Enqueue the next step
-                self.enqueue_step(execution_id, &next_step, 1).await;
+                if let Some(exec) = self.executions.get_mut(exec_id) {
+                    exec.phase = ExecPhase::Ready { step: next_step, attempt: 1 };
+                }
             }
             StepAdvance::Complete => {
-                tracing::info!(exec = %execution_id, "workflow complete");
-                if let Err(e) = self.client.complete_execution(execution_id).await {
+                tracing::info!(exec = %exec_id, "workflow complete");
+                if let Err(e) = self.client.complete_execution(exec_id).await {
                     tracing::error!(err = %e, "failed to complete execution");
                 }
-                if let Some(exec) = self.executions.get_mut(execution_id) {
+                if let Some(exec) = self.executions.get_mut(exec_id) {
                     exec.status = "completed".into();
+                    exec.phase = ExecPhase::Done;
                 }
             }
             StepAdvance::Escalate => {
-                tracing::warn!(exec = %execution_id, step = %current_step, "escalating");
+                tracing::warn!(exec = %exec_id, step = %current_step, "escalating");
                 if let Err(e) = self
                     .client
-                    .escalate_execution(execution_id, current_step, "max visits exceeded or wildcard escalation")
+                    .escalate_execution(exec_id, current_step, "max visits exceeded or wildcard escalation")
                     .await
                 {
                     tracing::error!(err = %e, "failed to escalate execution");
                 }
-                if let Some(exec) = self.executions.get_mut(execution_id) {
+                if let Some(exec) = self.executions.get_mut(exec_id) {
                     exec.status = "escalated".into();
+                    exec.phase = ExecPhase::Done;
                 }
             }
         }
     }
 
-    // ── Failure Handling ────────────────────────────────────────────
-
-    async fn handle_step_failure(&mut self, execution_id: &str, step: &str, _error: &str) {
+    /// Handle step failure — retry or escalate.
+    async fn do_failure(&mut self, exec_id: &str, step: &str, _error: &str) {
         let (max_retries, on_fail) = {
-            let exec = match self.executions.get(execution_id) {
+            let exec = match self.executions.get(exec_id) {
                 Some(e) => e,
                 None => return,
             };
@@ -584,7 +537,7 @@ impl Herder {
         };
 
         let decision = {
-            let exec = match self.executions.get_mut(execution_id) {
+            let exec = match self.executions.get_mut(exec_id) {
                 Some(e) => e,
                 None => return,
             };
@@ -593,21 +546,31 @@ impl Herder {
 
         match decision {
             RetryDecision::Retry { attempt } => {
-                tracing::info!(exec = %execution_id, step = %step, attempt, "retrying step");
-                self.enqueue_step(execution_id, step, attempt).await;
+                tracing::info!(exec = %exec_id, step = %step, attempt, "retrying step");
+                if let Some(exec) = self.executions.get_mut(exec_id) {
+                    exec.phase = ExecPhase::Ready { step: step.to_string(), attempt };
+                }
             }
             RetryDecision::Exhausted => {
                 match on_fail.as_deref() {
                     Some("escalate") | None => {
-                        tracing::warn!(exec = %execution_id, step = %step, "retries exhausted, escalating");
-                        if let Some(exec) = self.executions.get_mut(execution_id) {
+                        tracing::warn!(exec = %exec_id, step = %step, "retries exhausted, escalating");
+                        if let Err(e) = self
+                            .client
+                            .escalate_execution(exec_id, step, "retries exhausted")
+                            .await
+                        {
+                            tracing::error!(err = %e, "failed to escalate execution");
+                        }
+                        if let Some(exec) = self.executions.get_mut(exec_id) {
                             exec.status = "escalated".into();
+                            exec.phase = ExecPhase::Done;
                         }
                     }
                     Some(goto_step) => {
                         // Check max_visits on the target step before jumping
-                        let should_go = {
-                            let exec = self.executions.get_mut(execution_id);
+                        let target_action = {
+                            let exec = self.executions.get_mut(exec_id);
                             let engine_ref = self.workflows.get(
                                 &exec.as_ref().map(|e| e.workflow.clone()).unwrap_or_default()
                             );
@@ -617,9 +580,8 @@ impl Herder {
                                 if let Some(step_def) = engine.steps.get(goto_step) {
                                     if let Some(max) = step_def.max_visits {
                                         if *count > max {
-                                            // Exceeded max_visits — go to max_visits_goto or escalate
                                             let fallback = step_def.max_visits_goto.clone();
-                                            Some(fallback)
+                                            Some(fallback) // Some(Some(step)) or Some(None) = escalate
                                         } else {
                                             None // ok to proceed
                                         }
@@ -634,20 +596,32 @@ impl Herder {
                             }
                         };
 
-                        match should_go {
+                        match target_action {
                             Some(Some(fallback_step)) => {
-                                tracing::warn!(exec = %execution_id, step = %goto_step, to = %fallback_step, "on_fail target exceeded max_visits, redirecting");
-                                self.enqueue_step(execution_id, &fallback_step, 1).await;
+                                tracing::warn!(exec = %exec_id, step = %goto_step, to = %fallback_step, "on_fail target exceeded max_visits, redirecting");
+                                if let Some(exec) = self.executions.get_mut(exec_id) {
+                                    exec.phase = ExecPhase::Ready { step: fallback_step, attempt: 1 };
+                                }
                             }
                             Some(None) => {
-                                tracing::warn!(exec = %execution_id, step = %goto_step, "on_fail target exceeded max_visits, escalating");
-                                if let Some(exec) = self.executions.get_mut(execution_id) {
+                                tracing::warn!(exec = %exec_id, step = %goto_step, "on_fail target exceeded max_visits, escalating");
+                                if let Err(e) = self
+                                    .client
+                                    .escalate_execution(exec_id, goto_step, "on_fail target exceeded max_visits")
+                                    .await
+                                {
+                                    tracing::error!(err = %e, "failed to escalate execution");
+                                }
+                                if let Some(exec) = self.executions.get_mut(exec_id) {
                                     exec.status = "escalated".into();
+                                    exec.phase = ExecPhase::Done;
                                 }
                             }
                             None => {
-                                tracing::info!(exec = %execution_id, from = %step, to = %goto_step, "retries exhausted, jumping to on_fail");
-                                self.enqueue_step(execution_id, goto_step, 1).await;
+                                tracing::info!(exec = %exec_id, from = %step, to = %goto_step, "retries exhausted, jumping to on_fail");
+                                if let Some(exec) = self.executions.get_mut(exec_id) {
+                                    exec.phase = ExecPhase::Ready { step: goto_step.to_string(), attempt: 1 };
+                                }
                             }
                         }
                     }
@@ -656,7 +630,186 @@ impl Herder {
         }
     }
 
+    /// Check if a step is an action step (e.g. merge_to_main).
+    fn is_action_step(&self, exec_id: &str, step: &str) -> bool {
+        let workflow_name = match self.executions.get(exec_id) {
+            Some(e) => &e.workflow,
+            None => return false,
+        };
+        let engine = match self.workflows.get(workflow_name) {
+            Some(e) => e,
+            None => return false,
+        };
+        let step_def = match engine.steps.get(step) {
+            Some(s) => s,
+            None => return false,
+        };
+        step_def.action.is_some()
+    }
+
+    /// Execute an action step inline (e.g. merge_to_main).
+    async fn do_action_step(&mut self, exec_id: &str, step: &str, attempt: u32) {
+        let workflow_name = match self.executions.get(exec_id) {
+            Some(e) => e.workflow.clone(),
+            None => return,
+        };
+        let engine = match self.workflows.get(&workflow_name) {
+            Some(e) => e,
+            None => return,
+        };
+        let step_def = match engine.steps.get(step) {
+            Some(s) => s.clone(),
+            None => return,
+        };
+
+        match step_def.action.as_deref() {
+            Some("merge_to_main") => {
+                tracing::info!(exec = %exec_id, step = %step, attempt, "executing merge_to_main action");
+
+                let task_id = match self.executions.get(exec_id) {
+                    Some(e) => e.task_id.clone(),
+                    None => return,
+                };
+
+                match self.client.merge_to_main(exec_id, step, &task_id).await {
+                    Ok(_) => {
+                        tracing::info!(exec = %exec_id, "merge_to_main succeeded");
+                        // Report done+confirm events for the action step
+                        let _ = self.client.step_done(exec_id, step, attempt, "pass").await;
+                        let _ = self.client.step_confirm(exec_id, step, attempt, None).await;
+                        // Apply result to local state immediately
+                        if let Some(exec) = self.executions.get_mut(exec_id) {
+                            exec.last_output = Some("pass".into());
+                            exec.retry_tracker.reset();
+                            exec.phase = ExecPhase::NeedsAdvance { step: step.to_string() };
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(err = %e, "merge_to_main failed");
+                        let error = e.to_string();
+                        let _ = self.client.step_fail(exec_id, step, attempt, &error).await;
+                        // Apply result to local state immediately
+                        if let Some(exec) = self.executions.get_mut(exec_id) {
+                            exec.phase = ExecPhase::NeedsFailure { step: step.to_string(), error };
+                        }
+                    }
+                }
+            }
+            Some(action) => {
+                tracing::error!(exec = %exec_id, action, "unknown action step");
+                let error = format!("unknown action: {action}");
+                let _ = self.client.step_fail(exec_id, step, attempt, &error).await;
+                if let Some(exec) = self.executions.get_mut(exec_id) {
+                    exec.phase = ExecPhase::NeedsFailure { step: step.to_string(), error };
+                }
+            }
+            None => {} // Not an action step — shouldn't be called
+        }
+    }
+
+    /// Dispatch all Ready(runner step) executions to idle runners.
+    async fn dispatch_ready_steps(&mut self) {
+        // Collect all executions that are Ready for a runner step
+        let ready: Vec<(String, String, u32, String)> = self.executions.iter()
+            .filter(|(_, e)| e.status == "running")
+            .filter_map(|(id, e)| {
+                if let ExecPhase::Ready { ref step, attempt } = e.phase {
+                    if !self.is_action_step(id, step) {
+                        Some((id.clone(), step.clone(), attempt, e.task_id.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (exec_id, step, attempt, task_id) in ready {
+            // Guard: don't dispatch if this execution already has a step in-flight
+            if self.has_active_runner(&exec_id) {
+                continue;
+            }
+
+            let runner_id = match self.find_idle_runner() {
+                Some(r) => r,
+                None => break, // No more idle runners
+            };
+
+            // Look up runtime and workspace from workflow
+            let (runtime, workspace) = {
+                let exec = self.executions.get(&exec_id);
+                let workflow_name = exec.map(|e| e.workflow.as_str());
+                workflow_name
+                    .and_then(|wf| self.workflows.get(wf))
+                    .and_then(|engine| engine.steps.get(&step))
+                    .map(|step_def| {
+                        let runtime = step_def
+                            .runtime
+                            .as_ref()
+                            .map(|r| serde_json::to_value(r).unwrap_or_default())
+                            .unwrap_or_default();
+                        let workspace = step_def
+                            .workspace
+                            .as_ref()
+                            .map(|w| serde_json::to_value(w).unwrap_or_default())
+                            .unwrap_or_default();
+                        (runtime, workspace)
+                    })
+                    .unwrap_or_else(|| (serde_json::json!({}), serde_json::json!({})))
+            };
+
+            tracing::info!(
+                exec = %exec_id,
+                step = %step,
+                attempt,
+                runner = %runner_id,
+                "dispatching step"
+            );
+
+            // Mark runner as busy immediately
+            if let Some(runner) = self.runners.get_mut(&runner_id.0) {
+                runner.idle = false;
+                runner.current_execution = Some(exec_id.clone());
+                runner.current_step = Some(step.clone());
+            }
+
+            match self
+                .client
+                .dispatch_step(&exec_id, &step, &runner_id, attempt, &task_id, runtime, workspace)
+                .await
+            {
+                Ok(_) => {
+                    // Phase transitions to AwaitingStep when step.dispatched
+                    // event arrives back through SSE. But set it here too
+                    // so the scheduler doesn't try to dispatch again.
+                    if let Some(exec) = self.executions.get_mut(&exec_id) {
+                        exec.phase = ExecPhase::AwaitingStep;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(err = %e, "failed to dispatch step");
+                    // Restore runner to idle
+                    if let Some(runner) = self.runners.get_mut(&runner_id.0) {
+                        runner.idle = true;
+                        runner.current_execution = None;
+                        runner.current_step = None;
+                    }
+                }
+            }
+        }
+    }
+
     // ── Triggers ───────────────────────────────────────────────────
+
+    async fn evaluate_pending_triggers(&mut self) {
+        let triggers = std::mem::take(&mut self.pending_triggers);
+
+        for trigger in triggers {
+            self.evaluate_triggers_for_node(&trigger.node_id, &trigger.event_type, &trigger.tags)
+                .await;
+        }
+    }
 
     async fn evaluate_triggers_for_node(
         &mut self,
@@ -666,19 +819,17 @@ impl Herder {
     ) {
         for (_workflow_name, engine) in &self.workflows {
             for trigger in &engine.triggers {
-                // Check event type match
                 if trigger.on != event_type {
                     continue;
                 }
 
-                // Check tag match
                 if let Some(ref tag_pattern) = trigger.tag {
                     if !tags.iter().any(|t| t == tag_pattern) {
                         continue;
                     }
                 }
 
-                // Dedup: skip if there's already a running or completed execution
+                // Dedup: skip if there's already an active execution
                 let dominated = self.executions.values().any(|e| {
                     e.task_id == node_id
                         && e.workflow == trigger.workflow
@@ -695,7 +846,7 @@ impl Herder {
                     continue;
                 }
 
-                // Check current cx state: don't trigger for integrated or shadowed nodes
+                // Check current cx state
                 let cx_state = get_cx_node_state(&self.server_url, node_id).await;
                 if let Some(ref state) = cx_state {
                     if state == "integrated" || state == "shadowed" {
@@ -730,83 +881,6 @@ impl Herder {
         }
     }
 
-    // ── Action Steps ───────────────────────────────────────────────
-
-    /// Check if a step has the `merge_to_main` action and handle it.
-    /// Returns true if the step was an action step (no dispatch needed).
-    async fn try_handle_action_step(
-        &mut self,
-        execution_id: &str,
-        step: &str,
-        attempt: u32,
-    ) -> bool {
-        let workflow_name = match self.executions.get(execution_id) {
-            Some(e) => e.workflow.clone(),
-            None => return false,
-        };
-
-        let engine = match self.workflows.get(&workflow_name) {
-            Some(e) => e,
-            None => return false,
-        };
-
-        let step_def = match engine.steps.get(step) {
-            Some(s) => s,
-            None => return false,
-        };
-
-        match step_def.action.as_deref() {
-            Some("merge_to_main") => {
-                tracing::info!(exec = %execution_id, step = %step, attempt, "executing merge_to_main action");
-
-                // Derive branch name from execution's task_id
-                let task_id = match self.executions.get(execution_id) {
-                    Some(e) => e.task_id.clone(),
-                    None => return true,
-                };
-
-                // Request merge via server API
-                match self
-                    .client
-                    .merge_to_main(execution_id, step, &task_id)
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(exec = %execution_id, "merge_to_main succeeded");
-                        // Report done+confirm so workflow can advance
-                        if let Err(e) = self
-                            .client
-                            .step_done(execution_id, step, attempt, "pass")
-                            .await
-                        {
-                            tracing::error!(err = %e, "failed to report merge done");
-                        }
-                        if let Err(e) = self
-                            .client
-                            .step_confirm(execution_id, step, attempt, None)
-                            .await
-                        {
-                            tracing::error!(err = %e, "failed to confirm merge step");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(err = %e, "merge_to_main failed");
-                        if let Err(e2) = self
-                            .client
-                            .step_fail(execution_id, step, attempt, &e.to_string())
-                            .await
-                        {
-                            tracing::error!(err = %e2, "failed to report merge failure");
-                        }
-                    }
-                }
-
-                true
-            }
-            _ => false,
-        }
-    }
-
     // ── Tick ────────────────────────────────────────────────────────
 
     async fn on_tick(&self) {
@@ -814,7 +888,6 @@ impl Herder {
         if self.pool_target > 0 {
             let active_count = self.runners.len();
             if active_count > self.pool_target {
-                // Find idle runners to drain
                 let surplus = active_count - self.pool_target;
                 let mut drained = 0;
                 for runner in self.runners.values() {
@@ -831,16 +904,11 @@ impl Herder {
                 }
             }
         }
-
-        // TODO: heartbeat liveness checks (Phase 3 tick — check last_seen timestamps
-        // from /api/state/pool and re-dispatch steps from stale runners)
     }
 }
 
-/// Check the current state of a cx node by calling `cx show --json`.
-/// Returns None if the node can't be found or the command fails.
+/// Check the current state of a cx node via the server projection.
 async fn get_cx_node_state(server_url: &str, node_id: &str) -> Option<String> {
-    // Use the cx state projection from ox-server
     let url = format!("{server_url}/api/state/cx");
     let resp = reqwest::Client::new()
         .get(&url)
@@ -848,7 +916,6 @@ async fn get_cx_node_state(server_url: &str, node_id: &str) -> Option<String> {
         .await
         .ok()?;
     let cx_state: serde_json::Value = resp.json().await.ok()?;
-    // Look for the node in the projection
     let nodes = cx_state.get("nodes")?.as_object()?;
     let node = nodes.get(node_id)?;
     node.get("state").and_then(|s| s.as_str()).map(String::from)

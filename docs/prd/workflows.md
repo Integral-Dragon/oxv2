@@ -232,14 +232,22 @@ interface, and reference definitions.
 
 ## Ox Actions
 
-Steps with an `action` field run synchronously inside ox-server. No
-runner dispatch, no runtime. The `action` field selects what runs.
+Steps with an `action` field run in-process — no runner dispatch, no
+runtime. The `action` field selects what runs.
 
 | Action | Description |
 |--------|-------------|
 | `merge_to_main` | Merge the task branch to main |
 
 Unknown actions fail the step immediately.
+
+Action steps are executed by the herder's scheduler, not by a runner.
+When the scheduler determines that the next step is an action step, it
+executes the action inline and applies the result to execution state
+immediately. There is no event round-trip — the action's success or
+failure is processed in the same scheduling pass. This means action
+steps can chain: if an action step succeeds and the next step is also
+an action, both are processed in a single pass.
 
 ### `merge_to_main` — invariants
 
@@ -418,10 +426,33 @@ Fired by infrastructure events. Built-in — not configurable.
 3. **Execute** → runner provisions workspace, spawns runtime
 4. **Complete** → `step.done` → signals → `step.confirmed`
 5. **Advance** → herder evaluates transitions, dispatches next step
-6. **Merge** → `merge_to_main` ox step lands the branch on main
+6. **Merge** → `merge_to_main` action step lands the branch on main
 7. **cx events** → ox-server diffs `.complex/`, emits `cx.task_integrated`
 8. **Done** → `execution.completed`
 
 Each execution ID is `{task_id}-e{N}` where N is sequential per task
 (`aJuO-e1`, `aJuO-e2`). A task can have multiple executions (retries,
 re-runs). Each execution belongs to exactly one task.
+
+### Two-phase event processing
+
+The herder processes events in two phases:
+
+**Phase 1: State update.** Each incoming event updates the herder's
+local projection of the world — runner status, execution status, step
+outcomes. No side-effects. No dispatching. No API calls. This phase is
+identical during replay and live operation.
+
+**Phase 2: Schedule.** After every state update (skipped during replay),
+a single scheduling pass runs. It scans all running executions,
+determines what action each needs (advance, retry, dispatch, nothing),
+and executes those actions. Only one scheduling pass runs at a time.
+
+This separation is critical. Events are facts about what happened.
+The scheduler is the single place that decides what to do next. There
+is no business logic in event handlers — they are pure projections.
+
+After replay completes, the scheduler runs once. Any execution that was
+mid-flight when the herder last stopped (step confirmed but not yet
+advanced) is picked up and processed. This eliminates the class of bugs
+where executions get stuck after a herder restart.

@@ -569,42 +569,149 @@ fn build_command(
 
 ---
 
-## Dispatch Decision
+## Herder Scheduling Loop
 
-The herder's dispatch logic selects a runner for a pending step:
+The herder separates state updates from decision-making. Event handlers
+are pure projections — they update local state and nothing else. A
+single `schedule()` function runs after each event and is the only
+source of side-effects (API calls, dispatching, action execution).
+
+### Execution Phase State Machine
+
+Each execution tracks a `phase` that tells the scheduler what action
+(if any) is needed:
 
 ```rust
-fn select_runner(pool: &PoolState) -> Option<RunnerId> {
-    // Find first idle runner
-    pool.runners.values()
-        .find(|r| r.status == RunnerStatus::Idle)
-        .map(|r| r.id.clone())
+enum ExecPhase {
+    /// Step is in-flight on a runner — nothing to do.
+    AwaitingStep,
+    /// Step confirmed — scheduler should advance the workflow.
+    NeedsAdvance { step: String },
+    /// Step failed — scheduler should retry or escalate.
+    NeedsFailure { step: String, error: String },
+    /// Next step determined — needs dispatching to a runner
+    /// (or inline execution if it's an action step).
+    Ready { step: String, attempt: u32 },
+    /// Terminal — completed, escalated, or cancelled.
+    Done,
 }
 ```
 
-v1 uses simple first-idle selection. No affinity, no label matching,
-no priority queues. When no idle runner is available, the step is
-queued — the herder retries dispatch when a `step.confirmed` or
-`runner.registered` event frees a runner.
+Event handlers set the phase:
 
-### Pending Step Queue
+| Event | Phase transition |
+|-------|-----------------|
+| `execution.created` | → `Ready { first_step, 1 }` |
+| `step.dispatched` | → `AwaitingStep` |
+| `step.confirmed` | → `NeedsAdvance { step }` |
+| `step.failed` | → `NeedsFailure { step, error }` |
+| `execution.completed` | → `Done` |
+| `execution.escalated` | → `Done` |
+| `execution.cancelled` | → `Done` |
 
-Steps waiting for a runner are tracked in the herder's local state:
+During replay, the last event for each execution determines its phase.
+After replay, the scheduler runs once and picks up any execution that
+was mid-transition when the herder last stopped.
+
+### The schedule() Function
 
 ```rust
-pub struct PendingQueue {
-    /// Steps waiting for an idle runner, in FIFO order.
-    queue: VecDeque<PendingStep>,
-}
+async fn schedule(&mut self) {
+    // Phase 1: Evaluate pending triggers
+    self.evaluate_pending_triggers().await;
 
-pub struct PendingStep {
-    pub execution_id: ExecutionId,
-    pub step: String,
-    pub attempt: u32,
-    pub dispatched_at: Option<Instant>,
+    // Phase 2: Process execution state machines (loop until stable)
+    loop {
+        let mut changed = false;
+
+        let exec_ids: Vec<String> = self.executions.keys()
+            .filter(|id| self.executions[*id].status == "running")
+            .cloned()
+            .collect();
+
+        for exec_id in exec_ids {
+            match self.process_execution(&exec_id).await {
+                PhaseResult::Changed => changed = true,
+                PhaseResult::Unchanged => {}
+            }
+        }
+
+        if !changed { break; }
+    }
+
+    // Phase 3: Dispatch — match Ready(runner step) to idle runners
+    self.dispatch_ready_steps().await;
 }
 ```
 
-When a runner becomes idle (via `step.confirmed`, `step.failed`, or
-`runner.registered`), the herder pops the front of the queue and
-dispatches.
+`process_execution` handles a single execution's current phase:
+
+- **NeedsAdvance**: calls `engine.next_step()` to determine the next
+  step via transition matching and visit counting. Sets `Ready` on
+  success, `Done` on completion/escalation. Emits `step.advanced`.
+
+- **NeedsFailure**: calls `retry_tracker.record_failure()`. On retry,
+  sets `Ready { same_step, next_attempt }`. On exhaustion, checks
+  `on_fail` and `max_visits` on the target — sets `Ready` for the
+  on_fail target or `Done` for escalation.
+
+- **Ready (action step)**: executes the action inline (e.g. calls
+  `merge_to_main`). On success, stores output and sets `NeedsAdvance`.
+  On failure, sets `NeedsFailure`. Emits step events for the action.
+
+- **Ready (runner step)**: skipped here — handled in the dispatch phase.
+
+- **AwaitingStep / Done**: no action needed.
+
+The inner loop is necessary because action steps resolve synchronously.
+A confirmed step may advance to an action step, which completes
+immediately and needs another advance. The loop terminates because each
+iteration either moves an execution to `AwaitingStep`/`Done` (stable)
+or makes no progress (all remaining are `Ready` for runner steps or
+already stable).
+
+### Visit Count Tracking
+
+Visit counts are incremented in exactly one place during live operation:
+the `check_visits` function called from `process_execution` when
+handling `NeedsAdvance` or the `on_fail` path in `NeedsFailure`. This
+is the canonical source of truth.
+
+During replay, visit counts are reconstructed from `step.dispatched`
+events — one increment per dispatch. This matches the live behavior
+where each visit goes through `check_visits` (increment) → `Ready` →
+dispatch. Retries from the failure path also dispatch, so the replay
+count matches.
+
+There is no double-counting. Event handlers never touch visit counts
+during live operation. The scheduler owns them.
+
+### Dispatch
+
+```rust
+async fn dispatch_ready_steps(&mut self) {
+    let ready: Vec<(String, String, u32)> = self.executions.iter()
+        .filter(|(_, e)| matches!(&e.phase, ExecPhase::Ready { .. })
+            && e.status == "running")
+        .map(|(id, e)| match &e.phase {
+            ExecPhase::Ready { step, attempt } =>
+                (id.clone(), step.clone(), *attempt),
+            _ => unreachable!(),
+        })
+        .collect();
+
+    for (exec_id, step, attempt) in ready {
+        if let Some(runner_id) = self.find_idle_runner() {
+            self.dispatch_step(&exec_id, &step, &runner_id, attempt).await;
+            // phase transitions to AwaitingStep when step.dispatched
+            // event arrives back through SSE
+        }
+    }
+}
+```
+
+v1 uses simple first-idle runner selection. No affinity, no label
+matching, no priority queues. There is no separate pending queue — the
+`Ready` phase on the execution serves that purpose. An execution in
+`Ready` that cannot be dispatched (no idle runner) simply stays in
+`Ready` until the next scheduling pass.
