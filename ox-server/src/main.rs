@@ -214,13 +214,49 @@ async fn heartbeat_check_loop(state: AppState, grace_secs: u64) {
                 Err(_) => continue,
             };
 
-            if now - last_seen > grace {
+            // What the pool projection thinks this runner is doing
+            let projected = pool.runners.get(&row.runner_id);
+            let projected_step = projected.and_then(|r| r.current_step.as_ref());
+
+            // Case 1: heartbeat stale — runner stopped heartbeating entirely
+            let stale = now - last_seen > grace;
+
+            // Case 2: mismatch — pool says runner is executing a step,
+            // but the runner's heartbeat says it's idle or on a different step
+            let mismatch = if let Some(proj_step) = projected_step {
+                // Runner should be working on proj_step, check if heartbeat agrees
+                match (&row.execution_id, &row.step) {
+                    (Some(hb_exec), Some(hb_step)) => {
+                        hb_exec != &proj_step.execution_id.0 || hb_step != &proj_step.step
+                    }
+                    // Heartbeat says idle but projection says executing
+                    _ => true,
+                }
+            } else {
+                false // projection says idle, nothing to check
+            };
+
+            if stale || mismatch {
+                let reason = if stale { "heartbeat stale" } else { "step mismatch" };
+
+                // For mismatch, use the orphaned step from the projection
+                let (orphan_exec, orphan_step, orphan_attempt) = if mismatch {
+                    if let Some(ps) = projected_step {
+                        (Some(ps.execution_id.0.clone()), Some(ps.step.clone()), Some(ps.attempt))
+                    } else {
+                        (row.execution_id.clone(), row.step.clone(), row.attempt)
+                    }
+                } else {
+                    // For stale, use whatever the last heartbeat reported
+                    (row.execution_id.clone(), row.step.clone(), row.attempt)
+                };
+
                 tracing::warn!(
                     runner = %row.runner_id,
+                    reason,
                     last_seen = %row.last_seen,
-                    execution_id = ?row.execution_id,
-                    step = ?row.step,
-                    grace_secs,
+                    orphan_exec = ?orphan_exec,
+                    orphan_step = ?orphan_step,
                     "runner heartbeat missed"
                 );
 
@@ -228,9 +264,9 @@ async fn heartbeat_check_loop(state: AppState, grace_secs: u64) {
                     runner_id: RunnerId(row.runner_id.clone()),
                     last_seen,
                     grace_period_secs: grace_secs,
-                    execution_id: row.execution_id.clone(),
-                    step: row.step.clone(),
-                    attempt: row.attempt,
+                    execution_id: orphan_exec,
+                    step: orphan_step,
+                    attempt: orphan_attempt,
                 };
                 if let Err(e) = state.bus.append(
                     EventType::RunnerHeartbeatMissed,
@@ -243,14 +279,30 @@ async fn heartbeat_check_loop(state: AppState, grace_secs: u64) {
             }
         }
 
-        // Clear runners that have come back (re-registered with fresh heartbeat)
+        // Clear runners that are no longer problematic (heartbeat resumed
+        // and step matches, or runner no longer in pool)
         already_missed.retain(|id| {
+            let still_in_pool = pool.runners.contains_key(id);
+            if !still_in_pool { return false; }
+
+            // Check if still stale or mismatched
             runners.iter().any(|r| {
-                &r.runner_id == id
-                    && r.last_seen
-                        .parse::<DateTime<Utc>>()
-                        .map(|dt| now - dt > grace)
-                        .unwrap_or(false)
+                if &r.runner_id != id { return false; }
+                let stale = r.last_seen.parse::<DateTime<Utc>>()
+                    .map(|dt| now - dt > grace)
+                    .unwrap_or(true);
+                if stale { return true; }
+
+                // Check mismatch
+                let projected_step = pool.runners.get(id).and_then(|pr| pr.current_step.as_ref());
+                if let Some(ps) = projected_step {
+                    match (&r.execution_id, &r.step) {
+                        (Some(e), Some(s)) => e != &ps.execution_id.0 || s != &ps.step,
+                        _ => true,
+                    }
+                } else {
+                    false
+                }
             })
         });
     }
