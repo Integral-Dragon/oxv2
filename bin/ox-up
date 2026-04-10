@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# ox-up — start the ox ensemble for a project using seguro VMs
+#
+# Usage (from any project directory):
+#   ox-up              # start server, herder, 2 runners
+#   ox-up stop         # tear everything down
+#   ox-up status       # check what's running
+#   ox-up reset        # wipe state, start fresh next time
+#   ox-up ctl <args>   # forward to ox-ctl
+#
+# Requires ox binaries built at $OX_DIR/target/debug/ (or set OX_BIN)
+# Runners run inside seguro VMs with dev-bridge networking.
+
+set -euo pipefail
+
+REPO_DIR="$(pwd)"
+OX_DIR="${OX_DIR:-$HOME/projects/oxv2}"
+OX_BIN="${OX_BIN:-${OX_DIR}/target/debug}"
+OX_PORT="${OX_PORT:-4840}"
+OX_SERVER="http://localhost:${OX_PORT}"
+export OX_HOME="${OX_HOME:-${OX_DIR}/defaults}"
+RUNNERS="${OX_RUNNERS:-2}"
+
+RUN_DIR="${REPO_DIR}/.ox/run"
+LOG_DIR="${RUN_DIR}/logs"
+PIDFILE="${RUN_DIR}/ox.pids"
+
+# QEMU user-mode networking: host is always 10.0.2.2 from the guest
+GUEST_SERVER="http://10.0.2.2:${OX_PORT}"
+
+PROJECT_NAME="$(basename "$REPO_DIR")"
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+check_binaries() {
+    for bin in ox-server ox-herder ox-runner ox-ctl; do
+        if [[ ! -x "${OX_BIN}/${bin}" ]]; then
+            echo "error: ${OX_BIN}/${bin} not found — run 'cargo build' in ${OX_DIR}" >&2
+            exit 1
+        fi
+    done
+    if ! command -v seguro &>/dev/null; then
+        echo "error: seguro not found" >&2
+        exit 1
+    fi
+    # Copy cx into ox bin dir so it gets shared into VMs
+    if command -v cx &>/dev/null; then
+        mkdir -p "${OX_DIR}/bin"
+        cp "$(which cx)" "${OX_DIR}/bin/cx"
+    fi
+}
+
+save_pid() {
+    echo "$1 $2" >> "$PIDFILE"
+}
+
+is_running() {
+    kill -0 "$1" 2>/dev/null
+}
+
+start_seguro_runner() {
+    local i=$1
+    local work_dir="${RUN_DIR}/runner-${i}"
+    mkdir -p "$work_dir"
+    chmod 777 "$work_dir"
+
+    seguro run \
+        --share "${OX_BIN}:/ox/bin:ro" \
+        --share "${OX_DIR}/bin:/ox/scripts:ro" \
+        --net dev-bridge --unsafe-dev-bridge \
+        --persistent \
+        -- bash -c "export HOME=/home/agent && export PATH=/ox/bin:/ox/scripts:\$HOME/.cargo/bin:\$PATH && /ox/bin/ox-runner --server $GUEST_SERVER --environment seguro --workspace-dir /tmp/ox-work" \
+        &>"${LOG_DIR}/runner-${i}.log" &
+    save_pid $! "runner-${i}"
+    echo "  runner-${i}  pid=$!  (seguro) workspace=${work_dir}"
+}
+
+seed_secrets() {
+    # Seed Claude credentials from the host
+    if [[ -f "${HOME}/.claude/.credentials.json" ]]; then
+        "${OX_BIN}/ox-ctl" --server "$OX_SERVER" \
+            secrets set claude_credentials \
+            --value "$(cat "${HOME}/.claude/.credentials.json")" \
+            2>/dev/null \
+            && echo "Set claude_credentials" \
+            && echo "  secrets   claude_credentials seeded" \
+            || echo "  secrets   failed to seed claude_credentials"
+    else
+        echo "  warning   ~/.claude/.credentials.json not found — claude steps will fail"
+    fi
+}
+
+# ── Commands ─────────────────────────────────────────────────────────
+
+cmd_start() {
+    if [[ -f "$PIDFILE" ]]; then
+        local alive=0
+        while read -r pid name; do
+            is_running "$pid" && alive=$((alive + 1))
+        done < "$PIDFILE"
+        if [[ $alive -gt 0 ]]; then
+            echo "ox is already running ($alive processes). Use 'ox-up stop' first."
+            exit 1
+        fi
+        rm -f "$PIDFILE"
+    fi
+
+    check_binaries
+    mkdir -p "$RUN_DIR" "$LOG_DIR"
+    > "$PIDFILE"
+
+    echo "starting ox for ${PROJECT_NAME} (repo=${REPO_DIR}, port=${OX_PORT})"
+    echo ""
+
+    # Server — runs on host
+    "${OX_BIN}/ox-server" \
+        --port "$OX_PORT" \
+        --repo "$REPO_DIR" \
+        --db "${RUN_DIR}/ox.db" \
+        &>"${LOG_DIR}/server.log" &
+    save_pid $! server
+    echo "  server    pid=$!  port=${OX_PORT}"
+
+    sleep 0.5
+
+    seed_secrets
+
+    # Herder — runs on host
+    "${OX_BIN}/ox-herder" \
+        --server "$OX_SERVER" \
+        &>"${LOG_DIR}/herder.log" &
+    save_pid $! herder
+    echo "  herder    pid=$!"
+
+    # Runners (seguro VMs)
+    for i in $(seq 1 "$RUNNERS"); do
+        start_seguro_runner "$i"
+    done
+
+    echo ""
+    echo "logs in ${LOG_DIR}/"
+    echo "pidfile ${PIDFILE}"
+    echo ""
+    echo "next steps:"
+    echo "  ox-up ctl status"
+    echo "  ox-up ctl events"
+}
+
+cmd_stop() {
+    if [[ ! -f "$PIDFILE" ]]; then
+        echo "ox is not running (no pidfile)"
+        return
+    fi
+
+    echo "stopping ox..."
+    while read -r pid name; do
+        if is_running "$pid"; then
+            kill "$pid" 2>/dev/null && echo "  killed ${name} (pid=${pid})" || true
+        fi
+    done < "$PIDFILE"
+
+    rm -f "$PIDFILE"
+    rm -rf "${RUN_DIR}"/runner-*
+
+    # Clean up any orphaned seguro VMs
+    seguro sessions prune 2>/dev/null || true
+
+    echo "done"
+}
+
+cmd_reset() {
+    echo "resetting ox state..."
+    rm -f "${RUN_DIR}/ox.db" "${RUN_DIR}/ox.db-wal" "${RUN_DIR}/ox.db-shm"
+    rm -rf "${RUN_DIR}/logs/"
+    echo "done — next start will begin fresh"
+}
+
+cmd_status() {
+    if [[ ! -f "$PIDFILE" ]]; then
+        echo "ox is not running"
+        return
+    fi
+
+    while read -r pid name; do
+        if is_running "$pid"; then
+            echo "  ${name}  pid=${pid}  alive"
+        else
+            echo "  ${name}  pid=${pid}  dead"
+        fi
+    done < "$PIDFILE"
+
+    echo ""
+    "${OX_BIN}/ox-ctl" --server "$OX_SERVER" status 2>/dev/null || echo "(server not responding)"
+}
+
+cmd_ctl() {
+    exec "${OX_BIN}/ox-ctl" --server "$OX_SERVER" "$@"
+}
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+case "${1:-start}" in
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    reset)   cmd_reset ;;
+    status)  cmd_status ;;
+    ctl)     shift; cmd_ctl "$@" ;;
+    *)
+        echo "usage: ox-up [start|stop|status|reset|ctl <args>]"
+        exit 1
+        ;;
+esac
