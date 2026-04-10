@@ -11,8 +11,12 @@ mod state;
 
 use anyhow::Result;
 use axum::Router;
+use chrono::{DateTime, Utc};
 use clap::Parser;
+use ox_core::events::*;
+use ox_core::types::RunnerId;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -31,6 +35,10 @@ struct Args {
     /// Path to the managed repository.
     #[arg(long, default_value = ".")]
     repo: String,
+
+    /// Seconds without a heartbeat before a runner is considered stale.
+    #[arg(long, default_value = "60")]
+    heartbeat_grace: u64,
 }
 
 pub type AppState = Arc<state::ServerState>;
@@ -65,6 +73,15 @@ async fn main() -> Result<()> {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
             cx_poll_loop(state).await;
+        });
+    }
+
+    // Background heartbeat checker
+    {
+        let state = Arc::clone(&state);
+        let grace = args.heartbeat_grace;
+        tokio::spawn(async move {
+            heartbeat_check_loop(state, grace).await;
         });
     }
 
@@ -126,6 +143,109 @@ async fn cx_poll_loop(state: AppState) {
                 tracing::warn!(err = %e, "failed to update cx cursor");
             }
         }
+    }
+}
+
+async fn heartbeat_check_loop(state: AppState, grace_secs: u64) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // Track which runners we've already emitted heartbeat_missed for,
+    // so we don't spam the event log.
+    let mut already_missed: HashSet<String> = HashSet::new();
+
+    loop {
+        interval.tick().await;
+
+        let now = Utc::now();
+        let grace = chrono::Duration::seconds(grace_secs as i64);
+
+        // Read all runners and their last_seen + current step from DB
+        #[derive(Debug)]
+        struct RunnerRow {
+            runner_id: String,
+            last_seen: String,
+            execution_id: Option<String>,
+            step: Option<String>,
+            attempt: Option<u32>,
+        }
+        let runners: Vec<RunnerRow> = state.bus.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT runner_id, last_seen, execution_id, step, attempt FROM runners")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok(RunnerRow {
+                    runner_id: row.get(0)?,
+                    last_seen: row.get(1)?,
+                    execution_id: row.get(2)?,
+                    step: row.get(3)?,
+                    attempt: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
+                })
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+        });
+
+        // Check which runners are known to the pool projection (still registered)
+        let pool = state.bus.projections.pool();
+
+        for row in &runners {
+            // Only check runners that are still in the pool
+            if !pool.runners.contains_key(&row.runner_id) {
+                already_missed.remove(&row.runner_id);
+                continue;
+            }
+
+            // Skip if we already emitted for this runner
+            if already_missed.contains(&row.runner_id) {
+                continue;
+            }
+
+            let last_seen = match row.last_seen.parse::<DateTime<Utc>>() {
+                Ok(dt) => dt,
+                Err(_) => continue,
+            };
+
+            if now - last_seen > grace {
+                tracing::warn!(
+                    runner = %row.runner_id,
+                    last_seen = %row.last_seen,
+                    execution_id = ?row.execution_id,
+                    step = ?row.step,
+                    grace_secs,
+                    "runner heartbeat missed"
+                );
+
+                let data = RunnerHeartbeatMissedData {
+                    runner_id: RunnerId(row.runner_id.clone()),
+                    last_seen,
+                    grace_period_secs: grace_secs,
+                    execution_id: row.execution_id.clone(),
+                    step: row.step.clone(),
+                    attempt: row.attempt,
+                };
+                if let Err(e) = state.bus.append(
+                    EventType::RunnerHeartbeatMissed,
+                    serde_json::to_value(data).unwrap(),
+                ) {
+                    tracing::error!(err = %e, "failed to emit heartbeat_missed");
+                }
+
+                already_missed.insert(row.runner_id.clone());
+            }
+        }
+
+        // Clear runners that have come back (re-registered with fresh heartbeat)
+        already_missed.retain(|id| {
+            runners.iter().any(|r| {
+                &r.runner_id == id
+                    && r.last_seen
+                        .parse::<DateTime<Utc>>()
+                        .map(|dt| now - dt > grace)
+                        .unwrap_or(false)
+            })
+        });
     }
 }
 

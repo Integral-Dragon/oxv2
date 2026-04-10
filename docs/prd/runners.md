@@ -72,13 +72,24 @@ ox-runner sends periodic heartbeats to prove liveness:
 
 ```
 POST /api/runners/{id}/heartbeat
+{ "execution_id": "aJuO-e1", "step": "implement", "attempt": 1 }
 ```
 
-This is a timestamp write to the runner projection — not an event in the
-log. The herder checks `last_seen` on its tick. If a runner has not
-heartbeated within the grace period, the herder emits
-`runner.heartbeat_missed` and re-dispatches any step assigned to that
-runner.
+Each heartbeat carries the step the runner is currently executing (or
+null fields when idle). ox-server writes the timestamp and step info to
+the `runners` table — not to the event log.
+
+ox-server runs a background check every 15 seconds. If a runner's
+`last_seen` is older than the configured grace period
+(`--heartbeat-grace`, default 60s), the server emits
+`runner.heartbeat_missed` with the runner ID and the orphaned step info
+from the last heartbeat. The herder receives this event, removes the
+dead runner from its pool, and transitions the orphaned execution back
+to `Ready` for re-dispatch to a healthy runner.
+
+The heartbeat_missed event is emitted at most once per stale runner.
+If the runner comes back (re-registers with a fresh heartbeat), it is
+treated as a new runner.
 
 ---
 
@@ -106,7 +117,8 @@ logic (e.g. routing browser steps to runners with the browser profile).
 ```
 runner.registered       { runner_id, environment, labels }
 runner.drained          { runner_id, reason }
-runner.heartbeat_missed { runner_id, last_seen, grace_period }
+runner.heartbeat_missed { runner_id, last_seen, grace_period_secs,
+                          execution_id?, step?, attempt? }
 ```
 
 `runner.registered` — an ox-runner process has joined the pool and is
@@ -115,6 +127,7 @@ available for step assignment.
 `runner.drained` — the runner has been instructed to stop accepting new
 assignments and will exit after its current step completes.
 
-`runner.heartbeat_missed` — the herder detected that a runner has not
-heartbeated within the grace period. Any step assigned to that runner is
-re-dispatched.
+`runner.heartbeat_missed` — ox-server detected that a runner has not
+heartbeated within the grace period. Includes the step the runner was
+last working on (from its most recent heartbeat), so the herder can
+re-dispatch without additional lookups.

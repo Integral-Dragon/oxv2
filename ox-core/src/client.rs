@@ -181,9 +181,20 @@ impl OxClient {
         Ok(resp.runner_id)
     }
 
-    pub async fn heartbeat(&self, runner_id: &RunnerId) -> Result<()> {
+    pub async fn heartbeat(
+        &self,
+        runner_id: &RunnerId,
+        execution_id: Option<&str>,
+        step: Option<&str>,
+        attempt: Option<u32>,
+    ) -> Result<()> {
         self.http
             .post(self.url(&format!("/api/runners/{}/heartbeat", runner_id.0)))
+            .json(&serde_json::json!({
+                "execution_id": execution_id,
+                "step": step,
+                "attempt": attempt,
+            }))
             .send()
             .await?
             .error_for_status()?;

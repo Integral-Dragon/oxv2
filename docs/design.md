@@ -458,13 +458,14 @@ shape. Auth is purely additive middleware.
 
 ### ox-server
 
-1. Parse CLI args (`--port`, `--db`, `--repo`)
+1. Parse CLI args (`--port`, `--db`, `--repo`, `--heartbeat-grace`)
 2. Open SQLite database, run migrations
 3. Replay event log to rebuild projections
 4. Resolve configuration search path, load workflow definitions
 5. Initialise bare git repo if not present
-6. Start Axum server (API + SSE + git endpoints)
-7. On SIGTERM: stop accepting connections, drain SSE, flush WAL, exit
+6. Start background tasks: cx poll loop, heartbeat checker
+7. Start Axum server (API + SSE + git endpoints)
+8. On SIGTERM: stop accepting connections, drain SSE, flush WAL, exit
 
 ### ox-herder
 

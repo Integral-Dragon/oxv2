@@ -127,9 +127,12 @@ herder   → step.advanced
 or the push fails, the runner emits `step.failed` directly. No confirm
 call is needed — nothing to push for a failed step.
 
-**If the runner loses connectivity** before confirming, its heartbeat
-goes stale. The herder emits `runner.heartbeat_missed` and re-dispatches
-the step. The branch push may or may not have happened — the re-dispatched
+**If the runner dies** before confirming, its heartbeat goes stale.
+ox-server detects this and emits `runner.heartbeat_missed` (including the
+orphaned step info from the runner's last heartbeat). The herder removes
+the dead runner, transitions the execution back to `Ready`, and the
+scheduler re-dispatches to a healthy runner. The branch push may or may
+not have happened — the re-dispatched
 step will rebase and push again.
 
 ---

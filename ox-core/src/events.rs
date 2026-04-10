@@ -101,6 +101,13 @@ pub struct RunnerHeartbeatMissedData {
     pub runner_id: RunnerId,
     pub last_seen: DateTime<Utc>,
     pub grace_period_secs: u64,
+    /// The step the runner was working on when it went stale (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

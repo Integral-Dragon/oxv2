@@ -9,6 +9,7 @@ use ox_core::events::*;
 use ox_core::types::{ExecutionId, RunnerId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::HashMap;
 
 use crate::AppState;
 use crate::artifacts;
@@ -202,16 +203,39 @@ async fn register_runner(
 
     let ts = Utc::now().to_rfc3339();
     state.bus.with_conn(|conn| {
-        db::upsert_runner_heartbeat(conn, &runner_id.0, &ts).unwrap();
+        db::upsert_runner_heartbeat(conn, &runner_id.0, &ts, None, None, None).unwrap();
     });
 
     (StatusCode::CREATED, Json(RegisterResponse { runner_id }))
 }
 
-async fn heartbeat(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
+#[derive(Deserialize, Default)]
+struct HeartbeatRequest {
+    #[serde(default)]
+    execution_id: Option<String>,
+    #[serde(default)]
+    step: Option<String>,
+    #[serde(default)]
+    attempt: Option<u32>,
+}
+
+async fn heartbeat(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<HeartbeatRequest>>,
+) -> StatusCode {
     let ts = Utc::now().to_rfc3339();
+    let req = body.map(|b| b.0).unwrap_or_default();
     state.bus.with_conn(|conn| {
-        db::upsert_runner_heartbeat(conn, &id, &ts).unwrap();
+        db::upsert_runner_heartbeat(
+            conn,
+            &id,
+            &ts,
+            req.execution_id.as_deref(),
+            req.step.as_deref(),
+            req.attempt,
+        )
+        .unwrap();
     });
     StatusCode::NO_CONTENT
 }
@@ -239,6 +263,19 @@ async fn drain_runner(State(state): State<AppState>, Path(id): Path<String>) -> 
 async fn get_pool_state(State(state): State<AppState>) -> Json<serde_json::Value> {
     let pool = state.bus.projections.pool();
 
+    // Read last_seen from DB for each runner
+    let heartbeats: HashMap<String, String> = state.bus.with_conn(|conn| {
+        let mut stmt = conn
+            .prepare("SELECT runner_id, last_seen FROM runners")
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
+    });
+
     let runners: Vec<serde_json::Value> = pool
         .runners
         .values()
@@ -250,6 +287,7 @@ async fn get_pool_state(State(state): State<AppState>) -> Json<serde_json::Value
                 "status": format!("{:?}", r.status).to_lowercase(),
                 "current_step": r.current_step.as_ref().map(|s| s.to_string()),
                 "registered_at": r.registered_at.to_rfc3339(),
+                "last_seen": heartbeats.get(&r.id.0),
             })
         })
         .collect();

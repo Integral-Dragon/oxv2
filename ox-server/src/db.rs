@@ -23,8 +23,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS runners (
-            runner_id  TEXT PRIMARY KEY,
-            last_seen  TEXT NOT NULL
+            runner_id      TEXT PRIMARY KEY,
+            last_seen      TEXT NOT NULL,
+            execution_id   TEXT,
+            step           TEXT,
+            attempt        INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS artifacts_meta (
@@ -113,12 +116,24 @@ pub fn read_events_after(
     Ok(results)
 }
 
-/// Update runner heartbeat timestamp.
-pub fn upsert_runner_heartbeat(conn: &Connection, runner_id: &str, ts: &str) -> Result<()> {
+/// Update runner heartbeat timestamp and current step.
+pub fn upsert_runner_heartbeat(
+    conn: &Connection,
+    runner_id: &str,
+    ts: &str,
+    execution_id: Option<&str>,
+    step: Option<&str>,
+    attempt: Option<u32>,
+) -> Result<()> {
     conn.execute(
-        "INSERT INTO runners (runner_id, last_seen) VALUES (?1, ?2)
-         ON CONFLICT(runner_id) DO UPDATE SET last_seen = excluded.last_seen",
-        rusqlite::params![runner_id, ts],
+        "INSERT INTO runners (runner_id, last_seen, execution_id, step, attempt)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(runner_id) DO UPDATE SET
+           last_seen = excluded.last_seen,
+           execution_id = excluded.execution_id,
+           step = excluded.step,
+           attempt = excluded.attempt",
+        rusqlite::params![runner_id, ts, execution_id, step, attempt],
     )
     .context("upserting runner heartbeat")?;
     Ok(())
@@ -194,8 +209,8 @@ mod tests {
     #[test]
     fn heartbeat_upsert() {
         let conn = test_conn();
-        upsert_runner_heartbeat(&conn, "run-0001", "2026-01-01T00:00:00Z").unwrap();
-        upsert_runner_heartbeat(&conn, "run-0001", "2026-01-01T00:00:10Z").unwrap();
+        upsert_runner_heartbeat(&conn, "run-0001", "2026-01-01T00:00:00Z", None, None, None).unwrap();
+        upsert_runner_heartbeat(&conn, "run-0001", "2026-01-01T00:00:10Z", Some("exec-1"), Some("propose"), Some(1)).unwrap();
 
         let ts: String = conn
             .query_row(

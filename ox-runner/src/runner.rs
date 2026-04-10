@@ -13,12 +13,21 @@ use tokio::process::Command;
 use crate::proxy;
 use crate::socket::{self, RuntimeCommand};
 
+/// Shared state for heartbeat reporting.
+#[derive(Debug, Clone, Default)]
+struct HeartbeatState {
+    execution_id: Option<String>,
+    step: Option<String>,
+    attempt: Option<u32>,
+}
+
 pub struct Runner {
     client: OxClient,
     server_url: String,
     environment: String,
     workspace_dir: PathBuf,
     runner_id: Option<RunnerId>,
+    heartbeat_state: std::sync::Arc<std::sync::Mutex<HeartbeatState>>,
 }
 
 /// Parsed dispatch payload for the runner.
@@ -52,6 +61,7 @@ impl Runner {
             environment: environment.to_string(),
             workspace_dir: PathBuf::from(workspace_dir),
             runner_id: None,
+            heartbeat_state: std::sync::Arc::new(std::sync::Mutex::new(HeartbeatState::default())),
         }
     }
 
@@ -68,11 +78,16 @@ impl Runner {
         // Start heartbeat background task
         let hb_client = OxClient::new(&self.server_url);
         let hb_id = runner_id.clone();
+        let hb_state = self.heartbeat_state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {
                 interval.tick().await;
-                if let Err(e) = hb_client.heartbeat(&hb_id).await {
+                let state = hb_state.lock().unwrap().clone();
+                if let Err(e) = hb_client
+                    .heartbeat(&hb_id, state.execution_id.as_deref(), state.step.as_deref(), state.attempt)
+                    .await
+                {
                     tracing::warn!(err = %e, "heartbeat failed");
                 }
             }
@@ -161,7 +176,13 @@ impl Runner {
             "received step assignment"
         );
 
-        self.execute_step(assignment).await
+        let result = self.execute_step(assignment).await;
+        // Clear heartbeat state — step is done (success or failure)
+        {
+            let mut hb = self.heartbeat_state.lock().unwrap();
+            *hb = HeartbeatState::default();
+        }
+        result
     }
 
     async fn execute_step(&self, assignment: StepAssignment) -> Result<()> {
@@ -169,6 +190,14 @@ impl Runner {
         let step = &assignment.step;
         let attempt = assignment.attempt;
         let start = Instant::now();
+
+        // Update heartbeat state so the server knows what we're working on
+        {
+            let mut hb = self.heartbeat_state.lock().unwrap();
+            hb.execution_id = Some(exec_id.clone());
+            hb.step = Some(step.clone());
+            hb.attempt = Some(attempt);
+        }
 
         let work_dir = self.workspace_dir.join("current");
         // Use local filesystem for tmp (sockets don't work on 9p/virtiofs mounts)

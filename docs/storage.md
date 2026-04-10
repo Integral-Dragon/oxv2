@@ -115,13 +115,18 @@ Mutable projection table for heartbeats. Not part of the event log.
 
 ```sql
 CREATE TABLE runners (
-    runner_id    TEXT PRIMARY KEY,
-    last_seen    TEXT NOT NULL          -- ISO 8601 UTC, updated on heartbeat
+    runner_id      TEXT PRIMARY KEY,
+    last_seen      TEXT NOT NULL,       -- ISO 8601 UTC, updated on heartbeat
+    execution_id   TEXT,                -- current step (from heartbeat)
+    step           TEXT,
+    attempt        INTEGER
 );
 ```
 
 This is the only mutable table. Heartbeats are high-frequency timestamp
-updates that do not belong in the event log. The herder checks
+updates that do not belong in the event log. The step fields record what
+the runner was last working on, so `runner.heartbeat_missed` events can
+include the orphaned step. ox-server's background heartbeat checker checks
 `last_seen` on its tick to detect stale runners.
 
 Rows are inserted on `runner.registered` and deleted on `runner.drained`

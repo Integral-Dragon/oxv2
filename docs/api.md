@@ -107,10 +107,21 @@ the runner to the pool projection.
 
 #### `POST /api/runners/{id}/heartbeat`
 
-Update the runner's `last_seen` timestamp. No request body. Response: 204.
+Update the runner's `last_seen` timestamp and current step. Response: 204.
 
+```json
+{
+  "execution_id": "aJuO-e1",
+  "step": "implement",
+  "attempt": 1
+}
+```
+
+All fields are optional — an idle runner sends null/omitted fields.
 This writes directly to the `runners` table — not an event. See
-[storage.md](storage.md).
+[storage.md](storage.md). ox-server's background heartbeat checker
+uses `last_seen` to detect stale runners and emit
+`runner.heartbeat_missed`.
 
 #### `POST /api/runners/{id}/drain`
 

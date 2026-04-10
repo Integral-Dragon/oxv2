@@ -588,6 +588,7 @@ Event handlers set the phase:
 | `execution.completed` | → `Done` |
 | `execution.escalated` | → `Done` |
 | `execution.cancelled` | → `Done` |
+| `runner.heartbeat_missed` | If the dead runner was executing this execution's step: → `Ready { step, attempt }` |
 
 During replay, the last event for each execution determines its phase.
 After replay, the scheduler runs once and picks up any execution that

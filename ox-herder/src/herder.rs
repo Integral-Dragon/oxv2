@@ -221,6 +221,28 @@ impl Herder {
                 tracing::info!(runner = %d.runner_id, "runner drained");
                 self.runners.remove(&d.runner_id.0);
             }
+            "runner.heartbeat_missed" => {
+                let d: RunnerHeartbeatMissedData = serde_json::from_value(envelope.data)?;
+                tracing::warn!(
+                    runner = %d.runner_id,
+                    last_seen = %d.last_seen,
+                    execution_id = ?d.execution_id,
+                    step = ?d.step,
+                    "runner heartbeat missed"
+                );
+
+                // Re-ready the orphaned step if the runner was working on one
+                if let (Some(exec_id), Some(step), Some(attempt)) = (&d.execution_id, &d.step, d.attempt) {
+                    if let Some(exec) = self.executions.get_mut(exec_id) {
+                        if matches!(exec.phase, ExecPhase::AwaitingStep) {
+                            tracing::info!(exec = %exec_id, step = %step, attempt, "re-dispatching orphaned step");
+                            exec.phase = ExecPhase::Ready { step: step.clone(), attempt };
+                        }
+                    }
+                }
+                // Remove the dead runner
+                self.runners.remove(&d.runner_id.0);
+            }
 
             "execution.created" => {
                 let d: ExecutionCreatedData = serde_json::from_value(envelope.data)?;
