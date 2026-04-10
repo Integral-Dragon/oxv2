@@ -76,6 +76,8 @@ pub struct StepDef {
     pub max_visits_goto: Option<String>,
     #[serde(default)]
     pub on_fail: Option<String>,
+    #[serde(default)]
+    pub squash: bool,
 }
 
 /// Runtime specification on a step — selects which runtime to use and passes parameters.
@@ -337,6 +339,7 @@ mod tests {
                     max_visits: Some(3),
                     max_visits_goto: Some("tiebreak".into()),
                     on_fail: None,
+                    squash: false,
                 },
                 StepDef {
                     name: "review".into(),
@@ -363,6 +366,7 @@ mod tests {
                     max_visits: None,
                     max_visits_goto: None,
                     on_fail: None,
+                    squash: false,
                 },
                 StepDef {
                     name: "implement".into(),
@@ -376,6 +380,7 @@ mod tests {
                     max_visits: None,
                     max_visits_goto: None,
                     on_fail: None,
+                    squash: false,
                 },
                 StepDef {
                     name: "tiebreak".into(),
@@ -389,6 +394,7 @@ mod tests {
                     max_visits: None,
                     max_visits_goto: None,
                     on_fail: None,
+                    squash: false,
                 },
             ],
             triggers: vec![],

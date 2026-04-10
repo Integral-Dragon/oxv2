@@ -336,6 +336,7 @@ goto  = "escalate"
 [[step]]
 name        = "merge"
 action      = "merge_to_main"
+squash      = true
 on_fail     = "code-tiebreak"
 max_retries = 2
 

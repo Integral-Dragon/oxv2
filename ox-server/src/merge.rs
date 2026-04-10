@@ -40,7 +40,7 @@ impl From<String> for MergeError {
 ///
 /// The repo is always left clean on main. If the rebase has conflicts,
 /// it is aborted and a Conflicts error is returned.
-pub fn merge_to_main(repo_path: &Path, branch: &str) -> Result<MergeResult, MergeError> {
+pub fn merge_to_main(repo_path: &Path, branch: &str, squash: bool) -> Result<MergeResult, MergeError> {
     // Precondition: must be on main with clean worktree
     let current = git(repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if current != "main" {
@@ -67,9 +67,9 @@ pub fn merge_to_main(repo_path: &Path, branch: &str) -> Result<MergeResult, Merg
         return Err(MergeError::EmptyBranch);
     }
 
-    // Squash: if branch has >1 commit ahead, collapse into one
+    // Squash: if requested and branch has >1 commit ahead, collapse into one
     let ahead_count: u32 = ahead.trim().parse().unwrap_or(0);
-    if ahead_count > 1 {
+    if squash && ahead_count > 1 {
         // Collect all commit messages (oldest first)
         let messages = git(
             repo_path,

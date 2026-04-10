@@ -491,12 +491,13 @@ impl OxClient {
         execution_id: &str,
         step: &str,
         branch: &str,
+        squash: bool,
     ) -> Result<serde_json::Value> {
         self.http
             .post(self.url(&format!(
                 "/api/executions/{execution_id}/steps/{step}/merge"
             )))
-            .json(&serde_json::json!({ "branch": branch }))
+            .json(&serde_json::json!({ "branch": branch, "squash": squash }))
             .send()
             .await?
             .error_for_status()?

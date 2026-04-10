@@ -671,7 +671,7 @@ impl Herder {
                     None => return,
                 };
 
-                match self.client.merge_to_main(exec_id, step, &task_id).await {
+                match self.client.merge_to_main(exec_id, step, &task_id, step_def.squash).await {
                     Ok(_) => {
                         tracing::info!(exec = %exec_id, "merge_to_main succeeded");
                         // Report done+confirm events for the action step

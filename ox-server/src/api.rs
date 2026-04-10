@@ -790,6 +790,8 @@ async fn escalate_execution(
 #[derive(Deserialize)]
 struct MergeRequest {
     branch: String,
+    #[serde(default)]
+    squash: bool,
 }
 
 async fn merge_step(
@@ -799,7 +801,7 @@ async fn merge_step(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let execution_id = ExecutionId(params.id);
 
-    match merge::merge_to_main(&state.repo_path, &req.branch) {
+    match merge::merge_to_main(&state.repo_path, &req.branch, req.squash) {
         Ok(result) => {
             let prev_head = result.prev_head.clone();
             let new_head = result.new_head.clone();
