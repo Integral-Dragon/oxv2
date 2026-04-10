@@ -111,7 +111,8 @@ goto  = "escalate"
 # -- Plan Tiebreak -------------------------------------------------------------
 
 [[step]]
-name = "plan-tiebreak"
+name          = "plan-tiebreak"
+max_visits    = 2
 
 [step.workspace]
 git_clone = true
@@ -262,7 +263,8 @@ goto  = "escalate"
 # -- Code Tiebreak -------------------------------------------------------------
 
 [[step]]
-name = "code-tiebreak"
+name          = "code-tiebreak"
+max_visits    = 2
 
 [step.workspace]
 git_clone = true
@@ -308,7 +310,7 @@ goto  = "escalate"
 [[step]]
 name        = "merge"
 action      = "merge_to_main"
-on_fail     = "implement"
+on_fail     = "code-tiebreak"
 max_retries = 2
 
 [step.workspace]
