@@ -53,10 +53,11 @@ On startup, the runner subscribes to the SSE stream from event 0 and
 replays the full history. During replay, it compacts the stream down to
 its current state: a single optional pending assignment.
 
-The runner tracks two event types for its runner ID:
+The runner tracks three rules to compact the stream:
 
-- `step.dispatched` — sets the pending assignment
-- `step.confirmed`, `step.failed`, `step.timeout` — clears it
+- `step.dispatched` to my runner ID → sets the pending assignment
+- `step.dispatched` for the same (execution, step) to a different runner → clears it (step was reassigned)
+- `step.confirmed`, `step.failed`, `step.timeout` for my pending step → clears it (step completed)
 
 After replay, if a pending assignment remains, the runner executes it
 immediately. If not, it is idle. From that point forward, the runner

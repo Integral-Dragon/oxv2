@@ -493,8 +493,9 @@ started by provisioning scripts and register themselves with ox-server.
 3. Start heartbeat loop (periodic `POST /api/runners/{id}/heartbeat`)
 4. Subscribe to SSE stream from event 0, replay full history
 5. During replay: compact the stream to find pending assignment
-   (last `step.dispatched` for this runner ID, cleared by
-   `step.confirmed`/`step.failed`/`step.timeout`)
+   (`step.dispatched` to this runner sets it; `step.dispatched` for the
+   same step to a different runner clears it; `step.confirmed`/
+   `step.failed`/`step.timeout` clears it)
 6. After replay: if pending assignment exists, execute it immediately
 7. Go live: process new `step.dispatched` events as they arrive
 8. Return to idle after step completes
