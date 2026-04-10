@@ -41,10 +41,13 @@ impl From<String> for MergeError {
 /// The repo is always left clean on main. If the rebase has conflicts,
 /// it is aborted and a Conflicts error is returned.
 pub fn merge_to_main(repo_path: &Path, branch: &str, squash: bool) -> Result<MergeResult, MergeError> {
-    // Precondition: must be on main with clean worktree
+    // Precondition: must be on main with clean worktree.
+    // Abort any in-progress rebase from a previous failed attempt.
+    let _ = git(repo_path, &["rebase", "--abort"]);
     let current = git(repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if current != "main" {
-        let _ = git(repo_path, &["checkout", "main"]);
+        git(repo_path, &["checkout", "main"])
+            .map_err(|e| MergeError::Git(format!("failed to checkout main: {e}")))?;
     }
 
     let status = git(repo_path, &["status", "--porcelain", "--ignore-submodules"])?;
