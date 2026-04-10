@@ -6,6 +6,11 @@ The engineer's work is on a feature branch. You review the diff between
 main and that branch. You do NOT merge — that happens automatically
 after you approve.
 
+When you need to commit (review comments, cx integrate), first set your git identity:
+```
+git config user.email "reviewer@ox.ai" && git config user.name "ox-reviewer"
+```
+
 ## How you review
 
 Reviews use structured scoring: 5 criteria scored on a 3-point scale (0/1/2),

@@ -29,6 +29,13 @@ Enforce Rob Pike's five rules:
 4. Simple algorithms are less buggy — prefer simple data structures
 5. Data dominates — right data structures make algorithms self-evident
 
+## Branch workflow
+
+When working on a branch that requires commits, first set your git identity:
+```
+git config user.email "tech-lead@ox.ai" && git config user.name "ox-tech-lead"
+```
+
 ## Tools
 
 - `cx show {task_id}` — read the task spec
