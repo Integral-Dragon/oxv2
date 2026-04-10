@@ -93,16 +93,21 @@ impl Runner {
             }
         });
 
-        // Subscribe to SSE from current seq — runner only needs live events,
-        // not historical replay. Old dispatches for recycled runner IDs must be ignored.
-        let current_seq = self.client.status().await
+        // Get current server seq so we know when replay is done
+        let replay_target = self.client.status().await
             .map(|s| s.event_seq)
             .unwrap_or(0);
-        let url = format!("{}/api/events/stream?last_event_id={}", self.server_url, current_seq);
+
+        // Subscribe to SSE from 0 — replay all events to find our
+        // current assignment (if any), then go live.
+        let url = format!("{}/api/events/stream?last_event_id=0", self.server_url);
         let mut es = EventSource::get(&url);
 
-        tracing::info!("subscribed to SSE, waiting for step assignments");
+        tracing::info!(replay_target, "subscribed to SSE, replaying to find current assignment");
 
+        let mut replaying = true;
+        let mut last_seq: u64 = 0;
+        let mut pending_assignment: Option<StepAssignment> = None;
         let mut backoff_secs: u64 = 1;
         const MAX_BACKOFF: u64 = 30;
 
@@ -110,28 +115,87 @@ impl Runner {
             match es.next().await {
                 Some(Ok(SseEvent::Message(msg))) => {
                     if msg.event == "step.dispatched" {
-                        if let Err(e) = self.handle_dispatch(&msg.data).await {
-                            tracing::error!(err = %e, "error handling step dispatch");
+                        // During replay: track our latest assignment
+                        // Live: execute immediately
+                        if let Ok(envelope) = serde_json::from_str::<EventEnvelope>(&msg.data) {
+                            last_seq = envelope.seq.0;
+                            if let Ok(d) = serde_json::from_value::<StepDispatchedData>(envelope.data)
+                                && Some(&d.runner_id) == self.runner_id.as_ref() {
+                                    if replaying {
+                                        pending_assignment = Some(self.parse_assignment(d));
+                                    } else {
+                                        let assignment = self.parse_assignment(d);
+                                        if let Err(e) = self.run_assignment(assignment).await {
+                                            tracing::error!(err = %e, "error executing step");
+                                        }
+                                    }
+                                }
                         }
-                    } else if msg.event == "runner.drained"
-                        && let Ok(d) = serde_json::from_str::<RunnerDrainedData>(&msg.data)
+                    } else if msg.event == "step.confirmed" || msg.event == "step.failed" || msg.event == "step.timeout" {
+                        // These clear a pending assignment during replay
+                        if let Ok(envelope) = serde_json::from_str::<EventEnvelope>(&msg.data) {
+                            last_seq = envelope.seq.0;
+                            if replaying
+                                && let Some(ref pa) = pending_assignment {
+                                    // Check if this confirm/fail is for our pending assignment
+                                    let step: Option<String> = envelope.data.get("step")
+                                        .and_then(|v| v.as_str()).map(String::from);
+                                    let exec: Option<String> = envelope.data.get("execution_id")
+                                        .and_then(|v| v.as_str().or_else(|| v.get("0").and_then(|v| v.as_str())))
+                                        .map(String::from);
+                                    if exec.as_deref() == Some(&pa.execution_id)
+                                        && step.as_deref() == Some(&pa.step) {
+                                        pending_assignment = None;
+                                    }
+                                }
+                        }
+                    } else if msg.event == "runner.drained" {
+                        if let Ok(d) = serde_json::from_str::<RunnerDrainedData>(&msg.data)
                             && Some(&d.runner_id) == self.runner_id.as_ref() {
                                 tracing::info!("received drain signal, exiting");
                                 return Ok(());
                             }
+                    } else if let Ok(envelope) = serde_json::from_str::<EventEnvelope>(&msg.data) {
+                        last_seq = envelope.seq.0;
+                    }
+
+                    // Check if replay is done
+                    if replaying && last_seq >= replay_target {
+                        replaying = false;
+                        if let Some(assignment) = pending_assignment.take() {
+                            tracing::info!(
+                                exec = %assignment.execution_id,
+                                step = %assignment.step,
+                                "replay complete, executing pending assignment"
+                            );
+                            if let Err(e) = self.run_assignment(assignment).await {
+                                tracing::error!(err = %e, "error executing replayed step");
+                            }
+                        } else {
+                            tracing::info!("replay complete, no pending assignment");
+                        }
+                    }
                 }
                 Some(Ok(SseEvent::Open)) => {
                     backoff_secs = 1;
                 }
                 Some(Err(reqwest_eventsource::Error::StreamEnded)) => {
                     tracing::warn!("SSE stream ended, reconnecting...");
-                    es = EventSource::get(&url);
+                    let reconnect_url = format!(
+                        "{}/api/events/stream?last_event_id={}",
+                        self.server_url, last_seq
+                    );
+                    es = EventSource::get(&reconnect_url);
                 }
                 Some(Err(e)) => {
                     tracing::warn!(err = %e, backoff = backoff_secs, "SSE error, reconnecting...");
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
-                    es = EventSource::get(&url);
+                    let reconnect_url = format!(
+                        "{}/api/events/stream?last_event_id={}",
+                        self.server_url, last_seq
+                    );
+                    es = EventSource::get(&reconnect_url);
                 }
                 None => break,
             }
@@ -140,37 +204,30 @@ impl Runner {
         Ok(())
     }
 
-    async fn handle_dispatch(&mut self, data: &str) -> Result<()> {
-        // Parse the full SSE event envelope
-        let envelope: EventEnvelope = serde_json::from_str(data)?;
-        let dispatched: StepDispatchedData = serde_json::from_value(envelope.data)?;
-
-        // Only handle steps assigned to us
-        if Some(&dispatched.runner_id) != self.runner_id.as_ref() {
-            return Ok(());
-        }
-
+    fn parse_assignment(&self, d: StepDispatchedData) -> StepAssignment {
         let workspace_spec: WorkspaceSpec =
-            serde_json::from_value(dispatched.workspace).unwrap_or(WorkspaceSpec {
+            serde_json::from_value(d.workspace).unwrap_or(WorkspaceSpec {
                 git_clone: false,
                 branch: None,
                 push: false,
                 read_only: false,
             });
 
-        let resolved: Option<ResolvedStepSpec> = dispatched
+        let resolved: Option<ResolvedStepSpec> = d
             .runtime
             .get("resolved")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
 
-        let assignment = StepAssignment {
-            execution_id: dispatched.execution_id.0,
-            step: dispatched.step,
-            attempt: dispatched.attempt,
+        StepAssignment {
+            execution_id: d.execution_id.0,
+            step: d.step,
+            attempt: d.attempt,
             resolved,
             workspace: workspace_spec,
-        };
+        }
+    }
 
+    async fn run_assignment(&mut self, assignment: StepAssignment) -> Result<()> {
         tracing::info!(
             exec = %assignment.execution_id,
             step = %assignment.step,
@@ -186,6 +243,8 @@ impl Runner {
         }
         result
     }
+
+
 
     async fn execute_step(&self, assignment: StepAssignment) -> Result<()> {
         let exec_id = &assignment.execution_id;
