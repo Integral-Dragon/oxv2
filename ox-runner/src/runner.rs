@@ -107,7 +107,6 @@ impl Runner {
 
         let mut replaying = true;
         let mut last_seq: u64 = 0;
-        let mut my_registration_seq: u64 = 0; // track our latest registration
         let mut pending_assignment: Option<StepAssignment> = None;
         let mut backoff_secs: u64 = 1;
         const MAX_BACKOFF: u64 = 30;
@@ -115,26 +114,12 @@ impl Runner {
         loop {
             match es.next().await {
                 Some(Ok(SseEvent::Message(msg))) => {
-                    if msg.event == "runner.registered" {
-                        // Track our latest registration — only dispatches
-                        // after this point belong to this incarnation.
+                    if msg.event == "step.dispatched" {
                         if let Ok(envelope) = serde_json::from_str::<EventEnvelope>(&msg.data) {
                             last_seq = envelope.seq.0;
-                            if let Ok(d) = serde_json::from_value::<RunnerRegisteredData>(envelope.data.clone())
-                                && Some(&d.runner_id) == self.runner_id.as_ref() {
-                                    my_registration_seq = envelope.seq.0;
-                                    // New registration invalidates any prior assignment
-                                    pending_assignment = None;
-                                }
-                        }
-                    } else if msg.event == "step.dispatched" {
-                        // During replay: track our latest assignment (only after our registration)
-                        // Live: execute immediately
-                        if let Ok(envelope) = serde_json::from_str::<EventEnvelope>(&msg.data) {
-                            last_seq = envelope.seq.0;
-                            if let Ok(d) = serde_json::from_value::<StepDispatchedData>(envelope.data)
-                                && Some(&d.runner_id) == self.runner_id.as_ref()
-                                && last_seq > my_registration_seq {
+                            if let Ok(d) = serde_json::from_value::<StepDispatchedData>(envelope.data) {
+                                if Some(&d.runner_id) == self.runner_id.as_ref() {
+                                    // Dispatched to us
                                     if replaying {
                                         pending_assignment = Some(self.parse_assignment(d));
                                     } else {
@@ -143,7 +128,15 @@ impl Runner {
                                             tracing::error!(err = %e, "error executing step");
                                         }
                                     }
+                                } else if replaying {
+                                    // Dispatched to a different runner — if it's the same
+                                    // step we're tracking, our assignment was reassigned.
+                                    if let Some(ref pa) = pending_assignment
+                                        && pa.execution_id == d.execution_id.0 && pa.step == d.step {
+                                            pending_assignment = None;
+                                        }
                                 }
+                            }
                         }
                     } else if msg.event == "step.confirmed" || msg.event == "step.failed" || msg.event == "step.timeout" {
                         // These clear a pending assignment during replay
