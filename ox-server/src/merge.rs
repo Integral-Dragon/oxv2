@@ -38,6 +38,13 @@ pub enum MergeError {
 /// - Fast-forward when main hasn't diverged
 /// - Merge commit when main has diverged (rejects on conflicts)
 pub fn merge_to_main(repo_path: &Path, branch: &str) -> Result<MergeResult, MergeError> {
+    // Try to rebase the branch onto main so we get a clean fast-forward.
+    // This handles the case where main moved forward while the branch was
+    // being reviewed (e.g. another task merged). If the rebase has
+    // conflicts, abort it cleanly and report the conflict — never leave
+    // the repo in a broken state.
+    try_rebase_onto_main(repo_path, branch)?;
+
     let repo = Repository::open(repo_path).map_err(MergeError::Git)?;
 
     // Precondition: worktree must be clean (excluding gitignored files)
@@ -76,7 +83,8 @@ pub fn merge_to_main(repo_path: &Path, branch: &str) -> Result<MergeResult, Merg
 
     let prev_head = main_commit.id().to_string();
 
-    // Strategy 1: fast-forward if main hasn't diverged
+    // After rebase, this should be a fast-forward. But handle merge commits
+    // as a fallback in case the rebase was a no-op.
     if main_commit.id() == merge_base {
         repo.reference(
             "refs/heads/main",
@@ -144,6 +152,66 @@ pub fn merge_to_main(repo_path: &Path, branch: &str) -> Result<MergeResult, Merg
     Ok(MergeResult::MergeCommit {
         prev_head,
         new_head: merge_oid.to_string(),
+    })
+}
+
+/// Try to rebase a branch onto main. If there are conflicts, abort the
+/// rebase and return a Conflicts error. The repo is always left clean.
+fn try_rebase_onto_main(repo_path: &Path, branch: &str) -> Result<(), MergeError> {
+    use std::process::Command;
+
+    // Check if rebase is needed (branch behind main)
+    let merge_base = Command::new("git")
+        .args(["merge-base", "main", branch])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| MergeError::Git(git2::Error::from_str(&e.to_string())))?;
+
+    let main_head = Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| MergeError::Git(git2::Error::from_str(&e.to_string())))?;
+
+    let base = String::from_utf8_lossy(&merge_base.stdout).trim().to_string();
+    let main = String::from_utf8_lossy(&main_head.stdout).trim().to_string();
+
+    if base == main {
+        // Branch is already up to date with main, no rebase needed
+        return Ok(());
+    }
+
+    // Attempt the rebase
+    let result = Command::new("git")
+        .args(["rebase", "main", branch])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| MergeError::Git(git2::Error::from_str(&e.to_string())))?;
+
+    if result.status.success() {
+        // Rebase succeeded — branch is now ahead of main, ready for fast-forward
+        // Switch back to main
+        let _ = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(repo_path)
+            .output();
+        return Ok(());
+    }
+
+    // Rebase failed (conflicts) — abort and report
+    let _ = Command::new("git")
+        .args(["rebase", "--abort"])
+        .current_dir(repo_path)
+        .output();
+
+    // Make sure we're back on main
+    let _ = Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(repo_path)
+        .output();
+
+    Err(MergeError::Conflicts {
+        branch: branch.to_string(),
     })
 }
 
