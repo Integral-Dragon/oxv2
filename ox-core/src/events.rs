@@ -16,6 +16,9 @@ pub struct EventEnvelope {
 /// All event types in the system.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EventType {
+    // Server
+    #[serde(rename = "server.ready")]
+    ServerReady,
     // Runner
     #[serde(rename = "runner.registered")]
     RunnerRegistered,

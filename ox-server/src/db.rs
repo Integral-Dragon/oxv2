@@ -74,7 +74,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     for col in ["execution_id TEXT", "step TEXT", "attempt INTEGER"] {
         match conn.execute(&format!("ALTER TABLE runners ADD COLUMN {col}"), []) {
             Ok(_) => tracing::info!("migration: added column {col} to runners"),
-            Err(e) => tracing::debug!("migration: runners.{col} already exists or error: {e}"),
+            Err(e) => tracing::warn!("migration: runners ADD COLUMN {col}: {e}"),
         }
     }
 
