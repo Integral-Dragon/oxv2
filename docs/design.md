@@ -59,6 +59,7 @@ Modules:
 | `db` | SQLite connection pool, event log append/read, schema migrations |
 | `events` | Event bus — append, broadcast to SSE subscribers, replay |
 | `projections` | In-memory state rebuilt from the event log (pool, executions, cx) |
+| `pool` | Runner pool management — registration, heartbeats, drain, staleness/mismatch detection |
 | `api` | Axum router, REST handlers, request/response types |
 | `sse` | SSE endpoint, subscriber management, `Last-Event-ID` resume, secret redaction |
 | `secrets` | Secrets projection, CRUD API handlers |

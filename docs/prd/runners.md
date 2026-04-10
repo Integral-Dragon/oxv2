@@ -50,7 +50,10 @@ released between steps.
 ## The Pool
 
 The pool is the set of all registered runners. Pool size is the WIP limit
-— the maximum number of steps executing concurrently.
+— the maximum number of steps executing concurrently. **ox-server owns
+pool management** — registration, heartbeats, drain, and liveness
+detection all happen on the server. The herder reacts to runner events
+but does not manage runners directly.
 
 ox-runner processes are started externally — by a provisioning script,
 systemd unit, Kubernetes controller, or similar — and register
