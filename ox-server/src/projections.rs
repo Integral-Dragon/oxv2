@@ -218,6 +218,15 @@ impl Projections {
                     }
                 }
             }
+            EventType::StepRunning => {
+                if let Ok(data) = serde_json::from_value::<StepRunningData>(event.data.clone()) {
+                    let mut execs = self.executions.write().unwrap();
+                    if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
+                        let attempt = exec.find_or_create_attempt(&data.step, data.attempt, event.ts);
+                        attempt.status = StepStatus::Running;
+                    }
+                }
+            }
             EventType::StepDone => {
                 if let Ok(data) = serde_json::from_value::<StepDoneData>(event.data.clone()) {
                     let mut execs = self.executions.write().unwrap();

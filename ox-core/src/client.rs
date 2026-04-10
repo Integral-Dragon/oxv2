@@ -327,6 +327,23 @@ impl OxClient {
         Ok(())
     }
 
+    pub async fn step_running(
+        &self,
+        execution_id: &str,
+        step: &str,
+        attempt: u32,
+    ) -> Result<()> {
+        self.http
+            .post(self.url(&format!(
+                "/api/executions/{execution_id}/steps/{step}/running"
+            )))
+            .json(&serde_json::json!({ "attempt": attempt }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     pub async fn step_done(
         &self,
         execution_id: &str,

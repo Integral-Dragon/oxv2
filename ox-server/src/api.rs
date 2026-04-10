@@ -73,6 +73,10 @@ pub fn router() -> Router<AppState> {
             post(dispatch_step),
         )
         .route(
+            "/api/executions/{id}/steps/{step}/running",
+            post(step_running),
+        )
+        .route(
             "/api/executions/{id}/steps/{step}/done",
             post(step_done),
         )
@@ -611,6 +615,28 @@ fn interpolate_workspace(workspace: &serde_json::Value, task_id: &str) -> serde_
 struct StepDoneRequest {
     attempt: u32,
     output: String,
+}
+
+#[derive(Deserialize)]
+struct StepRunningRequest {
+    attempt: u32,
+}
+
+async fn step_running(
+    State(state): State<AppState>,
+    Path(params): Path<StepPathParams>,
+    Json(req): Json<StepRunningRequest>,
+) -> StatusCode {
+    let data = StepRunningData {
+        execution_id: ExecutionId(params.id),
+        step: params.step,
+        attempt: req.attempt,
+    };
+    state
+        .bus
+        .append(EventType::StepRunning, serde_json::to_value(data).unwrap())
+        .unwrap();
+    StatusCode::NO_CONTENT
 }
 
 async fn step_done(

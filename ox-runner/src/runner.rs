@@ -375,7 +375,13 @@ impl Runner {
             .stderr(std::process::Stdio::from(log_file_err))
             .spawn()
         {
-            Ok(c) => c,
+            Ok(c) => {
+                // Signal that the runtime process is now running
+                if let Err(e) = self.client.step_running(exec_id, step, attempt).await {
+                    tracing::warn!(err = %e, "failed to report step running");
+                }
+                c
+            }
             Err(e) => {
                 tracing::error!(err = %e, "failed to spawn runtime");
                 self.client

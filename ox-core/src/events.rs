@@ -35,6 +35,8 @@ pub enum EventType {
     // Step
     #[serde(rename = "step.dispatched")]
     StepDispatched,
+    #[serde(rename = "step.running")]
+    StepRunning,
     #[serde(rename = "step.done")]
     StepDone,
     #[serde(rename = "step.signals")]
@@ -145,6 +147,13 @@ pub struct StepDispatchedData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactDecl {
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepRunningData {
+    pub execution_id: ExecutionId,
+    pub step: String,
+    pub attempt: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
