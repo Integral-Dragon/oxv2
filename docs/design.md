@@ -490,12 +490,16 @@ started by provisioning scripts and register themselves with ox-server.
 
 1. Parse CLI args (`--server`, `--environment`, `--labels`)
 2. Call `POST /api/runners/register` → receive `RunnerId`
-3. Subscribe to SSE stream, filter for `step.dispatched` matching its ID
-4. Start heartbeat loop (periodic `POST /api/runners/{id}/heartbeat`)
-5. On `step.dispatched`: execute step lifecycle (see [protocols.md](protocols.md))
-6. Return to idle after step completes
-7. On `runner.drained` event: finish current step, exit
-8. On SIGTERM: if executing, attempt graceful completion; otherwise exit
+3. Start heartbeat loop (periodic `POST /api/runners/{id}/heartbeat`)
+4. Subscribe to SSE stream from event 0, replay full history
+5. During replay: compact the stream to find pending assignment
+   (last `step.dispatched` for this runner ID, cleared by
+   `step.confirmed`/`step.failed`/`step.timeout`)
+6. After replay: if pending assignment exists, execute it immediately
+7. Go live: process new `step.dispatched` events as they arrive
+8. Return to idle after step completes
+9. On `runner.drained` event: finish current step, exit
+10. On SIGTERM: if executing, attempt graceful completion; otherwise exit
 
 ### ox-ctl
 

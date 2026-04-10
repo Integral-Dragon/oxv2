@@ -47,6 +47,33 @@ released between steps.
 
 ---
 
+## Event Stream Replay
+
+On startup, the runner subscribes to the SSE stream from event 0 and
+replays the full history. During replay, it compacts the stream down to
+its current state: a single optional pending assignment.
+
+The runner tracks two event types for its runner ID:
+
+- `step.dispatched` — sets the pending assignment
+- `step.confirmed`, `step.failed`, `step.timeout` — clears it
+
+After replay, if a pending assignment remains, the runner executes it
+immediately. If not, it is idle. From that point forward, the runner
+processes live events normally.
+
+This is the same replay pattern used by the herder. The runner's state
+is simpler — one optional assignment instead of a full execution map —
+but the principle is identical: rebuild state from the event stream,
+then go live. The event log is the source of truth, not any snapshot
+or checkpoint.
+
+On SSE reconnection (network drop), the runner reconnects from the last
+processed seq. No full replay is needed — only events since the
+disconnect.
+
+---
+
 ## The Pool
 
 The pool is the set of all registered runners. Pool size is the WIP limit
