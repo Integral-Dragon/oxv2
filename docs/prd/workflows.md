@@ -286,12 +286,13 @@ Step completion is a two-phase protocol that prevents the herder from
 advancing the workflow before the runner has pushed the branch.
 
 ```
-1. Runtime calls done            → runner forwards → step.done event (pending)
-2. Herder ignores pending         — only reacts to step.confirmed
-3. Office detects runtime exit   → collects signals → step.signals event
-4. Office pushes branch           → git.branch_pushed event
-5. Office calls confirm           → step.confirmed event
-6. Herder sees confirmed          → evaluates transitions → step.advanced
+1. Runner spawns runtime process  → step.running event
+2. Runtime calls done             → runner forwards → step.done event (pending)
+3. Herder ignores pending          — only reacts to step.confirmed
+4. Runner detects runtime exit    → collects signals → step.signals event
+5. Runner pushes branch            → git.branch_pushed event
+6. Runner calls confirm            → step.confirmed event
+7. Herder sees confirmed           → evaluates transitions → step.advanced
 ```
 
 Failures bypass the pending phase and take effect immediately — no push

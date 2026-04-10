@@ -53,6 +53,10 @@ The runtime communicates with ox-runner through the runtime interface
 Streaming artifacts declared by the runtime are forwarded to the
 ox-server artifact API by ox-runner.
 
+When the runtime process starts successfully, the runner emits
+`step.running`. This distinguishes a step that is scheduled (dispatched
+to a runner but not yet started) from one that is actively executing.
+
 ### 4. Runtime exit
 
 When the runtime process exits, the runner:
@@ -311,6 +315,7 @@ other step type.
 
 ```
 step.dispatched     { execution_id, step, attempt, runner_id, runtime }
+step.running        { execution_id, step, attempt }
 step.done           { execution_id, step, attempt, output }
 step.signals        { execution_id, step, attempt, signals[] }
 step.confirmed      { execution_id, step, attempt, metrics }
@@ -324,6 +329,9 @@ to the step. This is how subscribers distinguish between the first and
 second visit to the same step.
 
 `step.dispatched` — the herder has assigned a step to a runner.
+
+`step.running` — the runner has spawned the runtime process. The step
+is now actively executing. Emitted immediately after successful spawn.
 
 `step.done` — the runtime reported completion via the runtime interface.
 Pending result — the herder does not advance until `step.confirmed`

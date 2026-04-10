@@ -206,6 +206,7 @@ pub enum EventType {
     ExecutionCancelled,
     // Step
     StepDispatched,
+    StepRunning,
     StepDone,
     StepSignals,
     StepConfirmed,
