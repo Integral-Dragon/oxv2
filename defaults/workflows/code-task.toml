@@ -197,7 +197,7 @@ prompt  = """Implement the task following the approved proposal.
 8. Commit, push, and report done:
    ```
    git add <changed files>
-   git commit -m "feat({task_id}): <description>"
+   git commit -m "{task_id}: <description>"
    git push origin {task_id}
    ox-rt done <commit-sha>
    ```
@@ -238,12 +238,15 @@ prompt  = """Review the implementation against the task spec and approved propos
 5. Post your review as a cx comment:
    `cx comment {task_id} --tag code-review --file /tmp/review.md`
 
-6. If PASS: integrate the task:
+6. If PASS: integrate the task, squash all branch commits into one,
+   then push:
    ```
    cx integrate {task_id} --reason "review passed"
    git add .complex/
    git commit -m "integrate({task_id}): review passed"
-   git push origin {task_id}
+   git reset --soft origin/main
+   git commit -m "{task_id}: <clear, complete commit message describing what was built and why>"
+   git push --force-with-lease origin {task_id}
    ox-rt done "pass:<score>"
    ```
 
@@ -302,15 +305,17 @@ the merge had conflicts. You are the tiebreaker.
 4. Review the diff: `git diff origin/main..HEAD`
 5. Verify the build: `cargo build && cargo test && cargo clippy`
 6. Decide:
-   - If the code works after rebase: integrate and report pass:
+   - If the code works after rebase: integrate, squash, and report pass:
      `cx integrate {task_id} --reason "tiebreak: resolved and integrated"`
      `git add -A && git commit -m "tiebreak({task_id}): resolve and integrate"`
-     `git push origin {task_id}`
+     `git reset --soft origin/main`
+     `git commit -m "{task_id}: <clear, complete commit message describing what was built and why>"`
+     `git push --force-with-lease origin {task_id}`
      `ox-rt done pass`
    - If fundamentally broken: shadow it.
      `cx shadow {task_id} --reason "implementation not salvageable"`
      `git add .complex/ && git commit -m "tiebreak({task_id}): not salvageable"`
-     `git push origin {task_id}`
+     `git push --force-with-lease origin {task_id}`
      `ox-rt done fail`
 """
 

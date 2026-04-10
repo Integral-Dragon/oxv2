@@ -67,6 +67,38 @@ pub fn merge_to_main(repo_path: &Path, branch: &str) -> Result<MergeResult, Merg
         return Err(MergeError::EmptyBranch);
     }
 
+    // Squash: if branch has >1 commit ahead, collapse into one
+    let ahead_count: u32 = ahead.trim().parse().unwrap_or(0);
+    if ahead_count > 1 {
+        // Collect all commit messages (oldest first)
+        let messages = git(
+            repo_path,
+            &["log", "--reverse", "--format=%B", &format!("main..{branch}")],
+        )?;
+
+        // Checkout the branch, soft-reset to merge base, recommit
+        git(repo_path, &["checkout", branch])
+            .map_err(|e| MergeError::Git(format!("checkout branch for squash: {e}")))?;
+        let merge_base = git(repo_path, &["merge-base", "main", "HEAD"])?;
+        git(repo_path, &["reset", "--soft", &merge_base])
+            .map_err(|e| MergeError::Git(format!("soft reset for squash: {e}")))?;
+
+        let squash_commit = Command::new("git")
+            .args(["commit", "-m", messages.trim()])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| MergeError::Git(e.to_string()))?;
+
+        if !squash_commit.status.success() {
+            let stderr = String::from_utf8_lossy(&squash_commit.stderr);
+            return Err(MergeError::Git(format!("squash commit failed: {stderr}")));
+        }
+
+        // Back to main for rebase
+        git(repo_path, &["checkout", "main"])
+            .map_err(|e| MergeError::Git(format!("checkout main after squash: {e}")))?;
+    }
+
     // Rebase branch onto main
     let rebase = Command::new("git")
         .args(["rebase", "main", branch])
