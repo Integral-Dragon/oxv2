@@ -274,7 +274,13 @@ impl Herder {
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     exec.current_step = Some(d.step.clone());
                     exec.current_attempt = d.attempt;
-                    *exec.visit_counts.entry(d.step.clone()).or_insert(0) += 1;
+                    // During replay, reconstruct visit_counts from dispatches
+                    // (advance_workflow/handle_step_failure don't run in replay).
+                    // During live, those methods already increment visit_counts,
+                    // so skip here to avoid double-counting.
+                    if self.replaying {
+                        *exec.visit_counts.entry(d.step.clone()).or_insert(0) += 1;
+                    }
                 }
             }
             "step.done" => {
@@ -383,7 +389,7 @@ impl Herder {
 
     async fn enqueue_step(&mut self, execution_id: &str, step: &str, attempt: u32) {
         // Check if this is an action step (merge_to_main) that doesn't need a runner
-        if self.try_handle_action_step(execution_id, step).await {
+        if self.try_handle_action_step(execution_id, step, attempt).await {
             return;
         }
 
@@ -732,6 +738,7 @@ impl Herder {
         &mut self,
         execution_id: &str,
         step: &str,
+        attempt: u32,
     ) -> bool {
         let workflow_name = match self.executions.get(execution_id) {
             Some(e) => e.workflow.clone(),
@@ -750,7 +757,7 @@ impl Herder {
 
         match step_def.action.as_deref() {
             Some("merge_to_main") => {
-                tracing::info!(exec = %execution_id, step = %step, "executing merge_to_main action");
+                tracing::info!(exec = %execution_id, step = %step, attempt, "executing merge_to_main action");
 
                 // Derive branch name from execution's task_id
                 let task_id = match self.executions.get(execution_id) {
@@ -769,14 +776,14 @@ impl Herder {
                         // Report done+confirm so workflow can advance
                         if let Err(e) = self
                             .client
-                            .step_done(execution_id, step, 1, "pass")
+                            .step_done(execution_id, step, attempt, "pass")
                             .await
                         {
                             tracing::error!(err = %e, "failed to report merge done");
                         }
                         if let Err(e) = self
                             .client
-                            .step_confirm(execution_id, step, 1, None)
+                            .step_confirm(execution_id, step, attempt, None)
                             .await
                         {
                             tracing::error!(err = %e, "failed to confirm merge step");
@@ -786,7 +793,7 @@ impl Herder {
                         tracing::error!(err = %e, "merge_to_main failed");
                         if let Err(e2) = self
                             .client
-                            .step_fail(execution_id, step, 1, &e.to_string())
+                            .step_fail(execution_id, step, attempt, &e.to_string())
                             .await
                         {
                             tracing::error!(err = %e2, "failed to report merge failure");

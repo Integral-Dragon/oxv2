@@ -125,6 +125,32 @@ impl Default for Projections {
     }
 }
 
+impl ExecutionState {
+    /// Find the attempt entry matching (step, attempt), or create one if missing
+    /// (e.g. for action steps that skip StepDispatched).
+    fn find_or_create_attempt(&mut self, step: &str, attempt: u32, ts: DateTime<Utc>) -> &mut StepAttemptState {
+        // Search backwards since recent attempts are at the end
+        let pos = self.attempts.iter().rposition(|a| a.step == step && a.attempt == attempt);
+        if let Some(idx) = pos {
+            return &mut self.attempts[idx];
+        }
+        // Not found — create a synthetic entry (action step, no dispatch)
+        self.attempts.push(StepAttemptState {
+            step: step.to_string(),
+            attempt,
+            runner_id: None,
+            status: StepStatus::Dispatched,
+            output: None,
+            signals: vec![],
+            error: None,
+            transition: None,
+            started_at: ts,
+            completed_at: None,
+        });
+        self.attempts.last_mut().unwrap()
+    }
+}
+
 impl Projections {
     /// Apply an event to all projections.
     pub fn apply(&self, event: &EventEnvelope) {
@@ -196,10 +222,9 @@ impl Projections {
                 if let Ok(data) = serde_json::from_value::<StepDoneData>(event.data.clone()) {
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
-                        if let Some(attempt) = exec.attempts.last_mut() {
-                            attempt.status = StepStatus::Done;
-                            attempt.output = Some(data.output);
-                        }
+                        let attempt = exec.find_or_create_attempt(&data.step, data.attempt, event.ts);
+                        attempt.status = StepStatus::Done;
+                        attempt.output = Some(data.output);
                     }
                 }
             }
@@ -207,9 +232,8 @@ impl Projections {
                 if let Ok(data) = serde_json::from_value::<StepSignalsData>(event.data.clone()) {
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
-                        if let Some(attempt) = exec.attempts.last_mut() {
-                            attempt.signals = data.signals;
-                        }
+                        let attempt = exec.find_or_create_attempt(&data.step, data.attempt, event.ts);
+                        attempt.signals = data.signals;
                     }
                 }
             }
@@ -230,10 +254,9 @@ impl Projections {
                     // Update step status
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
-                        if let Some(attempt) = exec.attempts.last_mut() {
-                            attempt.status = StepStatus::Confirmed;
-                            attempt.completed_at = Some(event.ts);
-                        }
+                        let attempt = exec.find_or_create_attempt(&data.step, data.attempt, event.ts);
+                        attempt.status = StepStatus::Confirmed;
+                        attempt.completed_at = Some(event.ts);
                     }
                 }
             }
@@ -254,11 +277,10 @@ impl Projections {
                     // Update step status
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
-                        if let Some(attempt) = exec.attempts.last_mut() {
-                            attempt.status = StepStatus::Failed;
-                            attempt.error = Some(data.error);
-                            attempt.completed_at = Some(event.ts);
-                        }
+                        let attempt = exec.find_or_create_attempt(&data.step, data.attempt, event.ts);
+                        attempt.status = StepStatus::Failed;
+                        attempt.error = Some(data.error);
+                        attempt.completed_at = Some(event.ts);
                     }
                 }
             }
@@ -266,8 +288,10 @@ impl Projections {
                 if let Ok(data) = serde_json::from_value::<StepAdvancedData>(event.data.clone()) {
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
-                        if let Some(attempt) = exec.attempts.last_mut() {
-                            attempt.transition = Some(data.to_step);
+                        // StepAdvanced doesn't carry attempt number — find the latest
+                        // attempt for from_step
+                        if let Some(att) = exec.attempts.iter_mut().rfind(|a| a.step == data.from_step) {
+                            att.transition = Some(data.to_step);
                         }
                     }
                 }
