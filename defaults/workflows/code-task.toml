@@ -32,6 +32,8 @@ prompt  = """Read the task spec and explore the codebase. Write a proposal.
    - Which files/modules to change and why
    - Key design decisions
    - Test strategy
+   - Documentation plan -- identify which docs (README, PRD, etc.) need
+     updating if user-facing behavior or API surface changes
    - Risks or open questions
 4. Post the proposal as a cx comment:
    `cx comment {task_id} --tag proposal --file /tmp/plan.md`
@@ -76,8 +78,10 @@ prompt  = """Review the implementation plan proposed for this task.
    - **Scope discipline** -- no unnecessary changes, no over-engineering?
    - **Risk awareness** -- edge cases, failure modes, dependencies identified?
    - **Testability** -- concrete test strategy that verifies acceptance criteria?
+   - **Documentation** -- does the plan identify which docs need updating?
 
-   Total >= 6 AND no zeros -> pass. Any zero -> fail regardless of total.
+   Scoring: 2 = meets expectations, 1 = marginal, 0 = does not meet.
+   Total >= 7 AND no zeros -> pass. Any zero -> fail regardless of total.
 
 4. Post your review as a cx comment:
    `cx comment {task_id} --tag review --file /tmp/review.md`
@@ -88,7 +92,7 @@ prompt  = """Review the implementation plan proposed for this task.
    git commit -m "review-plan({task_id}): <PASS or FAIL>"
    git push origin {task_id}
    ```
-   - `ox-rt done "pass:<score>"` if verdict is pass
+   - `ox-rt done "pass:<score>"` if verdict is pass (score out of 10)
    - `ox-rt done "fail:<score>"` if verdict is fail
 """
 
@@ -169,15 +173,19 @@ prompt  = """Implement the task following the approved proposal.
 1. Read the task spec: `cx show {task_id}`
 2. Read the approved proposal: `cx comments {task_id} --tag proposal`
 3. Read reviewer feedback: `cx comments {task_id} --tag review`
-   Address any concerns flagged in the review.
+   Address any concerns flagged in the review — even on a pass, low
+   scores or flagged gaps are things the code reviewer will check.
 4. Rebase onto main and resolve any conflicts:
    ```
    git fetch origin main
    git rebase origin/main
    ```
 5. Write code and tests as specified in the proposal.
-6. Verify: `cargo build`, `cargo test`, `cargo clippy` must pass.
-7. Commit, push, and report done:
+6. Update documentation: if user-facing behavior or API surface changed,
+   update the relevant docs (README, docs/, etc.) as identified in the
+   proposal's documentation plan.
+7. Verify: `cargo build`, `cargo test`, `cargo clippy` must pass.
+8. Commit, push, and report done:
    ```
    git add <changed files>
    git commit -m "feat({task_id}): <description>"
@@ -213,8 +221,10 @@ prompt  = """Review the implementation against the task spec and approved propos
    - **Test coverage** -- are acceptance criteria verified by tests?
    - **Scope discipline** -- no unrelated changes, no gold-plating?
    - **Build health** -- compiles, tests pass, clippy clean?
+   - **Documentation** -- are docs updated to reflect changed behavior?
 
-   Total >= 6 AND no zeros -> pass. Any zero -> fail regardless of total.
+   Scoring: 2 = meets expectations, 1 = marginal, 0 = does not meet.
+   Total >= 7 AND no zeros -> pass. Any zero -> fail regardless of total.
 
 5. Post your review as a cx comment:
    `cx comment {task_id} --tag code-review --file /tmp/review.md`
