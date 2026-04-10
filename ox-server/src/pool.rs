@@ -122,11 +122,23 @@ pub async fn check_loop(bus: &EventBus, grace_secs: u64) {
             // Case 1: heartbeat stale — runner stopped heartbeating
             let stale = now - last_seen > grace;
 
-            // Case 2: pool says executing, heartbeat says idle or different step
-            let mismatch = if let Some(ps) = projected_step {
-                match (&hb.execution_id, &hb.step) {
-                    (Some(e), Some(s)) => e != &ps.execution_id.0 || s != &ps.step,
-                    _ => true,
+            // Case 2: pool says executing, heartbeat says idle or different step.
+            // Only flag if the dispatch happened longer ago than the grace period,
+            // giving the runner time to receive the dispatch and heartbeat with it.
+            let runner_proj = pool.runners.get(runner_id);
+            let dispatched_at = runner_proj.and_then(|r| r.dispatched_at);
+            let dispatch_old_enough = dispatched_at
+                .map(|dt| now - dt > grace)
+                .unwrap_or(false);
+
+            let mismatch = if dispatch_old_enough {
+                if let Some(ps) = projected_step {
+                    match (&hb.execution_id, &hb.step) {
+                        (Some(e), Some(s)) => e != &ps.execution_id.0 || s != &ps.step,
+                        _ => true,
+                    }
+                } else {
+                    false
                 }
             } else {
                 false

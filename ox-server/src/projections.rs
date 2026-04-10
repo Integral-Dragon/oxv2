@@ -19,6 +19,8 @@ pub struct RunnerState {
     pub status: RunnerStatus,
     pub current_step: Option<StepAttemptId>,
     pub registered_at: DateTime<Utc>,
+    /// When the current step was dispatched to this runner.
+    pub dispatched_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +171,7 @@ impl Projections {
                             status: RunnerStatus::Idle,
                             current_step: None,
                             registered_at: event.ts,
+                            dispatched_at: None,
                         },
                     );
                 }
@@ -196,6 +199,7 @@ impl Projections {
                             step: data.step.clone(),
                             attempt: data.attempt,
                         });
+                        runner.dispatched_at = Some(event.ts);
                     }
 
                     // Update execution state
@@ -255,6 +259,7 @@ impl Projections {
                             && step.execution_id == data.execution_id && step.step == data.step {
                                 runner.status = RunnerStatus::Idle;
                                 runner.current_step = None;
+                                runner.dispatched_at = None;
                                 break;
                             }
                     }
@@ -277,6 +282,7 @@ impl Projections {
                             && step.execution_id == data.execution_id && step.step == data.step {
                                 runner.status = RunnerStatus::Idle;
                                 runner.current_step = None;
+                                runner.dispatched_at = None;
                                 break;
                             }
                     }
