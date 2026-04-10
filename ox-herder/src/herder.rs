@@ -39,7 +39,6 @@ struct RunnerView {
 /// Local view of an execution, rebuilt from SSE events.
 #[derive(Debug)]
 struct ExecutionView {
-    id: String,
     task_id: String,
     workflow: String,
     status: String, // "running", "completed", "escalated", "cancelled"
@@ -255,7 +254,6 @@ impl Herder {
                 self.executions.insert(
                     d.execution_id.0.clone(),
                     ExecutionView {
-                        id: d.execution_id.0.clone(),
                         task_id: d.task_id,
                         workflow: d.workflow,
                         status: "running".into(),
@@ -801,7 +799,15 @@ impl Herder {
 
             match self
                 .client
-                .dispatch_step(&exec_id, &step, &runner_id, attempt, &task_id, runtime, workspace)
+                .dispatch_step(&ox_core::client::DispatchStepParams {
+                    execution_id: exec_id.clone(),
+                    step: step.clone(),
+                    runner_id: runner_id.clone(),
+                    attempt,
+                    task_id,
+                    runtime,
+                    workspace,
+                })
                 .await
             {
                 Ok(_) => {

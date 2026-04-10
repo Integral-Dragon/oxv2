@@ -87,6 +87,17 @@ struct CreateExecutionRequest {
     trigger: String,
 }
 
+/// Parameters for dispatching a step to a runner.
+pub struct DispatchStepParams {
+    pub execution_id: String,
+    pub step: String,
+    pub runner_id: RunnerId,
+    pub attempt: u32,
+    pub task_id: String,
+    pub runtime: serde_json::Value,
+    pub workspace: serde_json::Value,
+}
+
 #[derive(Serialize)]
 struct DispatchRequest {
     runner_id: RunnerId,
@@ -290,26 +301,18 @@ impl OxClient {
 
     // ── Steps ───────────────────────────────────────────────────────
 
-    pub async fn dispatch_step(
-        &self,
-        execution_id: &str,
-        step: &str,
-        runner_id: &RunnerId,
-        attempt: u32,
-        task_id: &str,
-        runtime: serde_json::Value,
-        workspace: serde_json::Value,
-    ) -> Result<()> {
+    pub async fn dispatch_step(&self, params: &DispatchStepParams) -> Result<()> {
         self.http
             .post(self.url(&format!(
-                "/api/executions/{execution_id}/steps/{step}/dispatch"
+                "/api/executions/{}/steps/{}/dispatch",
+                params.execution_id, params.step
             )))
             .json(&DispatchRequest {
-                runner_id: runner_id.clone(),
-                attempt,
-                task_id: task_id.to_string(),
-                runtime,
-                workspace,
+                runner_id: params.runner_id.clone(),
+                attempt: params.attempt,
+                task_id: params.task_id.clone(),
+                runtime: params.runtime.clone(),
+                workspace: params.workspace.clone(),
             })
             .send()
             .await?

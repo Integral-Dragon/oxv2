@@ -173,6 +173,7 @@ pub fn set_kv(conn: &Connection, key: &str, value: &str) -> Result<()> {
 }
 
 /// Remove a runner from the heartbeat table.
+/// Called by pool::drain.
 pub fn remove_runner(conn: &Connection, runner_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM runners WHERE runner_id = ?1",

@@ -57,8 +57,7 @@ pub fn drain(bus: &EventBus, runner_id: &str, reason: &str) {
         .unwrap();
 
     bus.with_conn(|conn| {
-        conn.execute("DELETE FROM runners WHERE runner_id = ?1", [runner_id])
-            .ok();
+        let _ = db::remove_runner(conn, runner_id);
     });
 }
 
