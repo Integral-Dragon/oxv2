@@ -566,8 +566,51 @@ impl Herder {
                         }
                     }
                     Some(goto_step) => {
-                        tracing::info!(exec = %execution_id, from = %step, to = %goto_step, "retries exhausted, jumping to on_fail");
-                        self.enqueue_step(execution_id, goto_step, 1).await;
+                        // Check max_visits on the target step before jumping
+                        let should_go = {
+                            let exec = self.executions.get_mut(execution_id);
+                            let engine_ref = self.workflows.get(
+                                &exec.as_ref().map(|e| e.workflow.clone()).unwrap_or_default()
+                            );
+                            if let (Some(exec), Some(engine)) = (exec, engine_ref) {
+                                let count = exec.visit_counts.entry(goto_step.to_string()).or_insert(0);
+                                *count += 1;
+                                if let Some(step_def) = engine.steps.get(goto_step) {
+                                    if let Some(max) = step_def.max_visits {
+                                        if *count > max {
+                                            // Exceeded max_visits — go to max_visits_goto or escalate
+                                            let fallback = step_def.max_visits_goto.clone();
+                                            Some(fallback)
+                                        } else {
+                                            None // ok to proceed
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+
+                        match should_go {
+                            Some(Some(fallback_step)) => {
+                                tracing::warn!(exec = %execution_id, step = %goto_step, to = %fallback_step, "on_fail target exceeded max_visits, redirecting");
+                                self.enqueue_step(execution_id, &fallback_step, 1).await;
+                            }
+                            Some(None) => {
+                                tracing::warn!(exec = %execution_id, step = %goto_step, "on_fail target exceeded max_visits, escalating");
+                                if let Some(exec) = self.executions.get_mut(execution_id) {
+                                    exec.status = "escalated".into();
+                                }
+                            }
+                            None => {
+                                tracing::info!(exec = %execution_id, from = %step, to = %goto_step, "retries exhausted, jumping to on_fail");
+                                self.enqueue_step(execution_id, goto_step, 1).await;
+                            }
+                        }
                     }
                 }
             }
