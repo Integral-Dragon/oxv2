@@ -134,6 +134,13 @@ pub fn merge_to_main(repo_path: &Path, branch: &str) -> Result<MergeResult, Merg
         )
         .map_err(MergeError::Git)?;
 
+    // Checkout the merged tree so the working directory matches the new HEAD
+    repo.checkout_tree(
+        tree.as_object(),
+        Some(git2::build::CheckoutBuilder::new().force()),
+    )
+    .map_err(MergeError::Git)?;
+
     Ok(MergeResult::MergeCommit {
         prev_head,
         new_head: merge_oid.to_string(),
