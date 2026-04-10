@@ -109,14 +109,12 @@ impl Runner {
                         if let Err(e) = self.handle_dispatch(&msg.data).await {
                             tracing::error!(err = %e, "error handling step dispatch");
                         }
-                    } else if msg.event == "runner.drained" {
-                        if let Ok(d) = serde_json::from_str::<RunnerDrainedData>(&msg.data) {
-                            if Some(&d.runner_id) == self.runner_id.as_ref() {
+                    } else if msg.event == "runner.drained"
+                        && let Ok(d) = serde_json::from_str::<RunnerDrainedData>(&msg.data)
+                            && Some(&d.runner_id) == self.runner_id.as_ref() {
                                 tracing::info!("received drain signal, exiting");
                                 return Ok(());
                             }
-                        }
-                    }
                 }
                 Some(Ok(SseEvent::Open)) => {
                     backoff_secs = 1;
@@ -372,7 +370,7 @@ impl Runner {
         cmd.args(&cmd_args[1..])
             .current_dir(&work_dir)
             .env("OX_SOCKET", &socket_path)
-            .env("OX_TASK_ID", &assignment.execution_id.split('-').next().unwrap_or(""));
+            .env("OX_TASK_ID", assignment.execution_id.split('-').next().unwrap_or(""));
 
         // Add ox bin directory to PATH so ox-rt is available
         let current_path = std::env::var("PATH").unwrap_or_default();

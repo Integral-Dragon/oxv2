@@ -410,11 +410,10 @@ async fn cmd_events(
         match es.next().await {
             Some(Ok(SseEvent::Message(msg))) => {
                 // Apply type filter
-                if let Some(ref filter) = type_filter {
-                    if !msg.event.starts_with(filter) {
+                if let Some(ref filter) = type_filter
+                    && !msg.event.starts_with(filter) {
                         continue;
                     }
-                }
 
                 if json {
                     println!("{}", msg.data);
@@ -530,11 +529,10 @@ async fn cmd_logs(
         } else {
             format!("{}?{}", base_url, check_params.join("&"))
         };
-        if let Ok(resp) = client.get(&check_url).send().await {
-            if let Ok(text) = resp.text().await {
+        if let Ok(resp) = client.get(&check_url).send().await
+            && let Ok(text) = resp.text().await {
                 known_len = text.len();
             }
-        }
     }
 
     let mut poll_params = vec![];
@@ -560,8 +558,8 @@ async fn cmd_logs(
             continue;
         }
 
-        if let Ok(text) = resp.text().await {
-            if text.len() > known_len {
+        if let Ok(text) = resp.text().await
+            && text.len() > known_len {
                 let new_data = &text[known_len..];
                 if pretty {
                     pretty_print_claude_log(new_data);
@@ -570,7 +568,6 @@ async fn cmd_logs(
                 }
                 known_len = text.len();
             }
-        }
     }
 }
 

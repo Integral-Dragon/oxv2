@@ -232,14 +232,12 @@ impl Herder {
                 );
 
                 // Re-ready the orphaned step if the runner was working on one
-                if let (Some(exec_id), Some(step), Some(attempt)) = (&d.execution_id, &d.step, d.attempt) {
-                    if let Some(exec) = self.executions.get_mut(exec_id) {
-                        if matches!(exec.phase, ExecPhase::AwaitingStep) {
+                if let (Some(exec_id), Some(step), Some(attempt)) = (&d.execution_id, &d.step, d.attempt)
+                    && let Some(exec) = self.executions.get_mut(exec_id)
+                        && matches!(exec.phase, ExecPhase::AwaitingStep) {
                             tracing::info!(exec = %exec_id, step = %step, attempt, "re-dispatching orphaned step");
                             exec.phase = ExecPhase::Ready { step: step.clone(), attempt };
                         }
-                    }
-                }
                 // Remove the dead runner
                 self.runners.remove(&d.runner_id.0);
             }
@@ -312,32 +310,29 @@ impl Herder {
             }
             "step.done" => {
                 let d: StepDoneData = serde_json::from_value(envelope.data)?;
-                if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
-                    if exec.status == "running" {
+                if let Some(exec) = self.executions.get_mut(&d.execution_id.0)
+                    && exec.status == "running" {
                         exec.last_output = Some(d.output);
                     }
-                }
             }
             "step.confirmed" => {
                 let d: StepConfirmedData = serde_json::from_value(envelope.data)?;
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
-                if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
-                    if exec.status == "running" {
+                if let Some(exec) = self.executions.get_mut(&d.execution_id.0)
+                    && exec.status == "running" {
                         tracing::info!(exec = %d.execution_id, step = %d.step, "step confirmed");
                         exec.retry_tracker.reset();
                         exec.phase = ExecPhase::NeedsAdvance { step: d.step };
                     }
-                }
             }
             "step.failed" => {
                 let d: StepFailedData = serde_json::from_value(envelope.data)?;
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
-                if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
-                    if exec.status == "running" {
+                if let Some(exec) = self.executions.get_mut(&d.execution_id.0)
+                    && exec.status == "running" {
                         tracing::warn!(exec = %d.execution_id, step = %d.step, error = %d.error, "step failed");
                         exec.phase = ExecPhase::NeedsFailure { step: d.step, error: d.error };
                     }
-                }
             }
             "step.advanced" => {
                 // Pure state — no action needed, scheduler already handled it
@@ -847,17 +842,16 @@ impl Herder {
         event_type: &str,
         tags: &[String],
     ) {
-        for (_workflow_name, engine) in &self.workflows {
+        for engine in self.workflows.values() {
             for trigger in &engine.triggers {
                 if trigger.on != event_type {
                     continue;
                 }
 
-                if let Some(ref tag_pattern) = trigger.tag {
-                    if !tags.iter().any(|t| t == tag_pattern) {
+                if let Some(ref tag_pattern) = trigger.tag
+                    && !tags.iter().any(|t| t == tag_pattern) {
                         continue;
                     }
-                }
 
                 // Dedup: skip if there's already an active execution
                 let dominated = self.executions.values().any(|e| {
@@ -878,8 +872,8 @@ impl Herder {
 
                 // Check current cx state
                 let cx_state = get_cx_node_state(&self.server_url, node_id).await;
-                if let Some(ref state) = cx_state {
-                    if state == "integrated" || state == "shadowed" {
+                if let Some(ref state) = cx_state
+                    && (state == "integrated" || state == "shadowed") {
                         tracing::debug!(
                             node = %node_id,
                             state = %state,
@@ -887,7 +881,6 @@ impl Herder {
                         );
                         continue;
                     }
-                }
 
                 tracing::info!(
                     node = %node_id,

@@ -12,7 +12,7 @@ pub fn resolve_search_path(repo_root: &Path) -> Vec<PathBuf> {
     if let Ok(ox_home) = std::env::var("OX_HOME") {
         for dir in ox_home.split(':') {
             let expanded = if dir.starts_with('~') {
-                if let Some(home) = std::env::var("HOME").ok() {
+                if let Ok(home) = std::env::var("HOME") {
                     dir.replacen('~', &home, 1)
                 } else {
                     dir.to_string()
@@ -54,14 +54,13 @@ pub fn load_all_configs(search_path: &[PathBuf], subdir: &str) -> Vec<(String, P
         if let Ok(entries) = std::fs::read_dir(&sub) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("toml") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if path.extension().and_then(|e| e.to_str()) == Some("toml")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                         let name = stem.to_string();
                         if seen.insert(name.clone()) {
                             results.push((name, path));
                         }
                     }
-                }
             }
         }
     }

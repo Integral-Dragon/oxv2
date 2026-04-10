@@ -204,9 +204,9 @@ impl WorkflowEngine {
         let count = visit_counts.entry(target.to_string()).or_insert(0);
         *count += 1;
 
-        if let Some(step_def) = self.steps.get(target) {
-            if let Some(max) = step_def.max_visits {
-                if *count > max {
+        if let Some(step_def) = self.steps.get(target)
+            && let Some(max) = step_def.max_visits
+                && *count > max {
                     let goto = step_def
                         .max_visits_goto
                         .as_deref()
@@ -216,8 +216,6 @@ impl WorkflowEngine {
                     }
                     return StepAdvance::Goto(goto.to_string());
                 }
-            }
-        }
 
         StepAdvance::Goto(target.to_string())
     }
@@ -255,6 +253,12 @@ pub enum RetryDecision {
 }
 
 const DEFAULT_MAX_RETRIES: u32 = 3;
+
+impl Default for RetryTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RetryTracker {
     pub fn new() -> Self {

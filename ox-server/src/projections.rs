@@ -251,13 +251,12 @@ impl Projections {
                     // Return runner to idle
                     let mut pool = self.pool.write().unwrap();
                     for runner in pool.runners.values_mut() {
-                        if let Some(ref step) = runner.current_step {
-                            if step.execution_id == data.execution_id && step.step == data.step {
+                        if let Some(ref step) = runner.current_step
+                            && step.execution_id == data.execution_id && step.step == data.step {
                                 runner.status = RunnerStatus::Idle;
                                 runner.current_step = None;
                                 break;
                             }
-                        }
                     }
 
                     // Update step status
@@ -274,13 +273,12 @@ impl Projections {
                     // Return runner to idle
                     let mut pool = self.pool.write().unwrap();
                     for runner in pool.runners.values_mut() {
-                        if let Some(ref step) = runner.current_step {
-                            if step.execution_id == data.execution_id && step.step == data.step {
+                        if let Some(ref step) = runner.current_step
+                            && step.execution_id == data.execution_id && step.step == data.step {
                                 runner.status = RunnerStatus::Idle;
                                 runner.current_step = None;
                                 break;
                             }
-                        }
                     }
 
                     // Update step status

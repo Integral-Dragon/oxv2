@@ -142,11 +142,10 @@ async fn cx_poll_loop(state: AppState) {
         }
 
         // Update cursor
-        if let Some(hash) = result.latest_hash {
-            if let Err(e) = state.bus.with_conn(|conn| db::set_kv(conn, CX_CURSOR_KEY, &hash)) {
+        if let Some(hash) = result.latest_hash
+            && let Err(e) = state.bus.with_conn(|conn| db::set_kv(conn, CX_CURSOR_KEY, &hash)) {
                 tracing::warn!(err = %e, "failed to update cx cursor");
             }
-        }
     }
 }
 

@@ -225,16 +225,13 @@ pub fn resolve_step_spec(
     let mut resolved_files: Vec<ResolvedFile> = vec![];
 
     for (name, def) in &runtime_def.fields {
-        if def.field_type == FieldType::File {
-            if let Some(file_ref) = field_values.get(name).cloned() {
-                if !file_ref.is_empty() {
-                    if let Some(content) = find_and_read_file(search_path, "personas", &file_ref) {
+        if def.field_type == FieldType::File
+            && let Some(file_ref) = field_values.get(name).cloned()
+                && !file_ref.is_empty()
+                    && let Some(content) = find_and_read_file(search_path, "personas", &file_ref) {
                         // Store the loaded content so it can be used (e.g. prepended to prompt)
                         field_values.insert(format!("{name}_content"), content);
                     }
-                }
-            }
-        }
     }
 
     // 3. Build interpolation context (needed for prompt assembly and everything after)
@@ -276,8 +273,8 @@ pub fn resolve_step_spec(
 
     // 4b. Resolve content-based file mappings (e.g. credentials from secrets)
     for file_mapping in &runtime_def.files {
-        if let Some(ref content_template) = file_mapping.content {
-            if let Ok(content) = ctx.interpolate(content_template) {
+        if let Some(ref content_template) = file_mapping.content
+            && let Ok(content) = ctx.interpolate(content_template) {
                 let to = ctx.interpolate(&file_mapping.to)
                     .unwrap_or_else(|_| file_mapping.to.clone());
                 resolved_files.push(ResolvedFile {
@@ -286,7 +283,6 @@ pub fn resolve_step_spec(
                     mode: file_mapping.mode.clone(),
                 });
             }
-        }
     }
 
     // 5. Resolve command

@@ -326,16 +326,14 @@ async fn list_executions(
                     return false;
                 }
             }
-            if let Some(ref w) = query.workflow {
-                if &e.workflow != w {
+            if let Some(ref w) = query.workflow
+                && &e.workflow != w {
                     return false;
                 }
-            }
-            if let Some(ref t) = query.task {
-                if &e.task_id != t {
+            if let Some(ref t) = query.task
+                && &e.task_id != t {
                     return false;
                 }
-            }
             true
         })
         .map(execution_summary)
@@ -875,16 +873,14 @@ async fn evaluate_triggers(
     let node = cx.nodes.get(&req.node_id);
 
     // Check if node is shadowed (skip unless force)
-    if !req.force {
-        if let Some(n) = node {
-            if n.shadowed {
+    if !req.force
+        && let Some(n) = node
+            && n.shadowed {
                 return Json(serde_json::json!({
                     "triggered": [],
                     "skipped": "node is shadowed",
                 }));
             }
-        }
-    }
 
     let node_tags: Vec<String> = node.map(|n| n.tags.clone()).unwrap_or_default();
 
@@ -898,11 +894,10 @@ async fn evaluate_triggers(
             }
 
             // Check tag match
-            if let Some(ref tag_pattern) = trigger.tag {
-                if !node_tags.iter().any(|t| t == tag_pattern) {
+            if let Some(ref tag_pattern) = trigger.tag
+                && !node_tags.iter().any(|t| t == tag_pattern) {
                     continue;
                 }
-            }
 
             // Dedup check: is there already a running execution for this (task_id, workflow)?
             if !req.force {
@@ -1242,15 +1237,12 @@ fn find_most_recent_log(
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if let Some(rest) = name.strip_prefix(&prefix) {
-                if let Some(num_str) = rest.strip_suffix(".log") {
-                    if let Ok(n) = num_str.parse::<u32>() {
-                        if best.as_ref().map(|(_, prev)| n > *prev).unwrap_or(true) {
+            if let Some(rest) = name.strip_prefix(&prefix)
+                && let Some(num_str) = rest.strip_suffix(".log")
+                    && let Ok(n) = num_str.parse::<u32>()
+                        && best.as_ref().map(|(_, prev)| n > *prev).unwrap_or(true) {
                             best = Some((entry.path(), n));
                         }
-                    }
-                }
-            }
         }
     }
 

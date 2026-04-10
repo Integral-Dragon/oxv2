@@ -207,19 +207,17 @@ async fn parse_cgi_response(raw: &[u8], _state: &AppState, path: &str) -> Respon
 
     for line in header_section.lines() {
         if let Some(rest) = line.strip_prefix("Status: ") {
-            if let Some(code_str) = rest.split_whitespace().next() {
-                if let Ok(code) = code_str.parse::<u16>() {
+            if let Some(code_str) = rest.split_whitespace().next()
+                && let Ok(code) = code_str.parse::<u16>() {
                     status_code = code;
                 }
-            }
-        } else if let Some((name, value)) = line.split_once(": ") {
-            if let (Ok(name), Ok(value)) = (
+        } else if let Some((name, value)) = line.split_once(": ")
+            && let (Ok(name), Ok(value)) = (
                 name.parse::<axum::http::header::HeaderName>(),
                 value.parse::<axum::http::header::HeaderValue>(),
             ) {
                 response_headers.insert(name, value);
             }
-        }
     }
 
     // If this was a receive-pack (push) and it succeeded, emit git.branch_pushed
