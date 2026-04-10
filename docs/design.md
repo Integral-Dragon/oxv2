@@ -212,6 +212,7 @@ pub enum EventType {
     StepSignals,
     StepConfirmed,
     StepFailed,
+    StepTimeout,
     StepAdvanced,
     StepRetrying,
     // Artifact

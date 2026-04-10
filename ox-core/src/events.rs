@@ -50,6 +50,8 @@ pub enum EventType {
     StepFailed,
     #[serde(rename = "step.advanced")]
     StepAdvanced,
+    #[serde(rename = "step.timeout")]
+    StepTimeout,
     #[serde(rename = "step.retrying")]
     StepRetrying,
     // Artifact
@@ -197,6 +199,15 @@ pub struct StepFailedData {
     pub step: String,
     pub attempt: u32,
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepTimeoutData {
+    pub execution_id: ExecutionId,
+    pub step: String,
+    pub attempt: u32,
+    pub timeout_secs: u64,
+    pub runner_id: RunnerId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

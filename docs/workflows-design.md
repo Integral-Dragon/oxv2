@@ -585,10 +585,11 @@ Event handlers set the phase:
 | `step.dispatched` | → `AwaitingStep` |
 | `step.confirmed` | → `NeedsAdvance { step }` |
 | `step.failed` | → `NeedsFailure { step, error }` |
+| `step.timeout` | → `NeedsFailure { step, "step timeout" }` |
+| `runner.heartbeat_missed` | → `NeedsFailure { step, "runner lost" }` (if runner had a step in-flight) |
 | `execution.completed` | → `Done` |
 | `execution.escalated` | → `Done` |
 | `execution.cancelled` | → `Done` |
-| `runner.heartbeat_missed` | If the dead runner was executing this execution's step: → `Ready { step, attempt }` |
 
 During replay, the last event for each execution determines its phase.
 After replay, the scheduler runs once and picks up any execution that

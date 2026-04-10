@@ -21,6 +21,8 @@ pub struct RunnerState {
     pub registered_at: DateTime<Utc>,
     /// When the current step was dispatched to this runner.
     pub dispatched_at: Option<DateTime<Utc>>,
+    /// Step timeout from the runtime spec (if set).
+    pub step_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +174,7 @@ impl Projections {
                             current_step: None,
                             registered_at: event.ts,
                             dispatched_at: None,
+                            step_timeout_secs: None,
                         },
                     );
                 }
@@ -200,6 +203,9 @@ impl Projections {
                             attempt: data.attempt,
                         });
                         runner.dispatched_at = Some(event.ts);
+                        runner.step_timeout_secs = data.runtime
+                            .get("timeout")
+                            .and_then(|v| v.as_u64());
                     }
 
                     // Update execution state
@@ -260,6 +266,7 @@ impl Projections {
                                 runner.status = RunnerStatus::Idle;
                                 runner.current_step = None;
                                 runner.dispatched_at = None;
+                                runner.step_timeout_secs = None;
                                 break;
                             }
                     }
@@ -283,6 +290,7 @@ impl Projections {
                                 runner.status = RunnerStatus::Idle;
                                 runner.current_step = None;
                                 runner.dispatched_at = None;
+                                runner.step_timeout_secs = None;
                                 break;
                             }
                     }
@@ -293,6 +301,31 @@ impl Projections {
                         let attempt = exec.find_or_create_attempt(&data.step, data.attempt, event.ts);
                         attempt.status = StepStatus::Failed;
                         attempt.error = Some(data.error);
+                        attempt.completed_at = Some(event.ts);
+                    }
+                }
+            }
+            EventType::StepTimeout => {
+                if let Ok(data) = serde_json::from_value::<StepTimeoutData>(event.data.clone()) {
+                    // Return runner to idle
+                    let mut pool = self.pool.write().unwrap();
+                    for runner in pool.runners.values_mut() {
+                        if let Some(ref step) = runner.current_step
+                            && step.execution_id == data.execution_id && step.step == data.step {
+                                runner.status = RunnerStatus::Idle;
+                                runner.current_step = None;
+                                runner.dispatched_at = None;
+                                runner.step_timeout_secs = None;
+                                break;
+                            }
+                    }
+
+                    // Update step status
+                    let mut execs = self.executions.write().unwrap();
+                    if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
+                        let attempt = exec.find_or_create_attempt(&data.step, data.attempt, event.ts);
+                        attempt.status = StepStatus::Failed;
+                        attempt.error = Some(format!("timeout after {}s", data.timeout_secs));
                         attempt.completed_at = Some(event.ts);
                     }
                 }

@@ -93,6 +93,7 @@ pub async fn check_loop(bus: &EventBus, grace_secs: u64) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut already_missed: HashSet<String> = HashSet::new();
+    let mut already_timed_out: HashSet<String> = HashSet::new(); // keyed by "exec_id/step/attempt"
 
     loop {
         interval.tick().await;
@@ -202,6 +203,58 @@ pub async fn check_loop(bus: &EventBus, grace_secs: u64) {
             } else {
                 false
             }
+        });
+
+        // Step timeout detection — independent of runner health.
+        // A runner can be healthy but a step can exceed its timeout.
+        for runner in pool.runners.values() {
+            let (Some(step_id), Some(dispatched), Some(timeout_secs)) =
+                (&runner.current_step, runner.dispatched_at, runner.step_timeout_secs)
+            else {
+                continue;
+            };
+
+            let key = format!("{}/{}/{}", step_id.execution_id.0, step_id.step, step_id.attempt);
+            if already_timed_out.contains(&key) {
+                continue;
+            }
+
+            let timeout = chrono::Duration::seconds(timeout_secs as i64);
+            if now - dispatched > timeout {
+                tracing::warn!(
+                    runner = %runner.id,
+                    exec = %step_id.execution_id,
+                    step = %step_id.step,
+                    attempt = step_id.attempt,
+                    timeout_secs,
+                    "step timeout exceeded"
+                );
+
+                let data = StepTimeoutData {
+                    execution_id: step_id.execution_id.clone(),
+                    step: step_id.step.clone(),
+                    attempt: step_id.attempt,
+                    timeout_secs,
+                    runner_id: runner.id.clone(),
+                };
+                if let Err(e) = bus.append(
+                    EventType::StepTimeout,
+                    serde_json::to_value(data).unwrap(),
+                ) {
+                    tracing::error!(err = %e, "failed to emit step.timeout");
+                }
+
+                already_timed_out.insert(key);
+            }
+        }
+
+        // Clear timed-out steps that are no longer in-flight
+        already_timed_out.retain(|key| {
+            pool.runners.values().any(|r| {
+                r.current_step.as_ref().is_some_and(|s| {
+                    format!("{}/{}/{}", s.execution_id.0, s.step, s.attempt) == *key
+                })
+            })
         });
     }
 }

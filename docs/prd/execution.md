@@ -202,6 +202,18 @@ to an earlier step. When `max_visits` is reached, execution jumps to
 This prevents infinite review loops where a reviewer keeps sending work
 back to an implementer. After N visits, a tiebreaker step runs.
 
+### Step Timeouts
+
+Steps with a `timeout` in their runtime spec are monitored by
+ox-server's pool manager. If a step has been dispatched for longer than
+its timeout, the server emits `step.timeout`. The herder treats this as
+a step failure — the normal retry and `on_fail` logic applies.
+
+Step timeouts are independent of runner health. A runner can be healthy
+(heartbeating normally) while a step is stuck (agent in an infinite
+loop). The runner continues running — the herder re-dispatches or
+escalates via the workflow's failure handling.
+
 ---
 
 ## Interactive Steps
@@ -323,6 +335,7 @@ step.done           { execution_id, step, attempt, output }
 step.signals        { execution_id, step, attempt, signals[] }
 step.confirmed      { execution_id, step, attempt, metrics }
 step.failed         { execution_id, step, attempt, error }
+step.timeout        { execution_id, step, attempt, timeout_secs, runner_id }
 step.advanced       { execution_id, from_step, to_step }
 step.retrying       { execution_id, step, attempt }
 ```
@@ -348,6 +361,11 @@ result. The herder now advances the workflow.
 
 `step.failed` — the step failed. `error` carries the reason (e.g.
 `signal:no_commits`, `runtime:non_zero_exit`, `runner:push_failed`).
+
+`step.timeout` — the step exceeded its `timeout` from the runtime spec.
+Emitted by ox-server's pool manager, not the runner. The runner may
+still be alive — this is about step duration, not runner health. The
+herder treats it as a step failure (retry or escalate).
 
 `step.advanced` — the herder has evaluated transitions and moved the
 execution to the next step.
