@@ -402,6 +402,13 @@ impl Herder {
                     "dispatching step"
                 );
 
+                // Mark runner as busy immediately so we don't double-dispatch
+                if let Some(runner) = self.runners.get_mut(&idle_runner_id.0) {
+                    runner.idle = false;
+                    runner.current_execution = Some(pending.execution_id.clone());
+                    runner.current_step = Some(pending.step.clone());
+                }
+
                 if let Err(e) = self
                     .client
                     .dispatch_step(
@@ -416,7 +423,12 @@ impl Herder {
                     .await
                 {
                     tracing::error!(err = %e, "failed to dispatch step");
-                    // Re-enqueue? For now just log.
+                    // Restore runner to idle since dispatch failed
+                    if let Some(runner) = self.runners.get_mut(&idle_runner_id.0) {
+                        runner.idle = true;
+                        runner.current_execution = None;
+                        runner.current_step = None;
+                    }
                 }
             } else {
                 break;
