@@ -215,13 +215,21 @@ async fn cmd_exec_list(
             "ID", "TASK", "WORKFLOW", "STEP", "STATUS"
         );
         for e in &execs {
+            let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("-");
+            let step = e.get("current_step").and_then(|v| v.as_str()).unwrap_or("-");
+            // If running but no step assigned yet, show as pending
+            let display_status = if status == "running" && step == "-" {
+                "pending"
+            } else {
+                status
+            };
             println!(
                 "{:<14} {:<8} {:<16} {:<14} {:<12}",
                 e.get("id").and_then(|v| v.as_str()).unwrap_or("-"),
                 e.get("task_id").and_then(|v| v.as_str()).unwrap_or("-"),
                 e.get("workflow").and_then(|v| v.as_str()).unwrap_or("-"),
-                e.get("current_step").and_then(|v| v.as_str()).unwrap_or("-"),
-                e.get("status").and_then(|v| v.as_str()).unwrap_or("-"),
+                step,
+                display_status,
             );
         }
     }
