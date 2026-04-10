@@ -199,7 +199,7 @@ prompt  = """Implement the task following the approved proposal.
    git add <changed files>
    git commit -m "{task_id}: <description>"
    git push origin {task_id}
-   ox-rt done <commit-sha>
+   ox-rt done implemented
    ```
 """
 
