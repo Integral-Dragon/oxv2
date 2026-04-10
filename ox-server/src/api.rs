@@ -801,16 +801,8 @@ async fn merge_step(
 
     match merge::merge_to_main(&state.repo_path, &req.branch) {
         Ok(result) => {
-            let (prev_head, new_head) = match &result {
-                merge::MergeResult::FastForward {
-                    prev_head,
-                    new_head,
-                } => (prev_head.clone(), new_head.clone()),
-                merge::MergeResult::MergeCommit {
-                    prev_head,
-                    new_head,
-                } => (prev_head.clone(), new_head.clone()),
-            };
+            let prev_head = result.prev_head.clone();
+            let new_head = result.new_head.clone();
 
             // Emit git.merged event
             let merged_data = GitMergedData {

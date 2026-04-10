@@ -21,4 +21,3 @@ rusqlite = { workspace = true }
 clap = { workspace = true }
 async-stream = { workspace = true }
 futures-util = { workspace = true }
-git2 = { workspace = true }
