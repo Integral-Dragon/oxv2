@@ -14,7 +14,8 @@
 set -euo pipefail
 
 REPO_DIR="$(pwd)"
-OX_DIR="${OX_DIR:-$HOME/projects/oxv2}"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+OX_DIR="${OX_DIR:-$(dirname "$SCRIPT_DIR")}"
 OX_BIN="${OX_BIN:-${OX_DIR}/target/debug}"
 OX_PORT="${OX_PORT:-4840}"
 OX_SERVER="http://localhost:${OX_PORT}"
