@@ -415,12 +415,6 @@ impl Herder {
             .map(|r| r.id.clone())
     }
 
-    /// Check if an execution already has a step in-flight on a runner.
-    fn has_active_runner(&self, execution_id: &str) -> bool {
-        self.runners.values().any(|r| {
-            !r.idle && r.current_execution.as_deref() == Some(execution_id)
-        })
-    }
 
     // ── The Scheduler ──────────────────────────────────────────────
 
@@ -765,11 +759,6 @@ impl Herder {
             .collect();
 
         for (exec_id, step, attempt, task_id) in ready {
-            // Guard: don't dispatch if this execution already has a step in-flight
-            if self.has_active_runner(&exec_id) {
-                continue;
-            }
-
             let runner_id = match self.find_idle_runner() {
                 Some(r) => r,
                 None => break, // No more idle runners
