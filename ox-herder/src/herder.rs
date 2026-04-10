@@ -57,6 +57,11 @@ pub struct Herder {
     workflows: HashMap<String, WorkflowEngine>,
     pending: VecDeque<PendingStep>,
     last_seq: u64,
+    /// True while replaying historical events — suppresses side effects
+    /// (creating executions, dispatching steps) until caught up.
+    replaying: bool,
+    /// The server's current seq at startup, used to detect end of replay.
+    replay_target: u64,
     /// Track last-fired times for poll triggers: (workflow_name, trigger_index) -> Instant
     #[allow(dead_code)]
     poll_trigger_times: HashMap<(String, usize), Instant>,
@@ -80,6 +85,8 @@ impl Herder {
             workflows: HashMap::new(),
             pending: VecDeque::new(),
             last_seq: 0,
+            replaying: true,
+            replay_target: 0,
             poll_trigger_times: HashMap::new(),
         }
     }
@@ -87,6 +94,18 @@ impl Herder {
     pub async fn run(&mut self) -> Result<()> {
         // Load workflow definitions from server
         self.load_workflows().await?;
+
+        // Get current server seq so we know when replay is done
+        match self.client.status().await {
+            Ok(s) => {
+                self.replay_target = s.event_seq;
+                tracing::info!(replay_target = self.replay_target, "replay target set");
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "couldn't get server status, replay detection disabled");
+                self.replaying = false;
+            }
+        }
 
         // Connect to SSE with full replay
         let url = format!("{}/api/events/stream?last_event_id=0", self.server_url);
@@ -111,6 +130,13 @@ impl Herder {
                         Ok(SseEvent::Message(msg)) => {
                             if let Err(e) = self.handle_sse_message(&msg.event, &msg.data).await {
                                 tracing::warn!(err = %e, event = %msg.event, "error handling SSE event");
+                            }
+                            // Check if replay is done
+                            if self.replaying && self.last_seq >= self.replay_target {
+                                self.replaying = false;
+                                tracing::info!(seq = self.last_seq, "replay complete, entering live mode");
+                                // Now dispatch any pending steps from restored executions
+                                self.try_dispatch_pending().await;
                             }
                         }
                         Err(reqwest_eventsource::Error::StreamEnded) => {
@@ -210,8 +236,11 @@ impl Herder {
                         retry_tracker: RetryTracker::new(),
                     },
                 );
-                // Dispatch the first step
-                self.dispatch_first_step(&d.execution_id.0, &d.workflow).await;
+                // Dispatch the first step (only in live mode — during replay,
+                // the step.dispatched event will rebuild the state)
+                if !self.replaying {
+                    self.dispatch_first_step(&d.execution_id.0, &d.workflow).await;
+                }
             }
             "execution.completed" => {
                 let d: ExecutionCompletedData = serde_json::from_value(envelope.data)?;
@@ -267,11 +296,11 @@ impl Herder {
                     exec.retry_tracker.reset();
                 }
 
-                // Advance the workflow
-                self.advance_workflow(&d.execution_id.0, &d.step).await;
-
-                // Try dispatch pending
-                self.try_dispatch_pending().await;
+                // Advance the workflow (only in live mode)
+                if !self.replaying {
+                    self.advance_workflow(&d.execution_id.0, &d.step).await;
+                    self.try_dispatch_pending().await;
+                }
             }
             "step.failed" => {
                 let d: StepFailedData = serde_json::from_value(envelope.data)?;
@@ -280,8 +309,10 @@ impl Herder {
                 // Free the runner
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
 
-                // Handle retry or escalate
-                self.handle_step_failure(&d.execution_id.0, &d.step, &d.error).await;
+                // Handle retry or escalate (only in live mode)
+                if !self.replaying {
+                    self.handle_step_failure(&d.execution_id.0, &d.step, &d.error).await;
+                }
 
                 // Try dispatch pending
                 self.try_dispatch_pending().await;
@@ -290,12 +321,14 @@ impl Herder {
                 // Already handled by our own advance call — just update local state
             }
 
-            // cx events — evaluate triggers
+            // cx events — evaluate triggers (only in live mode)
             "cx.task_ready" => {
                 let d: CxTaskReadyData = serde_json::from_value(envelope.data)?;
-                tracing::info!(node = %d.node_id, tags = ?d.tags, "cx.task_ready");
-                self.evaluate_triggers_for_node(&d.node_id, "cx.task_ready", &d.tags)
-                    .await;
+                tracing::info!(node = %d.node_id, tags = ?d.tags, replaying = self.replaying, "cx.task_ready");
+                if !self.replaying {
+                    self.evaluate_triggers_for_node(&d.node_id, "cx.task_ready", &d.tags)
+                        .await;
+                }
             }
             "cx.task_claimed" => {
                 let d: CxTaskClaimedData = serde_json::from_value(envelope.data)?;
