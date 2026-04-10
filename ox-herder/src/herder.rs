@@ -337,11 +337,10 @@ impl Herder {
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0)
                     && exec.status == "running" {
-                        tracing::warn!(exec = %d.execution_id, step = %d.step, timeout_secs = d.timeout_secs, "step timed out");
-                        exec.phase = ExecPhase::NeedsFailure {
-                            step: d.step,
-                            error: format!("step timeout after {}s", d.timeout_secs),
-                        };
+                        // Infrastructure failure, not a workflow failure — re-dispatch
+                        // without burning a retry.
+                        tracing::warn!(exec = %d.execution_id, step = %d.step, timeout_secs = d.timeout_secs, "step timed out, re-dispatching");
+                        exec.phase = ExecPhase::Ready { step: d.step, attempt: d.attempt };
                     }
             }
             "step.advanced" => {

@@ -211,8 +211,8 @@ a step failure — the normal retry and `on_fail` logic applies.
 
 Step timeouts are independent of runner health. A runner can be healthy
 (heartbeating normally) while a step is stuck (agent in an infinite
-loop). The runner continues running — the herder re-dispatches or
-escalates via the workflow's failure handling.
+loop). The herder re-dispatches the step to another runner without
+burning a retry — infrastructure failures are not workflow failures.
 
 ---
 
