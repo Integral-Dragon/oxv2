@@ -147,6 +147,10 @@ async fn cx_poll_loop(state: AppState) {
 }
 
 async fn heartbeat_check_loop(state: AppState, grace_secs: u64) {
+    // Wait for the grace period before first check — runners need time to
+    // register and send their first heartbeat after server startup.
+    tokio::time::sleep(std::time::Duration::from_secs(grace_secs)).await;
+
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

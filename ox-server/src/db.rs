@@ -70,6 +70,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     )
     .context("running migrations")?;
 
+    // Incremental migrations — each is idempotent (ignore "duplicate column" errors)
+    for col in ["execution_id TEXT", "step TEXT", "attempt INTEGER"] {
+        match conn.execute(&format!("ALTER TABLE runners ADD COLUMN {col}"), []) {
+            Ok(_) => tracing::info!("migration: added column {col} to runners"),
+            Err(e) => tracing::debug!("migration: runners.{col} already exists or error: {e}"),
+        }
+    }
+
     Ok(())
 }
 
