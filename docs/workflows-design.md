@@ -276,72 +276,52 @@ branch that merges to main). The herder checks the shadow flag in
 
 ## merge_to_main
 
-The merge step runs in-process on ox-server. It is the only path for
-code and cx state to land on main.
+The merge step runs in-process on ox-server via the herder's scheduler.
+It is the only path for code and cx state to land on main.
 
 ### Implementation
 
+Uses git CLI (not git2) for reliability:
+
 ```rust
-fn merge_to_main(repo: &Repository, branch: &str) -> Result<MergeResult> {
-    let main_ref = repo.find_branch("main", BranchType::Local)?;
-    let main_commit = main_ref.get().peel_to_commit()?;
+fn merge_to_main(repo_path: &Path, branch: &str, squash: bool)
+    -> Result<MergeResult, MergeError>
+{
+    // Preconditions
+    // - Must be on main with clean worktree
+    // - Branch must exist and have commits ahead of main
 
-    let branch_ref = repo.find_branch(branch, BranchType::Local)?;
-    let branch_commit = branch_ref.get().peel_to_commit()?;
+    let ahead = git(&["rev-list", "--count", &format!("main..{branch}")])?;
 
-    // Precondition: worktree must be clean
-    if !repo.statuses(None)?.is_empty() {
-        return Err(MergeError::DirtyWorktree);
+    // Optional squash: collapse all branch commits into one
+    if squash && ahead > 1 {
+        let messages = git(&["log", "--reverse", "--format=%B",
+                             &format!("main..{branch}")])?;
+        git(&["checkout", branch])?;
+        let merge_base = git(&["merge-base", "main", "HEAD"])?;
+        git(&["reset", "--soft", &merge_base])?;
+        git(&["commit", "-m", &messages])?;
+        git(&["checkout", "main"])?;
     }
 
-    // Precondition: branch must have commits ahead of merge base
-    let merge_base = repo.merge_base(main_commit.id(), branch_commit.id())?;
-    if branch_commit.id() == merge_base {
-        return Err(MergeError::EmptyBranch);
-    }
+    // Rebase branch onto main (abort on conflicts)
+    git(&["rebase", "main", branch])?;  // or abort + return Conflicts
+    git(&["checkout", "main"])?;
 
-    // Strategy 1: fast-forward
-    if main_commit.id() == merge_base {
-        // Branch is a descendant of main — fast-forward
-        repo.reference(
-            "refs/heads/main",
-            branch_commit.id(),
-            true,
-            &format!("fast-forward merge of {branch}"),
-        )?;
-        return Ok(MergeResult::FastForward {
-            prev_head: main_commit.id(),
-            new_head: branch_commit.id(),
-        });
-    }
+    // Fast-forward — guaranteed after successful rebase
+    git(&["merge", "--ff-only", branch])?;
 
-    // Strategy 2: merge commit
-    let merge_base_commit = repo.find_commit(merge_base)?;
-    let mut index = repo.merge_commits(&main_commit, &branch_commit, None)?;
-
-    if index.has_conflicts() {
-        return Err(MergeError::Conflicts { branch: branch.to_string() });
-    }
-
-    let tree_oid = index.write_tree_to(repo)?;
-    let tree = repo.find_tree(tree_oid)?;
-    let sig = repo.signature()?;
-
-    let merge_commit = repo.commit(
-        Some("refs/heads/main"),
-        &sig,
-        &sig,
-        &format!("Merge branch '{branch}' into main"),
-        &tree,
-        &[&main_commit, &branch_commit],
-    )?;
-
-    Ok(MergeResult::MergeCommit {
-        prev_head: main_commit.id(),
-        new_head: merge_commit,
-    })
+    Ok(MergeResult { prev_head, new_head })
 }
 ```
+
+The `squash` flag is set per step in the workflow definition. When
+enabled, all branch commits are collapsed into a single commit whose
+message is the concatenation of all original commit messages. If the
+branch already has exactly one commit, the squash is a no-op.
+
+The squash happens before the rebase, so the rebased result is always
+a single commit that fast-forwards cleanly.
 
 ### Post-Merge: cx Event Derivation
 

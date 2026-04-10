@@ -122,6 +122,7 @@ for the full reference implementation.
 | `max_visits` | no | — | Maximum times this step can be visited across retry loops |
 | `max_visits_goto` | no | `"escalate"` | Step to jump to when `max_visits` is exceeded |
 | `on_fail` | no | — | Step to jump to on failure (see Failure Handling) |
+| `squash` | no | `false` | Squash branch commits into one before merging (action steps only) |
 
 A step has either `runtime` (dispatched to a runner) or `action` (runs
 in-process on ox-server). If neither is specified, the step defaults to
@@ -260,19 +261,18 @@ silently drop, overwrite, or skip any commit from either the branch or
 main.
 
 **Merge strategy:**
-1. Branch is a descendant of main → fast-forward (`update-ref`)
-2. Main has diverged from the branch point → merge commit (`git merge --no-edit`)
-3. Conflicts exist → abort (`git merge --abort`), fail the step, escalate
+1. If `squash = true` and branch has >1 commit ahead of main: collect
+   all commit messages, soft-reset to merge base, create a single commit
+   with the concatenated messages. If the branch already has exactly one
+   commit, this is a no-op.
+2. Rebase the branch onto main. If conflicts exist, abort the rebase
+   and fail the step.
+3. Fast-forward main to the rebased branch (`--ff-only`).
 
 **Preconditions checked before merge:**
 - Worktree must be clean. Dirty worktree blocks all merges.
 - Branch must have at least one commit ahead of the merge base. An empty
   branch is an error — the step produced nothing.
-
-**What `merge_to_main` must not do:**
-- Rebase branches. Rebasing rewrites history and can silently drop commits.
-- Force-update refs, except for provably safe fast-forwards.
-- Auto-resolve conflicts. Any conflict means the merge cannot proceed.
 
 **Post-merge:** the worktree is updated to the new main HEAD. ox-server
 then diffs `.complex/` against the previous HEAD and emits any resulting
