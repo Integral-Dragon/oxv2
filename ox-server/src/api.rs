@@ -9,7 +9,6 @@ use ox_core::events::*;
 use ox_core::types::{ExecutionId, RunnerId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::collections::HashMap;
 
 use crate::AppState;
 use crate::artifacts;

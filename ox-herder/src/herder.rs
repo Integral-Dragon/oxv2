@@ -301,7 +301,9 @@ impl Herder {
                     runner.current_step = Some(d.step.clone());
                 }
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
-                    exec.phase = ExecPhase::AwaitingStep;
+                    if exec.status == "running" {
+                        exec.phase = ExecPhase::AwaitingStep;
+                    }
                     // During replay, reconstruct visit_counts from dispatches
                     if self.replaying {
                         *exec.visit_counts.entry(d.step.clone()).or_insert(0) += 1;
@@ -311,24 +313,30 @@ impl Herder {
             "step.done" => {
                 let d: StepDoneData = serde_json::from_value(envelope.data)?;
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
-                    exec.last_output = Some(d.output);
+                    if exec.status == "running" {
+                        exec.last_output = Some(d.output);
+                    }
                 }
             }
             "step.confirmed" => {
                 let d: StepConfirmedData = serde_json::from_value(envelope.data)?;
-                tracing::info!(exec = %d.execution_id, step = %d.step, "step confirmed");
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
-                    exec.retry_tracker.reset();
-                    exec.phase = ExecPhase::NeedsAdvance { step: d.step };
+                    if exec.status == "running" {
+                        tracing::info!(exec = %d.execution_id, step = %d.step, "step confirmed");
+                        exec.retry_tracker.reset();
+                        exec.phase = ExecPhase::NeedsAdvance { step: d.step };
+                    }
                 }
             }
             "step.failed" => {
                 let d: StepFailedData = serde_json::from_value(envelope.data)?;
-                tracing::warn!(exec = %d.execution_id, step = %d.step, error = %d.error, "step failed");
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
-                    exec.phase = ExecPhase::NeedsFailure { step: d.step, error: d.error };
+                    if exec.status == "running" {
+                        tracing::warn!(exec = %d.execution_id, step = %d.step, error = %d.error, "step failed");
+                        exec.phase = ExecPhase::NeedsFailure { step: d.step, error: d.error };
+                    }
                 }
             }
             "step.advanced" => {
