@@ -288,7 +288,7 @@ impl Runner {
             tracing::info!(url = %git_url, branch = %branch, "cloning workspace from ox-server");
 
             let clone_status = std::process::Command::new("git")
-                .args(["clone", &git_url, "--branch", branch, "--single-branch"])
+                .args(["clone", &git_url, "--branch", branch])
                 .arg(&work_dir)
                 .status();
 
