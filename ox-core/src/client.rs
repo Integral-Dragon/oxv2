@@ -566,4 +566,25 @@ impl OxClient {
             .await
             .context("parsing merge response")
     }
+
+    pub async fn reload_config(&self) -> Result<serde_json::Value> {
+        self.http
+            .post(self.url("/api/config/reload"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("parsing reload response")
+    }
+
+    pub async fn check_config(&self) -> Result<serde_json::Value> {
+        self.http
+            .post(self.url("/api/config/check"))
+            .send()
+            .await?
+            .json()
+            .await
+            .context("parsing config check response")
+    }
 }

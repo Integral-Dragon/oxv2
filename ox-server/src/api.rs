@@ -50,6 +50,9 @@ pub fn router() -> Router<AppState> {
             "/api/executions/{id}/steps/{step}/merge",
             post(merge_step),
         )
+        // Config
+        .route("/api/config/reload", post(reload_config))
+        .route("/api/config/check", post(check_config))
         // Triggers
         .route("/api/triggers/evaluate", post(evaluate_triggers))
         // Metrics
@@ -158,7 +161,7 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
         pool_executing,
         pool_idle,
         executions_running,
-        workflows_loaded: state.workflows.len(),
+        workflows_loaded: state.hot.load().workflows.len(),
         event_seq: state.bus.current_seq(),
     })
 }
@@ -286,13 +289,14 @@ async fn delete_secret(
 // ── Workflows ───────────────────────────────────────────────────────
 
 async fn list_workflows(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let workflows: Vec<serde_json::Value> = state
+    let hot = state.hot.load();
+    let workflows: Vec<serde_json::Value> = hot
         .workflows
         .iter()
         .map(|(name, engine)| {
             let step_names: Vec<&str> = engine.steps.keys().map(|s| s.as_str()).collect();
             // Collect triggers that target this workflow
-            let workflow_triggers: Vec<&ox_core::workflow::TriggerDef> = state
+            let workflow_triggers: Vec<&ox_core::workflow::TriggerDef> = hot
                 .triggers
                 .iter()
                 .filter(|t| t.workflow == *name)
@@ -395,7 +399,8 @@ async fn create_execution(
     Json(req): Json<CreateExecutionRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
     // Validate workflow exists
-    let workflow = state.workflows.get(&req.workflow).ok_or_else(|| {
+    let hot = state.hot.load();
+    let workflow = hot.workflows.get(&req.workflow).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": format!("unknown workflow: {}", req.workflow) })),
@@ -526,12 +531,14 @@ async fn dispatch_step(
     use ox_core::runtime::{collect_secret_refs, find_and_read_file, resolve_step_spec};
     use ox_core::workflow::{RuntimeSpec, VarType};
 
+    let hot = state.hot.load();
+
     // Try to resolve the runtime spec if a runtime type is provided
     let mut step_runtime: Option<RuntimeSpec> = serde_json::from_value(req.runtime.clone()).ok();
 
     // ── Persona-primary resolution ─────────────────────────────────
     // If a persona name is provided, look it up and derive runtime/model from it.
-    let persona_def = req.persona.as_ref().and_then(|name| state.personas.get(name));
+    let persona_def = req.persona.as_ref().and_then(|name| hot.personas.get(name));
 
     if let Some(persona) = &persona_def {
         // If no runtime spec from the step, build one from the persona
@@ -566,7 +573,7 @@ async fn dispatch_step(
 
     let (runtime_value, secret_refs) = if let Some(ref step_rt) = step_runtime {
         // Look up the runtime definition
-        if let Some(runtime_def) = state.runtimes.get(&step_rt.runtime_type) {
+        if let Some(runtime_def) = hot.runtimes.get(&step_rt.runtime_type) {
             let secrets = state.bus.projections.secrets();
 
             // Build context variables.
@@ -589,7 +596,7 @@ async fn dispatch_step(
 
             // Start with execution vars, merge step runtime overrides for workflow vars
             let mut workflow_vars = req.vars.clone();
-            if let Some(wf) = workflow_name.and_then(|n| state.workflows.get(n)) {
+            if let Some(wf) = workflow_name.and_then(|n| hot.workflows.get(n)) {
                 // Step runtime fields can override workflow var values (e.g. persona per step)
                 for (name, _) in &wf.vars {
                     if let Some(val) = step_rt.fields.get(name) {
@@ -606,7 +613,7 @@ async fn dispatch_step(
                             let search_dir = def.search_dir.clone()
                                 .unwrap_or_else(|| format!("{name}s"));
                             if let Some(content) = find_and_read_file(
-                                &state.search_path, &search_dir, &file_ref,
+                                &hot.search_path, &search_dir, &file_ref,
                             ) {
                                 workflow_vars.insert(name.clone(), content);
                             } else {
@@ -635,7 +642,7 @@ async fn dispatch_step(
                 runtime_def,
                 step_rt,
                 &secrets.secrets,
-                &state.search_path,
+                &hot.search_path,
                 &context_vars,
             ) {
                 Ok(resolved) => {
@@ -1013,9 +1020,10 @@ async fn evaluate_triggers(
 
     let node_tags: Vec<String> = node.map(|n| n.tags.clone()).unwrap_or_default();
 
+    let hot = state.hot.load();
     let mut triggered = vec![];
 
-    for trigger in &state.triggers {
+    for trigger in &hot.triggers {
         // Check event type match
         if trigger.on != "cx.task_ready" {
             continue;
@@ -1375,4 +1383,76 @@ fn find_most_recent_log(
     }
 
     best.map(|(p, _)| p)
+}
+
+// ── Config Reload ──────────────────────────────────────────────────
+
+async fn reload_config(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match crate::state::HotConfig::load(&state.repo_path) {
+        Ok(new) => {
+            let summary = serde_json::json!({
+                "status": "ok",
+                "workflows": new.workflows.len(),
+                "runtimes": new.runtimes.len(),
+                "personas": new.personas.len(),
+                "triggers": new.triggers.len(),
+            });
+            state.hot.store(std::sync::Arc::new(new));
+            tracing::info!("config reloaded via API");
+            Ok(Json(summary))
+        }
+        Err(e) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "status": "error",
+                "errors": [e.to_string()]
+            })),
+        )),
+    }
+}
+
+async fn check_config(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match crate::state::HotConfig::load(&state.repo_path) {
+        Ok(new) => {
+            let current = state.hot.load();
+
+            let diff = |current_keys: Vec<&String>, new_keys: Vec<&String>| -> serde_json::Value {
+                let current_set: std::collections::HashSet<_> = current_keys.into_iter().collect();
+                let new_set: std::collections::HashSet<_> = new_keys.into_iter().collect();
+                let mut added: Vec<_> = new_set.difference(&current_set).collect();
+                let mut removed: Vec<_> = current_set.difference(&new_set).collect();
+                added.sort();
+                removed.sort();
+                serde_json::json!({ "added": added, "removed": removed })
+            };
+
+            let changes = serde_json::json!({
+                "workflows": diff(
+                    current.workflows.keys().collect(),
+                    new.workflows.keys().collect(),
+                ),
+                "runtimes": diff(
+                    current.runtimes.keys().collect(),
+                    new.runtimes.keys().collect(),
+                ),
+                "personas": diff(
+                    current.personas.keys().collect(),
+                    new.personas.keys().collect(),
+                ),
+            });
+
+            Ok(Json(serde_json::json!({
+                "valid": true,
+                "changes": changes,
+            })))
+        }
+        Err(e) => Ok(Json(serde_json::json!({
+            "valid": false,
+            "errors": [e.to_string()]
+        }))),
+    }
 }

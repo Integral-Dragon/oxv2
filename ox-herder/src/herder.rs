@@ -78,6 +78,8 @@ pub struct Herder {
     /// Track last-fired times for poll triggers.
     #[allow(dead_code)]
     poll_trigger_times: HashMap<(String, usize), Instant>,
+    /// Last time we refreshed config from the server.
+    last_config_refresh: Instant,
 }
 
 impl Herder {
@@ -102,6 +104,7 @@ impl Herder {
             replaying: true,
             replay_target: 0,
             poll_trigger_times: HashMap::new(),
+            last_config_refresh: Instant::now(),
         }
     }
 
@@ -869,6 +872,15 @@ impl Herder {
     // ── Triggers ───────────────────────────────────────────────────
 
     async fn evaluate_pending_triggers(&mut self) {
+        // Re-fetch config from server if stale (>30s since last refresh).
+        // This picks up hot-reloaded workflows, triggers, and personas.
+        if self.last_config_refresh.elapsed() > Duration::from_secs(30) {
+            if let Err(e) = self.load_workflows().await {
+                tracing::warn!(err = %e, "failed to refresh config from server");
+            }
+            self.last_config_refresh = Instant::now();
+        }
+
         let triggers = std::mem::take(&mut self.pending_triggers);
 
         for trigger in triggers {

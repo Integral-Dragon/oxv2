@@ -65,6 +65,15 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+
+    /// Reload configuration from disk.
+    Reload,
+
+    /// Config management.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -152,6 +161,12 @@ enum SecretCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Validate config files without applying (dry-run).
+    Check,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -185,6 +200,10 @@ async fn main() -> Result<()> {
             cmd_events(&cli.server, json, since, type_filter).await
         }
         Commands::Trigger { node_id, force } => cmd_trigger(&client, &node_id, force).await,
+        Commands::Reload => cmd_reload(&client, json).await,
+        Commands::Config { command } => match command {
+            ConfigCommands::Check => cmd_config_check(&client, json).await,
+        },
     }
 }
 
@@ -918,5 +937,56 @@ fn pretty_print_claude_log(text: &str) {
 async fn cmd_trigger(client: &OxClient, node_id: &str, force: bool) -> Result<()> {
     let resp = client.trigger(node_id, force).await?;
     println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(())
+}
+
+// ── Config ──────────────────────────────────────────────────────────
+
+async fn cmd_reload(client: &OxClient, json: bool) -> Result<()> {
+    let resp = client.reload_config().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else if resp.get("status").and_then(|s| s.as_str()) == Some("ok") {
+        println!("Config reloaded:");
+        if let Some(w) = resp.get("workflows") { println!("  workflows: {w}"); }
+        if let Some(r) = resp.get("runtimes") { println!("  runtimes:  {r}"); }
+        if let Some(p) = resp.get("personas") { println!("  personas:  {p}"); }
+        if let Some(t) = resp.get("triggers") { println!("  triggers:  {t}"); }
+    } else {
+        eprintln!("Reload failed:");
+        if let Some(errors) = resp.get("errors").and_then(|e| e.as_array()) {
+            for err in errors {
+                eprintln!("  {}", err.as_str().unwrap_or(&err.to_string()));
+            }
+        }
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn cmd_config_check(client: &OxClient, json: bool) -> Result<()> {
+    let resp = client.check_config().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else if resp.get("valid").and_then(|v| v.as_bool()) == Some(true) {
+        println!("Config valid.");
+        if let Some(changes) = resp.get("changes") {
+            for (category, diff) in changes.as_object().into_iter().flatten() {
+                let added = diff.get("added").and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+                let removed = diff.get("removed").and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+                if added > 0 || removed > 0 {
+                    println!("  {category}: +{added} -{removed}");
+                }
+            }
+        }
+    } else {
+        eprintln!("Config invalid:");
+        if let Some(errors) = resp.get("errors").and_then(|e| e.as_array()) {
+            for err in errors {
+                eprintln!("  {}", err.as_str().unwrap_or(&err.to_string()));
+            }
+        }
+        std::process::exit(1);
+    }
     Ok(())
 }

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use ox_core::config::{self, OxConfig};
 use ox_core::persona::PersonaDef;
 use ox_core::runtime::RuntimeDef;
@@ -6,27 +7,33 @@ use ox_core::workflow::{TriggerDef, WorkflowDef, WorkflowEngine};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::events::EventBus;
 
-/// The shared server state. Held behind an Arc in the Axum state.
+/// Durable server state — lives for the process lifetime, never reloaded.
 pub struct ServerState {
     pub bus: EventBus,
+    pub repo_path: PathBuf,
+    pub pty_relays: crate::pty_relay::PtyRelays,
+    /// Hot-reloadable configuration. Swapped atomically on SIGHUP or API reload.
+    pub hot: ArcSwap<HotConfig>,
+}
+
+/// Hot-reloadable configuration — rebuilt from disk on reload.
+pub struct HotConfig {
     pub config: OxConfig,
     pub workflows: HashMap<String, WorkflowEngine>,
     pub triggers: Vec<TriggerDef>,
     pub runtimes: HashMap<String, RuntimeDef>,
     pub personas: HashMap<String, PersonaDef>,
     pub search_path: Vec<PathBuf>,
-    pub repo_path: PathBuf,
-    pub pty_relays: crate::pty_relay::PtyRelays,
 }
 
-impl ServerState {
-    pub fn new(conn: Connection, repo_root: &str) -> Result<Self> {
-        let bus = EventBus::new(conn)?;
-
-        let search_path = config::resolve_search_path(Path::new(repo_root));
+impl HotConfig {
+    /// Load all hot configuration from disk.
+    pub fn load(repo_root: &Path) -> Result<Self> {
+        let search_path = config::resolve_search_path(repo_root);
 
         // Load ox config (merges config.toml across search path)
         let config = config::load_config(&search_path);
@@ -79,15 +86,27 @@ impl ServerState {
         }
 
         Ok(Self {
-            bus,
             config,
             workflows,
             triggers,
             runtimes,
             personas,
             search_path,
-            repo_path: PathBuf::from(repo_root),
+        })
+    }
+}
+
+impl ServerState {
+    pub fn new(conn: Connection, repo_root: &str) -> Result<Self> {
+        let bus = EventBus::new(conn)?;
+        let repo_path = PathBuf::from(repo_root);
+        let hot = HotConfig::load(&repo_path)?;
+
+        Ok(Self {
+            bus,
+            repo_path,
             pty_relays: crate::pty_relay::new_relays(),
+            hot: ArcSwap::new(Arc::new(hot)),
         })
     }
 }

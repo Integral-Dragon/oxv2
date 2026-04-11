@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
     tracing::info!(
         seq = server_state.bus.current_seq(),
         pool = server_state.bus.projections.pool().runners.len(),
-        workflows = server_state.workflows.len(),
+        workflows = server_state.hot.load().workflows.len(),
         "ox-server started"
     );
 
@@ -83,10 +83,40 @@ async fn main() -> Result<()> {
         });
     }
 
+    // SIGHUP config reload
+    #[cfg(unix)]
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            use tokio::signal::unix::SignalKind;
+            let mut sig = tokio::signal::unix::signal(SignalKind::hangup())
+                .expect("failed to install SIGHUP handler");
+            loop {
+                sig.recv().await;
+                tracing::info!("received SIGHUP, reloading config");
+                match state::HotConfig::load(&state.repo_path) {
+                    Ok(new) => {
+                        tracing::info!(
+                            workflows = new.workflows.len(),
+                            runtimes = new.runtimes.len(),
+                            personas = new.personas.len(),
+                            triggers = new.triggers.len(),
+                            "config reloaded"
+                        );
+                        state.hot.store(Arc::new(new));
+                    }
+                    Err(e) => {
+                        tracing::error!(err = %e, "config reload failed, keeping old config");
+                    }
+                }
+            }
+        });
+    }
+
     // Background heartbeat check loop
     {
         let state = Arc::clone(&state);
-        let grace = args.heartbeat_grace.unwrap_or(state.config.heartbeat_grace);
+        let grace = args.heartbeat_grace.unwrap_or(state.hot.load().config.heartbeat_grace);
         tokio::spawn(async move {
             pool::check_loop(&state.bus, grace).await;
         });
