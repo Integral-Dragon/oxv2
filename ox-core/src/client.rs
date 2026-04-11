@@ -258,9 +258,22 @@ impl OxClient {
             .context("parsing execution detail")
     }
 
-    pub async fn list_executions(&self) -> Result<Vec<serde_json::Value>> {
+    pub async fn list_executions(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<serde_json::Value> {
+        let mut url = self.url("/api/executions");
+        if let Some(l) = limit {
+            url = format!("{url}?limit={l}");
+            if let Some(o) = offset {
+                url = format!("{url}&offset={o}");
+            }
+        } else if let Some(o) = offset {
+            url = format!("{url}?offset={o}");
+        }
         self.http
-            .get(self.url("/api/executions"))
+            .get(&url)
             .send()
             .await?
             .json()

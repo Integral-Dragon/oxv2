@@ -41,8 +41,8 @@ Modules:
 | `events` | `EventEnvelope`, all event type enums, event data structs |
 | `config` | Search path resolution, TOML parsing for workflows/runtimes/personas |
 | `workflow` | `WorkflowDef`, `StepDef`, `TransitionDef`, `WorkspaceDef` |
-| `runtime` | `RuntimeDef`, `FieldDef`, `CommandDef`, `ProxyDef`, `MetricDef` |
-| `interpolation` | `{name}` and `{secret:name}` template engine for runtime command/env/file rendering |
+| `runtime` | `RuntimeDef`, `CommandDef`, `ProxyDef`, `MetricDef` |
+| `interpolation` | `{name}` and `{secret.name}` template engine for runtime command/env/file rendering |
 | `client` | HTTP client for ox-server API (used by ox-herder, ox-runner, ox-ctl) |
 
 ### ox-server
@@ -274,7 +274,7 @@ pub struct RuntimeSpec {
 
 pub struct RuntimeDef {
     pub name: String,
-    pub fields: IndexMap<String, FieldDef>,
+    pub vars: IndexMap<String, VarDef>,
     pub command: CommandDef,
     pub files: Vec<FileMappingDef>,
     pub env: HashMap<String, String>,

@@ -9,6 +9,7 @@ description = "Propose -> review plan -> implement -> review code -> merge"
 
 [workflow.vars]
 task_id = { required = true, description = "cx task identifier" }
+persona = { type = "file", search_dir = "personas", description = "persona file to load" }
 
 # -- Propose ------------------------------------------------------------------
 
@@ -29,7 +30,7 @@ model   = "sonnet"
 persona = "inspired/software-engineer"
 prompt  = """Read the task spec and explore the codebase. Write a proposal.
 
-1. Read the task spec: `cx show {task_id}`
+1. Read the task spec: `cx show {workflow.task_id}`
 2. Explore the codebase to understand the current state.
 3. Write your implementation plan covering:
    - Which files/modules to change and why
@@ -39,12 +40,12 @@ prompt  = """Read the task spec and explore the codebase. Write a proposal.
      updating if user-facing behavior or API surface changes
    - Risks or open questions
 4. Post the proposal as a cx comment:
-   `cx comment {task_id} --tag proposal --file /tmp/plan.md`
+   `cx comment {workflow.task_id} --tag proposal --file /tmp/plan.md`
 5. Commit, push, and report done:
    ```
    git add .complex/
-   git commit -m "propose({task_id}): implementation plan"
-   git push origin {task_id}
+   git commit -m "propose({workflow.task_id}): implementation plan"
+   git push origin {workflow.task_id}
    ox-rt done proposed
    ```
 
@@ -73,8 +74,8 @@ model   = "sonnet"
 persona = "inspired/tech-lead"
 prompt  = """Review the implementation plan proposed for this task.
 
-1. Read the task spec: `cx show {task_id}`
-2. Read the proposal: `cx comments {task_id} --tag proposal`
+1. Read the task spec: `cx show {workflow.task_id}`
+2. Read the proposal: `cx comments {workflow.task_id} --tag proposal`
 3. Score each criterion on a 3-point scale (0/1/2):
 
    - **Spec coverage** -- does the plan address all acceptance criteria?
@@ -87,13 +88,13 @@ prompt  = """Review the implementation plan proposed for this task.
    Total >= 7 AND no zeros -> pass. Any zero -> fail regardless of total.
 
 4. Post your review as a cx comment:
-   `cx comment {task_id} --tag review --file /tmp/review.md`
+   `cx comment {workflow.task_id} --tag review --file /tmp/review.md`
 
 5. Commit, push, and report verdict:
    ```
    git add .complex/
-   git commit -m "review-plan({task_id}): <PASS or FAIL>"
-   git push origin {task_id}
+   git commit -m "review-plan({workflow.task_id}): <PASS or FAIL>"
+   git push origin {workflow.task_id}
    ```
    - `ox-rt done "pass:<score>"` if verdict is pass (score out of 10)
    - `ox-rt done "fail:<score>"` if verdict is fail
@@ -128,18 +129,18 @@ model   = "sonnet"
 persona = "inspired/tech-lead"
 prompt  = """This task has failed plan review 3 times. You are the tiebreaker.
 
-1. Read the task spec: `cx show {task_id}`
-2. Read ALL proposals and reviews: `cx comments {task_id}`
+1. Read the task spec: `cx show {workflow.task_id}`
+2. Read ALL proposals and reviews: `cx comments {workflow.task_id}`
 3. Decide:
    - If feasible: write the definitive plan yourself, post as a comment:
-     `cx comment {task_id} --tag proposal --file /tmp/plan.md`
-     `git add .complex/ && git commit -m "tiebreak({task_id}): definitive plan"`
-     `git push origin {task_id}`
+     `cx comment {workflow.task_id} --tag proposal --file /tmp/plan.md`
+     `git add .complex/ && git commit -m "tiebreak({workflow.task_id}): definitive plan"`
+     `git push origin {workflow.task_id}`
      `ox-rt done pass`
    - If not feasible: shadow it.
-     `cx shadow {task_id} --reason "not feasible after 3 review cycles"`
-     `git add .complex/ && git commit -m "tiebreak({task_id}): not feasible"`
-     `git push origin {task_id}`
+     `cx shadow {workflow.task_id} --reason "not feasible after 3 review cycles"`
+     `git add .complex/ && git commit -m "tiebreak({workflow.task_id}): not feasible"`
+     `git push origin {workflow.task_id}`
      `ox-rt done fail`
 """
 
@@ -174,9 +175,9 @@ model   = "sonnet"
 persona = "inspired/software-engineer"
 prompt  = """Implement the task following the approved proposal.
 
-1. Read the task spec: `cx show {task_id}`
-2. Read the approved proposal: `cx comments {task_id} --tag proposal`
-3. Read reviewer feedback: `cx comments {task_id} --tag review`
+1. Read the task spec: `cx show {workflow.task_id}`
+2. Read the approved proposal: `cx comments {workflow.task_id} --tag proposal`
+3. Read reviewer feedback: `cx comments {workflow.task_id} --tag review`
    Address any concerns flagged in the review — even on a pass, low
    scores or flagged gaps are things the code reviewer will check.
 4. Rebase onto main and resolve any conflicts:
@@ -200,8 +201,8 @@ prompt  = """Implement the task following the approved proposal.
 8. Commit, push, and report done:
    ```
    git add <changed files>
-   git commit -m "{task_id}: <description>"
-   git push origin {task_id}
+   git commit -m "{workflow.task_id}: <description>"
+   git push origin {workflow.task_id}
    ox-rt done implemented
    ```
 """
@@ -224,8 +225,8 @@ model   = "sonnet"
 persona = "inspired/reviewer"
 prompt  = """Review the implementation against the task spec and approved proposal.
 
-1. Read the task spec: `cx show {task_id}`
-2. Read the proposal: `cx comments {task_id} --tag proposal`
+1. Read the task spec: `cx show {workflow.task_id}`
+2. Read the proposal: `cx comments {workflow.task_id} --tag proposal`
 3. Review the diff: `git diff origin/main..HEAD`
 4. Score each criterion on a 3-point scale (0/1/2):
 
@@ -239,25 +240,25 @@ prompt  = """Review the implementation against the task spec and approved propos
    Total >= 7 AND no zeros -> pass. Any zero -> fail regardless of total.
 
 5. Post your review as a cx comment:
-   `cx comment {task_id} --tag code-review --file /tmp/review.md`
+   `cx comment {workflow.task_id} --tag code-review --file /tmp/review.md`
 
 6. If PASS: integrate the task, squash all branch commits into one,
    then push:
    ```
-   cx integrate {task_id} --reason "review passed"
+   cx integrate {workflow.task_id} --reason "review passed"
    git add .complex/
-   git commit -m "integrate({task_id}): review passed"
+   git commit -m "integrate({workflow.task_id}): review passed"
    git reset --soft origin/main
-   git commit -m "{task_id}: <clear, complete commit message describing what was built and why>"
-   git push --force-with-lease origin {task_id}
+   git commit -m "{workflow.task_id}: <clear, complete commit message describing what was built and why>"
+   git push --force-with-lease origin {workflow.task_id}
    ox-rt done "pass:<score>"
    ```
 
    If FAIL: commit the review and report fail:
    ```
    git add .complex/
-   git commit -m "review-code({task_id}): FAIL"
-   git push origin {task_id}
+   git commit -m "review-code({workflow.task_id}): FAIL"
+   git push origin {workflow.task_id}
    ox-rt done "fail:<score>"
    ```
 """
@@ -292,8 +293,8 @@ persona = "inspired/tech-lead"
 prompt  = """This task needs tiebreaking — either code review failed repeatedly or
 the merge had conflicts. You are the tiebreaker.
 
-1. Read the task spec: `cx show {task_id}`
-2. Read ALL comments: `cx comments {task_id}`
+1. Read the task spec: `cx show {workflow.task_id}`
+2. Read ALL comments: `cx comments {workflow.task_id}`
 3. Rebase onto main and resolve any conflicts:
    ```
    git fetch origin main
@@ -309,16 +310,16 @@ the merge had conflicts. You are the tiebreaker.
 5. Verify the build: `cargo build && cargo test && cargo clippy`
 6. Decide:
    - If the code works after rebase: integrate, squash, and report pass:
-     `cx integrate {task_id} --reason "tiebreak: resolved and integrated"`
-     `git add -A && git commit -m "tiebreak({task_id}): resolve and integrate"`
+     `cx integrate {workflow.task_id} --reason "tiebreak: resolved and integrated"`
+     `git add -A && git commit -m "tiebreak({workflow.task_id}): resolve and integrate"`
      `git reset --soft origin/main`
-     `git commit -m "{task_id}: <clear, complete commit message describing what was built and why>"`
-     `git push --force-with-lease origin {task_id}`
+     `git commit -m "{workflow.task_id}: <clear, complete commit message describing what was built and why>"`
+     `git push --force-with-lease origin {workflow.task_id}`
      `ox-rt done pass`
    - If fundamentally broken: shadow it.
-     `cx shadow {task_id} --reason "implementation not salvageable"`
-     `git add .complex/ && git commit -m "tiebreak({task_id}): not salvageable"`
-     `git push --force-with-lease origin {task_id}`
+     `cx shadow {workflow.task_id} --reason "implementation not salvageable"`
+     `git add .complex/ && git commit -m "tiebreak({workflow.task_id}): not salvageable"`
+     `git push --force-with-lease origin {workflow.task_id}`
      `ox-rt done fail`
 """
 

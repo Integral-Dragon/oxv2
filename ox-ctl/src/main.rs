@@ -69,7 +69,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ExecCommands {
-    /// List executions.
+    /// List executions (most recent first, default 25).
     List {
         #[arg(long)]
         status: Option<String>,
@@ -77,6 +77,12 @@ enum ExecCommands {
         workflow: Option<String>,
         #[arg(long)]
         task: Option<String>,
+        /// Max results to show.
+        #[arg(long, short = 'n', default_value = "25")]
+        limit: usize,
+        /// Show all executions (no limit).
+        #[arg(long)]
+        all: bool,
     },
     /// Show execution detail.
     Show {
@@ -155,8 +161,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Status => cmd_status(&client, json).await,
         Commands::Exec { command } => match command {
-            ExecCommands::List { status, workflow, task } => {
-                cmd_exec_list(&client, json, status, workflow, task).await
+            ExecCommands::List { status, workflow, task, limit, all } => {
+                cmd_exec_list(&client, json, status, workflow, task, limit, all).await
             }
             ExecCommands::Show { id } => cmd_exec_show(&client, json, &id).await,
             ExecCommands::Cancel { id } => cmd_exec_cancel(&client, &id).await,
@@ -216,32 +222,51 @@ async fn cmd_exec_list(
     _status: Option<String>,
     _workflow: Option<String>,
     _task: Option<String>,
+    limit: usize,
+    all: bool,
 ) -> Result<()> {
-    let execs = client.list_executions().await?;
+    let api_limit = if all { None } else { Some(limit) };
+    let resp = client.list_executions(api_limit, None).await?;
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&execs)?);
+        println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
+        let execs = resp.get("executions").and_then(|v| v.as_array());
+        let total = resp.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+
         println!(
-            "{:<14} {:<8} {:<16} {:<14} {:<12}",
-            "ID", "TASK", "WORKFLOW", "STEP", "STATUS"
+            "{:<22} {:<16} {:<14} {:<12} {:<20}",
+            "ID", "WORKFLOW", "STEP", "STATUS", "CREATED"
         );
-        for e in &execs {
-            let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("-");
-            let step = e.get("current_step").and_then(|v| v.as_str()).unwrap_or("-");
-            // If running but no step assigned yet, show as pending
-            let display_status = if status == "running" && step == "-" {
-                "pending"
+        if let Some(execs) = execs {
+            for e in execs {
+                let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("-");
+                let step = e.get("current_step").and_then(|v| v.as_str()).unwrap_or("-");
+                let display_status = if status == "running" && step == "-" {
+                    "pending"
+                } else {
+                    status
+                };
+                let created = e.get("created_at")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| "-".into());
+                println!(
+                    "{:<22} {:<16} {:<14} {:<12} {:<20}",
+                    e.get("id").and_then(|v| v.as_str()).unwrap_or("-"),
+                    e.get("workflow").and_then(|v| v.as_str()).unwrap_or("-"),
+                    step,
+                    display_status,
+                    created,
+                );
+            }
+            let shown = execs.len() as u64;
+            if shown < total {
+                println!("\n{shown} of {total} total (use --all or -n to see more)");
             } else {
-                status
-            };
-            println!(
-                "{:<14} {:<8} {:<16} {:<14} {:<12}",
-                e.get("id").and_then(|v| v.as_str()).unwrap_or("-"),
-                e.get("vars").and_then(|v| v.get("task_id")).and_then(|v| v.as_str()).unwrap_or("-"),
-                e.get("workflow").and_then(|v| v.as_str()).unwrap_or("-"),
-                step,
-                display_status,
-            );
+                println!("\n{total} total");
+            }
         }
     }
     Ok(())
@@ -259,7 +284,12 @@ async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
             "attempts": exec.attempts,
         }))?);
     } else {
+        let created = chrono::DateTime::parse_from_rfc3339(&exec.created_at)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|_| exec.created_at.clone());
+
         println!("Execution: {}", exec.id);
+        println!("Created:   {}", created);
         if !exec.vars.is_empty() {
             for (k, v) in &exec.vars {
                 println!("  {k}: {v}");
@@ -269,17 +299,48 @@ async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
         println!("Status:    {}", exec.status);
         println!();
         println!(
-            "{:<4} {:<14} {:<8} {:<10} {:<10} {:<12} {:<16}",
-            "#", "STEP", "ATTEMPT", "STATUS", "RUNNER", "OUTPUT", "TRANSITION"
+            "{:<4} {:<14} {:<8} {:<10} {:<10} {:<10} {:<12} {:<16}",
+            "#", "STEP", "ATTEMPT", "STATUS", "RUNNER", "DURATION", "OUTPUT", "TRANSITION"
         );
         for (i, a) in exec.attempts.iter().enumerate() {
+            let duration = match (&a.started_at, &a.completed_at) {
+                (started, Some(completed)) => {
+                    if let (Ok(s), Ok(c)) = (
+                        chrono::DateTime::parse_from_rfc3339(started),
+                        chrono::DateTime::parse_from_rfc3339(completed),
+                    ) {
+                        let secs = (c - s).num_seconds();
+                        if secs >= 60 {
+                            format!("{}m{}s", secs / 60, secs % 60)
+                        } else {
+                            format!("{}s", secs)
+                        }
+                    } else {
+                        "-".into()
+                    }
+                }
+                (started, None) => {
+                    // Still running — show elapsed
+                    if let Ok(s) = chrono::DateTime::parse_from_rfc3339(started) {
+                        let secs = (chrono::Utc::now() - s.with_timezone(&chrono::Utc)).num_seconds();
+                        if secs >= 60 {
+                            format!("{}m{}s…", secs / 60, secs % 60)
+                        } else {
+                            format!("{}s…", secs)
+                        }
+                    } else {
+                        "-".into()
+                    }
+                }
+            };
             println!(
-                "{:<4} {:<14} {:<8} {:<10} {:<10} {:<12} {:<16}",
+                "{:<4} {:<14} {:<8} {:<10} {:<10} {:<10} {:<12} {:<16}",
                 i + 1,
                 a.step,
                 a.attempt,
                 a.status,
                 a.runner_id.as_deref().unwrap_or("-"),
+                duration,
                 a.output.as_deref().unwrap_or("-"),
                 a.transition
                     .as_deref()

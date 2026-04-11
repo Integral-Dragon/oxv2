@@ -23,15 +23,14 @@
 [runtime]
 name = "claude"
 
-[runtime.fields]
-model   = { type = "string", required = false }
-persona = { type = "file",   required = false }
-prompt  = { type = "string", required = false, default = "" }
+[runtime.vars]
+model  = { type = "string" }
+prompt = { type = "string", default = "" }
 
 [runtime.command]
 cmd = [
     "claude",
-    "-p", "{prompt_file}",
+    "-p", "{tmp_dir}/ox-prompt",
     "--dangerously-skip-permissions",
     "--verbose",
     "--output-format", "stream-json",
@@ -40,10 +39,15 @@ interactive_cmd = ["claude"]
 
 [[runtime.command.optional]]
 when = "model"
-args = ["--model", "{model}"]
+args = ["--model", "{var.model}"]
+
+# Assemble persona + prompt into a single prompt file.
+[[runtime.files]]
+content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+to      = "{tmp_dir}/ox-prompt"
 
 # Inject OAuth credentials from secrets into the runner's home directory.
 # The runner resolves {home} to the process HOME before placing files.
 [[runtime.files]]
-content = "{secret:claude_credentials}"
+content = "{secret.claude_credentials}"
 to      = "{home}/.claude/.credentials.json"

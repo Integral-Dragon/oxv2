@@ -67,21 +67,21 @@ projection keys.
 ## Secret References
 
 Secrets are referenced in runtime definitions and workflow step specs
-using the `{secret:NAME}` syntax. This is distinct from field
+using the `{secret.NAME}` syntax. This is distinct from field
 interpolation (`{name}`) and built-in variables (`{workspace}`).
 
 ```toml
 [runtime.env]
-ANTHROPIC_API_KEY = "{secret:anthropic_api_key}"
-GITHUB_TOKEN      = "{secret:github_token}"
+ANTHROPIC_API_KEY = "{secret.anthropic_api_key}"
+GITHUB_TOKEN      = "{secret.github_token}"
 
 [[runtime.files]]
-content = "{secret:ssh_private_key}"
+content = "{secret.ssh_private_key}"
 to      = "{workspace}/.ssh/id_ed25519"
 mode    = "0600"
 ```
 
-The interpolation engine recognises `{secret:NAME}` references but does
+The interpolation engine recognises `{secret.NAME}` references but does
 not resolve them directly. Instead, it collects them and returns a list
 of required secret names. Resolution happens at dispatch time on
 ox-server, which reads from the `SecretsState` projection.
@@ -92,7 +92,7 @@ ox-server, which reads from the `SecretsState` projection.
 
 When ox-server builds the dispatch payload for a step, it:
 
-1. Scans the runtime spec and workspace spec for `{secret:NAME}` refs
+1. Scans the runtime spec and workspace spec for `{secret.NAME}` refs
 2. Resolves each ref against the `SecretsState` projection
 3. Includes the resolved values in a `secrets` field on the dispatch
    response — a map of name→value for only the secrets this step needs
@@ -133,10 +133,10 @@ When a runtime definition's `[runtime.env]` references a secret:
 
 ```toml
 [runtime.env]
-ANTHROPIC_API_KEY = "{secret:anthropic_api_key}"
+ANTHROPIC_API_KEY = "{secret.anthropic_api_key}"
 ```
 
-ox-runner resolves the `{secret:NAME}` template using the dispatch
+ox-runner resolves the `{secret.NAME}` template using the dispatch
 payload's `secrets` map and sets the resulting environment variable on
 the spawned process. The secret value is only in process memory — never
 written to disk by ox-runner.
@@ -148,7 +148,7 @@ secret:
 
 ```toml
 [[runtime.files]]
-content = "{secret:ssh_private_key}"
+content = "{secret.ssh_private_key}"
 to      = "{workspace}/.ssh/id_ed25519"
 mode    = "0600"
 ```

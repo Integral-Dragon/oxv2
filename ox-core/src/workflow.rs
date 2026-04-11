@@ -4,15 +4,32 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-/// A workflow variable declaration.
+/// Variable type — shared by workflow vars and runtime vars.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VarType {
+    #[default]
+    String,
+    File,
+    Bool,
+    Int,
+}
+
+/// A variable declaration — shared by workflow vars and runtime vars.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VarDef {
+    #[serde(rename = "type", default)]
+    pub var_type: VarType,
     #[serde(default)]
     pub required: bool,
     #[serde(default)]
     pub default: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// For file vars: subdirectory to search on the search path.
+    /// Defaults to "{varname}s" (e.g. "personas" for a var named "persona").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_dir: Option<String>,
 }
 
 /// A complete workflow definition, loaded from TOML.
@@ -647,9 +664,11 @@ action = "merge_to_main"
     fn validate_vars_required() {
         let mut vars = HashMap::new();
         vars.insert("task_id".into(), VarDef {
+            var_type: VarType::default(),
             required: true,
             default: None,
             description: None,
+            search_dir: None,
         });
         let def = WorkflowDef {
             name: "test".into(),
@@ -673,9 +692,11 @@ action = "merge_to_main"
     fn validate_vars_defaults() {
         let mut vars = HashMap::new();
         vars.insert("branch".into(), VarDef {
+            var_type: VarType::default(),
             required: false,
             default: Some("main".into()),
             description: None,
+            search_dir: None,
         });
         let def = WorkflowDef {
             name: "test".into(),

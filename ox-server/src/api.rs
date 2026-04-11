@@ -314,6 +314,8 @@ struct ListExecutionsQuery {
     status: Option<String>,
     workflow: Option<String>,
     task: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 async fn list_executions(
@@ -322,7 +324,7 @@ async fn list_executions(
 ) -> Json<serde_json::Value> {
     let execs = state.bus.projections.executions();
 
-    let results: Vec<serde_json::Value> = execs
+    let mut results: Vec<_> = execs
         .executions
         .values()
         .filter(|e| {
@@ -342,10 +344,26 @@ async fn list_executions(
                 }
             true
         })
-        .map(execution_summary)
+        .collect::<Vec<_>>();
+
+    results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let total = results.len();
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(25);
+    let page: Vec<serde_json::Value> = results
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|e| execution_summary(e))
         .collect();
 
-    Json(serde_json::Value::Array(results))
+    Json(serde_json::json!({
+        "executions": page,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }))
 }
 
 fn execution_summary(e: &projections::ExecutionState) -> serde_json::Value {
@@ -499,8 +517,8 @@ async fn dispatch_step(
     Path(params): Path<StepPathParams>,
     Json(req): Json<DispatchStepRequest>,
 ) -> StatusCode {
-    use ox_core::runtime::{collect_secret_refs, resolve_step_spec};
-    use ox_core::workflow::RuntimeSpec;
+    use ox_core::runtime::{collect_secret_refs, find_and_read_file, resolve_step_spec};
+    use ox_core::workflow::{RuntimeSpec, VarType};
 
     // Try to resolve the runtime spec if a runtime type is provided
     let step_runtime: Option<RuntimeSpec> = serde_json::from_value(req.runtime.clone()).ok();
@@ -510,9 +528,51 @@ async fn dispatch_step(
         if let Some(runtime_def) = state.runtimes.get(&step_rt.runtime_type) {
             let secrets = state.bus.projections.secrets();
 
-            // Build context variables from execution vars
-            let mut context_vars = req.vars.clone();
+            // Build context variables.
+            // Workflow/execution vars are prefixed with "workflow." to avoid
+            // collisions with runtime vars (e.g. workflow.persona vs prompt).
+            let mut context_vars: HashMap<String, String> = HashMap::new();
             context_vars.insert("workspace".to_string(), ".".to_string());
+
+            // Resolve file-typed workflow vars and add all with "workflow." prefix
+            let execs = state.bus.projections.executions();
+            let workflow_name = execs.executions.get(&params.id)
+                .map(|e| e.workflow.as_str());
+
+            // Start with execution vars, merge step runtime overrides for workflow vars
+            let mut workflow_vars = req.vars.clone();
+            if let Some(wf) = workflow_name.and_then(|n| state.workflows.get(n)) {
+                // Step runtime fields can override workflow var values (e.g. persona per step)
+                for (name, _) in &wf.vars {
+                    if let Some(val) = step_rt.fields.get(name) {
+                        workflow_vars.insert(name.clone(), ox_core::runtime::toml_value_to_string(val));
+                    }
+                }
+
+                // Resolve file-typed workflow vars to content
+                for (name, def) in &wf.vars {
+                    if def.var_type == VarType::File {
+                        if let Some(file_ref) = workflow_vars.get(name).cloned()
+                            && !file_ref.is_empty()
+                        {
+                            let search_dir = def.search_dir.clone()
+                                .unwrap_or_else(|| format!("{name}s"));
+                            if let Some(content) = find_and_read_file(
+                                &state.search_path, &search_dir, &file_ref,
+                            ) {
+                                workflow_vars.insert(name.clone(), content);
+                            } else {
+                                tracing::warn!(var = %name, file = %file_ref, "file var not found on search path");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Add workflow vars with "workflow." prefix
+            for (k, v) in &workflow_vars {
+                context_vars.insert(format!("workflow.{k}"), v.clone());
+            }
 
             let secret_refs = collect_secret_refs(runtime_def, step_rt);
 

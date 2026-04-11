@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::interpolation::InterpolationContext;
-use crate::workflow::RuntimeSpec;
+use crate::workflow::{RuntimeSpec, VarDef};
 
 /// A runtime definition, loaded from TOML.
 /// Defines how to build a command, what files to place, what env to set, etc.
@@ -13,7 +13,7 @@ use crate::workflow::RuntimeSpec;
 pub struct RuntimeDef {
     pub name: String,
     #[serde(default)]
-    pub fields: IndexMap<String, FieldDef>,
+    pub vars: IndexMap<String, VarDef>,
     pub command: CommandDef,
     #[serde(default)]
     pub files: Vec<FileMappingDef>,
@@ -44,26 +44,6 @@ impl RuntimeDef {
             .with_context(|| format!("reading runtime file: {}", path.display()))?;
         Self::from_toml(&content).with_context(|| format!("parsing runtime: {}", path.display()))
     }
-}
-
-/// A declared field in a runtime definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FieldDef {
-    #[serde(rename = "type")]
-    pub field_type: FieldType,
-    #[serde(default)]
-    pub required: bool,
-    #[serde(default)]
-    pub default: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FieldType {
-    String,
-    File,
-    Bool,
-    Int,
 }
 
 /// Command definition — base command + optional conditional args.
@@ -193,85 +173,39 @@ pub struct ResolvedFile {
 
 // ── Resolution ──────────────────────────────────────────────────────
 
-const PROMPT_FILE_NAME: &str = "ox-prompt";
-
 /// Resolve a workflow step's runtime spec against a runtime definition,
 /// producing a fully-resolved spec the runner can execute.
 pub fn resolve_step_spec(
     runtime_def: &RuntimeDef,
     step_runtime: &RuntimeSpec,
     secrets: &HashMap<String, String>,
-    search_path: &[PathBuf],
+    _search_path: &[PathBuf],
     context_vars: &HashMap<String, String>,
 ) -> Result<ResolvedStepSpec> {
-    // 1. Build field values: defaults from RuntimeDef, overridden by step fields
+    // 1. Build field values: runtime vars prefixed with "var.", context vars as-is
     let mut field_values: HashMap<String, String> = HashMap::new();
 
-    for (name, def) in &runtime_def.fields {
-        // Step field override
+    // Runtime vars: prefixed with "var." (e.g. {var.prompt}, {var.model})
+    for (name, def) in &runtime_def.vars {
+        let key = format!("var.{name}");
         if let Some(val) = step_runtime.fields.get(name) {
-            field_values.insert(name.clone(), toml_value_to_string(val));
+            field_values.insert(key, toml_value_to_string(val));
         } else if let Some(ref default) = def.default {
-            field_values.insert(name.clone(), default.clone());
+            field_values.insert(key, default.clone());
         }
     }
 
-    // Add context vars (task_id, workspace, etc.)
+    // Context vars: workflow.* and builtins (workspace, etc.) — already prefixed by caller
     for (k, v) in context_vars {
         field_values.insert(k.clone(), v.clone());
     }
 
-    // 2. Load file-type fields (e.g. persona) and resolve their content
     let mut resolved_files: Vec<ResolvedFile> = vec![];
 
-    for (name, def) in &runtime_def.fields {
-        if def.field_type == FieldType::File
-            && let Some(file_ref) = field_values.get(name).cloned()
-                && !file_ref.is_empty()
-                    && let Some(content) = find_and_read_file(search_path, "personas", &file_ref) {
-                        // Store the loaded content so it can be used (e.g. prepended to prompt)
-                        field_values.insert(format!("{name}_content"), content);
-                    }
-    }
-
-    // 3. Build interpolation context (needed for prompt assembly and everything after)
+    // 2. Build interpolation context
     let ctx = InterpolationContext::new(field_values.clone(), secrets.clone());
 
-    // 4. Assemble prompt file: persona content + step prompt, with interpolation
-    {
-        let persona_content = field_values.get("persona_content").cloned().unwrap_or_default();
-        let prompt = field_values.get("prompt").cloned().unwrap_or_default();
-
-        if !persona_content.is_empty() || !prompt.is_empty() {
-            let mut full_prompt = String::new();
-            if !persona_content.is_empty() {
-                // Interpolate {task_id} etc. in persona content
-                let resolved = ctx.interpolate(&persona_content)
-                    .unwrap_or(persona_content);
-                full_prompt.push_str(&resolved);
-                full_prompt.push_str("\n\n---\n\n");
-            }
-            if !prompt.is_empty() {
-                // Interpolate {task_id} etc. in step prompt
-                let resolved = ctx.interpolate(&prompt)
-                    .unwrap_or(prompt);
-                full_prompt.push_str(&resolved);
-            }
-
-            let prompt_path = format!("{{tmp_dir}}/{PROMPT_FILE_NAME}");
-            resolved_files.push(ResolvedFile {
-                content: full_prompt,
-                to: prompt_path.clone(),
-                mode: "0644".to_string(),
-            });
-            field_values.insert("prompt_file".to_string(), prompt_path);
-        }
-    }
-
-    // Rebuild context now that prompt_file is set
-    let ctx = InterpolationContext::new(field_values.clone(), secrets.clone());
-
-    // 4b. Resolve content-based file mappings (e.g. credentials from secrets)
+    // 3. Resolve content-based file mappings (prompt assembly, credentials, etc.)
     for file_mapping in &runtime_def.files {
         if let Some(ref content_template) = file_mapping.content
             && let Ok(content) = ctx.interpolate(content_template) {
@@ -297,9 +231,9 @@ pub fn resolve_step_spec(
         command.push(ctx.interpolate(arg).unwrap_or_else(|_| arg.clone()));
     }
 
-    // Append optional args where the field has a value
+    // Append optional args where the runtime var has a value
     for opt in &runtime_def.command.optional {
-        if ctx.has_field(&opt.when) {
+        if ctx.has_field(&format!("var.{}", opt.when)) {
             for arg in &opt.args {
                 command.push(ctx.interpolate(arg).unwrap_or_else(|_| arg.clone()));
             }
@@ -348,7 +282,7 @@ pub fn collect_secret_refs(runtime_def: &RuntimeDef, step_runtime: &RuntimeSpec)
     InterpolationContext::collect_all_secret_refs(templates)
 }
 
-fn toml_value_to_string(v: &toml::Value) -> String {
+pub fn toml_value_to_string(v: &toml::Value) -> String {
     match v {
         toml::Value::String(s) => s.clone(),
         toml::Value::Integer(i) => i.to_string(),
@@ -359,8 +293,9 @@ fn toml_value_to_string(v: &toml::Value) -> String {
 }
 
 /// Find a file by name in the search path under a subdirectory.
+/// Tries exact name and .md extension.
 /// Tries with and without common extensions (.md, .toml, .txt).
-fn find_and_read_file(search_path: &[PathBuf], subdir: &str, name: &str) -> Option<String> {
+pub fn find_and_read_file(search_path: &[PathBuf], subdir: &str, name: &str) -> Option<String> {
     for dir in search_path {
         let base = dir.join(subdir);
         // Try exact name
@@ -382,14 +317,130 @@ mod tests {
     use super::*;
 
     #[test]
-    fn field_type_serde() {
-        let ft = FieldType::File;
-        let json = serde_json::to_string(&ft).unwrap();
+    fn var_type_serde() {
+        use crate::workflow::VarType;
+        let vt = VarType::File;
+        let json = serde_json::to_string(&vt).unwrap();
         assert_eq!(json, "\"file\"");
     }
 
     #[test]
     fn metric_source_default() {
         assert_eq!(default_metric_source(), MetricSource::Runtime);
+    }
+
+    #[test]
+    fn resolve_step_spec_scoped_vars() {
+        use crate::workflow::{RuntimeSpec, VarDef, VarType};
+
+        // Runtime with a "prompt" var
+        let runtime_def = RuntimeDef {
+            name: "test".into(),
+            vars: IndexMap::from([(
+                "prompt".into(),
+                VarDef {
+                    var_type: VarType::String,
+                    required: false,
+                    default: Some("default-prompt".into()),
+                    description: None,
+                    search_dir: None,
+                },
+            )]),
+            command: CommandDef {
+                cmd: vec!["echo".into(), "{var.prompt}".into()],
+                interactive_cmd: None,
+                optional: vec![],
+            },
+            files: vec![
+                FileMappingDef {
+                    from: None,
+                    content: Some("{workflow.task_id} says {var.prompt}".into()),
+                    to: "{tmp_dir}/test.txt".into(),
+                    mode: "0644".into(),
+                },
+            ],
+            env: HashMap::new(),
+            proxy: vec![],
+            metrics: vec![],
+        };
+
+        let step_runtime = RuntimeSpec {
+            runtime_type: "test".into(),
+            tty: false,
+            env: HashMap::new(),
+            timeout: None,
+            fields: HashMap::new(),
+        };
+
+        // Context vars (workflow vars already prefixed by dispatch handler)
+        let mut context_vars = HashMap::new();
+        context_vars.insert("workflow.task_id".into(), "aJuO".into());
+
+        let resolved = resolve_step_spec(
+            &runtime_def,
+            &step_runtime,
+            &HashMap::new(),
+            &[],
+            &context_vars,
+        )
+        .unwrap();
+
+        // Command should resolve {var.prompt} to the default
+        assert_eq!(resolved.command, vec!["echo", "default-prompt"]);
+
+        // File content should resolve both scopes
+        assert_eq!(resolved.files.len(), 1);
+        assert_eq!(resolved.files[0].content, "aJuO says default-prompt");
+    }
+
+    #[test]
+    fn resolve_step_spec_step_override() {
+        use crate::workflow::{RuntimeSpec, VarDef, VarType};
+
+        let runtime_def = RuntimeDef {
+            name: "test".into(),
+            vars: IndexMap::from([(
+                "prompt".into(),
+                VarDef {
+                    var_type: VarType::String,
+                    required: false,
+                    default: Some("default".into()),
+                    description: None,
+                    search_dir: None,
+                },
+            )]),
+            command: CommandDef {
+                cmd: vec!["echo".into(), "{var.prompt}".into()],
+                interactive_cmd: None,
+                optional: vec![],
+            },
+            files: vec![],
+            env: HashMap::new(),
+            proxy: vec![],
+            metrics: vec![],
+        };
+
+        // Step overrides prompt
+        let mut fields = HashMap::new();
+        fields.insert("prompt".into(), toml::Value::String("overridden".into()));
+
+        let step_runtime = RuntimeSpec {
+            runtime_type: "test".into(),
+            tty: false,
+            env: HashMap::new(),
+            timeout: None,
+            fields,
+        };
+
+        let resolved = resolve_step_spec(
+            &runtime_def,
+            &step_runtime,
+            &HashMap::new(),
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.command, vec!["echo", "overridden"]);
     }
 }

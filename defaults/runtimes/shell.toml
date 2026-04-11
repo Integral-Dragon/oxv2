@@ -11,9 +11,9 @@
 [runtime]
 name = "shell"
 
-[runtime.fields]
-prompt = { type = "string", required = false, default = "echo 'no command'; exit 1" }
+[runtime.vars]
+prompt = { type = "string", default = "echo 'no command'; exit 1" }
 
 [runtime.command]
-cmd = ["bash", "-c", "{prompt}"]
+cmd = ["bash", "-c", "{var.prompt}"]
 interactive_cmd = ["bash"]

@@ -18,6 +18,7 @@ use ox_core::events::*;
 use rusqlite::Connection;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
+
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]

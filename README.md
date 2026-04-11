@@ -136,7 +136,7 @@ For runtimes that use API keys directly:
 ox-ctl secrets set openai_api_key --value sk-...
 ```
 
-Secrets are referenced in runtime definitions as `{secret:name}` and injected
+Secrets are referenced in runtime definitions as `{secret.name}` and injected
 into step environments or written to files (e.g. credentials).
 
 ## Using ox-ctl
@@ -293,20 +293,20 @@ Runtimes define how a step process is spawned. They live in `.ox/runtimes/`.
 [runtime]
 name = "my-runtime"
 
-[runtime.fields]
+[runtime.vars]
 prompt = { type = "string", required = false, default = "" }
 model  = { type = "string", required = false }
 
 [runtime.command]
-cmd = ["my-tool", "--prompt", "{prompt_file}"]
+cmd = ["my-tool", "--prompt", "{tmp_dir}/ox-prompt"]
 interactive_cmd = ["my-tool", "--interactive"]
 
 [[runtime.command.optional]]
 when = "model"
-args = ["--model", "{model}"]
+args = ["--model", "{var.model}"]
 
 [runtime.env]
-MY_API_KEY = "{secret:my_api_key}"
+MY_API_KEY = "{secret.my_api_key}"
 ```
 
 ### Runtime features
@@ -316,7 +316,7 @@ MY_API_KEY = "{secret:my_api_key}"
 ```toml
 # Write secret content to the runner's home directory
 [[runtime.files]]
-content = "{secret:claude_credentials}"
+content = "{secret.claude_credentials}"
 to      = "{home}/.claude/.credentials.json"
 
 # Copy a file into the workspace

@@ -3,24 +3,29 @@
 [runtime]
 name = "codex"
 
-[runtime.fields]
-model   = { type = "string", required = false }
-persona = { type = "file",   required = false }
-prompt  = { type = "string", required = false, default = "" }
+[runtime.vars]
+model  = { type = "string" }
+prompt = { type = "string", default = "" }
 
 [runtime.command]
-cmd = ["codex", "{prompt_file}"]
+cmd = ["codex", "{tmp_dir}/ox-prompt"]
 
 [[runtime.command.optional]]
 when = "model"
-args = ["--model", "{model}"]
+args = ["--model", "{var.model}"]
 
+# Assemble persona + prompt into a single prompt file.
 [[runtime.files]]
-from = "{persona}"
-to   = "{workspace}/.codex/system-prompt.md"
+content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+to      = "{tmp_dir}/ox-prompt"
+
+# Place persona as system prompt for codex
+[[runtime.files]]
+content = "{workflow.persona}"
+to      = "{workspace}/.codex/system-prompt.md"
 
 [runtime.env]
-OPENAI_API_KEY = "{secret:openai_api_key}"
+OPENAI_API_KEY = "{secret.openai_api_key}"
 
 [[runtime.proxy]]
 env      = "OPENAI_BASE_URL"

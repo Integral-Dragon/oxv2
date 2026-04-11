@@ -440,7 +440,7 @@ impl InterpolationContext {
     }
 
     /// Interpolate a string. Returns None if a required field is absent.
-    /// Handles both `{name}` (field/builtin) and `{secret:name}` (secret) references.
+    /// Handles both `{name}` (field/builtin) and `{secret.name}` (secret) references.
     pub fn interpolate(&self, template: &str) -> Result<String, InterpolationError> {
         let mut result = String::with_capacity(template.len());
         let mut chars = template.chars().peekable();
@@ -469,7 +469,7 @@ impl InterpolationContext {
         Ok(result)
     }
 
-    /// Collect all `{secret:NAME}` references from a template without resolving them.
+    /// Collect all `{secret.NAME}` references from a template without resolving them.
     /// Used by ox-server at dispatch time to determine which secrets a step needs.
     pub fn collect_secret_refs(template: &str) -> Vec<String> {
         let mut refs = vec![];

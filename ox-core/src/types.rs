@@ -31,8 +31,7 @@ impl RunnerId {
     }
 }
 
-/// Execution identifier. Format: "{task_id}-e{N}"
-/// e.g. "aJuO-e1". N is sequential per task.
+/// Execution identifier. Server-generated: "e-{epoch}-{seq}".
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExecutionId(pub String);
 

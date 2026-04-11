@@ -24,15 +24,15 @@ of declared fields.
 [runtime]
 name = "claude"
 
-[runtime.fields]
+[runtime.vars]
 model   = { type = "string", required = false }
-persona = { type = "file",   required = false }
+persona = { type = "string" }
 prompt  = { type = "string", required = false, default = "" }
 
 [runtime.command]
 cmd = [
     "claude",
-    "-p", "{prompt_file}",
+    "-p", "{tmp_dir}/ox-prompt",
     "--dangerously-skip-permissions",
     "--verbose",
     "--output-format", "stream-json",
@@ -41,11 +41,11 @@ interactive_cmd = ["claude"]
 
 [[runtime.command.optional]]
 when = "model"
-args = ["--model", "{model}"]
+args = ["--model", "{var.model}"]
 
 # Inject OAuth credentials from secrets
 [[runtime.files]]
-content = "{secret:claude_credentials}"
+content = "{secret.claude_credentials}"
 to      = "{home}/.claude/.credentials.json"
 ```
 
@@ -58,27 +58,27 @@ needed:
 ox-ctl secrets set claude_credentials --value "$(cat ~/.claude/.credentials.json)"
 ```
 
-The `persona` field (type `file`) is loaded from the search path
-under `personas/` and prepended to the prompt content. The combined
-persona + prompt is written to a single prompt file passed via `-p`.
-See [Prompt Assembly](#prompt-assembly) below.
+The `persona` var receives file content (resolved by the workflow's
+file-typed var declaration) and is prepended to the prompt. The
+combined persona + prompt is written to a single prompt file passed
+via `-p`. See [Prompt Assembly](#prompt-assembly) below.
 
 ```toml
 # .ox/runtimes/codex.toml
 [runtime]
 name = "codex"
 
-[runtime.fields]
+[runtime.vars]
 model   = { type = "string", required = false }
-persona = { type = "file",   required = false }
+persona = { type = "string" }
 prompt  = { type = "string", required = false, default = "" }
 
 [runtime.command]
-cmd = ["codex", "{prompt}"]
+cmd = ["codex", "{tmp_dir}/ox-prompt"]
 
 [[runtime.command.optional]]
 when = "model"
-args = ["--model", "{model}"]
+args = ["--model", "{var.model}"]
 
 [[runtime.files]]
 from = "{persona}"
@@ -115,11 +115,11 @@ source = "proxy"
 [runtime]
 name = "openclaw"
 
-[runtime.fields]
+[runtime.vars]
 prompt = { type = "string", required = false, default = "" }
 
 [runtime.command]
-cmd = ["openclaw", "--task", "{prompt_file}"]
+cmd = ["openclaw", "--task", "{tmp_dir}/ox-prompt"]
 ```
 
 ---
@@ -134,43 +134,64 @@ command templates, file mappings, and environment variables.
 
 These are always available, resolved by ox-runner at execution time:
 
-| Variable | Value |
-|----------|-------|
-| `{workspace}` | Absolute path to the provisioned workspace (work_dir) |
-| `{tmp_dir}` | Absolute path to the runner's temp directory (outside git) |
-| `{home}` | Runner process HOME directory |
-| `{prompt_file}` | Absolute path to the assembled prompt file (in tmp_dir) |
-| `{varname}` | Any variable from the execution's `vars` map (e.g. `{task_id}`, `{branch}`) |
+| Pattern | Source |
+|---------|--------|
+| `{var.name}` | Runtime vars (e.g. `{var.prompt}`, `{var.model}`) |
+| `{workflow.name}` | Workflow/execution vars (e.g. `{workflow.persona}`, `{workflow.task_id}`) |
+| `{secret.name}` | Secrets (e.g. `{secret.claude_credentials}`) |
+| `{workspace}` | Builtin: absolute path to the provisioned workspace |
+| `{tmp_dir}` | Builtin: runner's temp directory (outside git) |
+| `{home}` | Builtin: runner process HOME directory |
 
 ### Secret References
 
-Secrets are referenced using `{secret:NAME}` syntax. This is distinct
-from field interpolation (`{name}`) and built-in variables.
+Secrets are referenced using `{secret.name}` syntax. This is distinct
+from runtime var interpolation (`{var.name}`) and built-in variables.
 
 ```toml
 [runtime.env]
-ANTHROPIC_API_KEY = "{secret:anthropic_api_key}"
-GITHUB_TOKEN      = "{secret:github_token}"
+ANTHROPIC_API_KEY = "{secret.anthropic_api_key}"
+GITHUB_TOKEN      = "{secret.github_token}"
 ```
 
 Secret references are resolved at dispatch time by ox-server — not by
 the interpolation engine directly. The interpolation engine recognises
-`{secret:NAME}` patterns and collects the referenced names. ox-server
+`{secret.NAME}` patterns and collects the referenced names. ox-server
 resolves them from its `SecretsState` projection and includes the
 resolved values in the dispatch payload sent to the runner.
 
 See [secrets.md](secrets.md) for the full secrets model.
 
-### Field Variables
+### Runtime Variables
 
-Any declared field can be referenced by name. If a field has
-`type = "file"`, its value is resolved to an absolute path.
+Runtime vars declared in `[runtime.vars]` are referenced with the
+`var.` prefix:
 
-| Type | Interpolation value |
-|------|---------------------|
-| `string` | The field value as-is |
-| `file` | Absolute path to the resolved file |
-| `bool` | `"true"` or `"false"` |
+```toml
+[runtime.vars]
+model  = { type = "string" }
+prompt = { type = "string", default = "" }
+
+[runtime.command]
+cmd = ["my-tool", "-p", "{tmp_dir}/ox-prompt"]
+
+[[runtime.command.optional]]
+when = "model"
+args = ["--model", "{var.model}"]
+```
+
+### Workflow Variables
+
+Workflow vars (from the execution's `vars` map) are available with
+the `workflow.` prefix. File-typed workflow vars are resolved to
+content at dispatch time:
+
+```toml
+# In runtime files — reference workflow vars
+[[runtime.files]]
+content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+to      = "{tmp_dir}/ox-prompt"
+```
 | `int` | String representation of the integer |
 
 ### Absent Fields
@@ -195,10 +216,11 @@ to empty values.
 
 **`runtime.name`** — the name referenced by `type` in workflow steps.
 
-**`runtime.fields`** — declares what parameters the runtime accepts.
-Each field has a `type` (`string`, `file`, `bool`, `int`), optionality
-(`required`), and an optional `default`. When a workflow step passes a
-field not declared by the runtime definition, it is an error.
+**`runtime.vars`** — declares what parameters the runtime accepts.
+Each var has a `type` (`string`, `bool`, `int`), optionality
+(`required`), and an optional `default`. File-typed vars (`type = "file"`)
+are declared at the workflow level and resolved to content before reaching
+the runtime. Runtime vars see only string content.
 
 ### Command
 
@@ -216,7 +238,7 @@ appended to the command. When absent, the block is skipped.
 ```toml
 [[runtime.command.optional]]
 when = "model"
-args = ["--model", "{model}"]
+args = ["--model", "{var.model}"]
 
 [[runtime.command.optional]]
 when = "verbose"
@@ -249,19 +271,19 @@ to   = "{workspace}/CLAUDE.md"
 
 # Write secret content to the runner's home directory
 [[runtime.files]]
-content = "{secret:claude_credentials}"
+content = "{secret.claude_credentials}"
 to      = "{home}/.claude/.credentials.json"
 
 # Write a secret key with restricted permissions
 [[runtime.files]]
-content = "{secret:ssh_private_key}"
+content = "{secret.ssh_private_key}"
 to      = "{home}/.ssh/id_ed25519"
 mode    = "0600"
 ```
 
 `from` is resolved via the configuration search path for `file` type
 fields. If it references an absent optional field, the mapping is
-skipped. `content` supports `{secret:NAME}` interpolation.
+skipped. `content` supports `{secret.NAME}` interpolation.
 
 ### Environment
 
@@ -355,14 +377,14 @@ description metadata.
 
 ## Prompt Assembly
 
-When a runtime declares a `prompt` field (type `string`) and a `persona`
-field (type `file`), ox-server assembles them into a single prompt file:
+When a runtime declares `prompt` and `persona` vars, ox-server
+assembles them into a single prompt file:
 
-1. Load the persona file from the search path under `personas/`
-2. Load the step's `prompt` value
-3. Concatenate: persona content + `---` separator + prompt
-4. Write to `{tmp_dir}/ox-prompt`
-5. Set `{prompt_file}` to the absolute path
+1. The `persona` var contains file content (resolved from the workflow's
+   file-typed var declaration at dispatch time)
+2. Concatenate: persona content + `---` separator + prompt
+3. Write to `{tmp_dir}/ox-prompt`
+4. Set `{prompt_file}` to the absolute path
 
 The prompt file lives in the runner's temp directory, not the workspace,
 so it does not dirty the git working tree.
@@ -451,8 +473,8 @@ When the herder dispatches a step, ox-server:
 
 1. Finds the runtime definition via the configuration search path
 2. Validates the step's fields against the definition
-3. Resolves all `{name}` interpolations and collects `{secret:NAME}` refs
-4. Reads file content for `runtime.files` mappings (persona files, etc.)
+3. Resolves all `{name}` interpolations and collects `{secret.NAME}` refs
+4. Resolves file-typed workflow vars (persona, etc.) to content from the search path
 5. Resolves secrets from the `SecretsState` projection
 6. Builds the command from `cmd` (or `interactive_cmd`) plus `optional` blocks
 7. Assembles the complete resolved step spec

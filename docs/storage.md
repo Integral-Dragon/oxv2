@@ -228,7 +228,7 @@ Applied events: `execution.created`, `execution.completed`,
 ### SecretsState
 
 Current secrets — a name→value map. Used internally by ox-server to
-resolve `{secret:NAME}` references at step dispatch time.
+resolve `{secret.NAME}` references at step dispatch time.
 
 Applied events: `secret.set`, `secret.deleted`.
 

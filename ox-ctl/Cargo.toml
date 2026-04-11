@@ -15,4 +15,5 @@ reqwest = { workspace = true }
 reqwest-eventsource = { workspace = true }
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
+chrono = { workspace = true }
 libc = "0.2"
