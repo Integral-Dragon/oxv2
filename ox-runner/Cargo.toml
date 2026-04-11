@@ -19,3 +19,5 @@ futures-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
+libc = "0.2"
+tokio-tungstenite = { workspace = true }

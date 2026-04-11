@@ -346,12 +346,17 @@ impl OxClient {
         execution_id: &str,
         step: &str,
         attempt: u32,
+        connect_addr: Option<&str>,
     ) -> Result<()> {
+        let mut body = serde_json::json!({ "attempt": attempt });
+        if let Some(addr) = connect_addr {
+            body["connect_addr"] = serde_json::Value::String(addr.to_string());
+        }
         self.http
             .post(self.url(&format!(
                 "/api/executions/{execution_id}/steps/{step}/running"
             )))
-            .json(&serde_json::json!({ "attempt": attempt }))
+            .json(&body)
             .send()
             .await?
             .error_for_status()?;

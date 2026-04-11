@@ -166,6 +166,9 @@ pub struct StepRunningData {
     pub execution_id: ExecutionId,
     pub step: String,
     pub attempt: u32,
+    /// TCP address for interactive (tty) sessions, e.g. "192.168.1.5:43210".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

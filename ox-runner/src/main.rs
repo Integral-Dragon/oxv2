@@ -1,4 +1,5 @@
 mod proxy;
+mod pty;
 mod runner;
 mod socket;
 

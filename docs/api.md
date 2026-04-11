@@ -324,6 +324,38 @@ The `resolved` block and secret values are present in the SSE delivery
 to the runner but **not** in the persisted event. The event log stores
 `secret_refs` (names only) and the unresolved runtime spec.
 
+#### `POST /api/executions/{id}/steps/{step}/running`
+
+Report that the runtime process has started. Called by ox-runner after
+spawning the process.
+
+Request:
+
+```json
+{
+  "attempt": 1
+}
+```
+
+Response: 204. Appends `step.running`.
+
+#### `GET /api/executions/{id}/steps/{step}/pty`
+
+WebSocket upgrade. Client-side PTY relay for interactive steps.
+
+Binary frames received = PTY output. Binary frames sent = PTY input.
+Used by `ox-ctl exec attach`. If no runner session exists for this
+step, the websocket is closed immediately.
+
+#### `GET /api/executions/{id}/steps/{step}/pty/runner`
+
+WebSocket upgrade. Runner-side PTY relay for interactive steps.
+
+The runner connects here after spawning a PTY process. Binary frames
+sent = PTY output. Binary frames received = client input (forwarded
+to PTY). One runner per session. The relay session is created on
+connect and removed on disconnect.
+
 #### `POST /api/executions/{id}/steps/{step}/done`
 
 Report step completion. Called by ox-runner (forwarding from runtime).

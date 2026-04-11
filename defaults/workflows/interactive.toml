@@ -1,0 +1,21 @@
+# Interactive workflow: drop into a shell on a feature branch.
+#
+# Single step — spawns an interactive bash session with a full workspace.
+# Connect via TCP to the address advertised in the step.running event.
+# Run `ox-rt done` when finished.
+
+[workflow]
+name        = "interactive"
+description = "Interactive shell session on a feature branch"
+
+[[step]]
+name = "shell"
+
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
+[step.runtime]
+type = "shell"
+tty  = true

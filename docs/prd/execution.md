@@ -219,8 +219,39 @@ burning a retry — infrastructure failures are not workflow failures.
 ## Interactive Steps
 
 Steps with `tty = true` are interactive — a human works in the session
-rather than an AI agent. The runner allocates a TTY and the process runs
-until `done` is called via the runtime interface (or the session times out).
+rather than an AI agent. The runner allocates a PTY via `openpty` and
+spawns the process attached to it. PTY I/O is relayed through ox-server
+via websocket so that clients never need direct access to the runner.
+
+```
+ox-ctl attach  ──ws──▶  ox-server  ◀──ws──  ox-runner (in VM)
+  (terminal)            (bridges)           (PTY master fd)
+                                                  │
+                                                  ▼
+                                              step.log (teed)
+```
+
+The runner connects a websocket to
+`/api/executions/{id}/steps/{step}/pty/runner` after spawning the PTY.
+Clients connect to `/api/executions/{id}/steps/{step}/pty`. The server
+bridges binary frames between them. Multiple clients can connect; PTY
+output is broadcast to all.
+
+Attach to a running interactive step:
+
+```
+ox-ctl exec attach <execution-id> <step>
+```
+
+PTY output is teed to the step log file in the runner so the log pusher
+works the same way as for non-interactive steps. The session ends when
+the process exits or the runtime calls `done` via `ox-rt`.
+
+If the runner crashes or the heartbeat times out, the herder
+re-dispatches the step to a new runner. The client gets a websocket
+close and can re-attach once the new session is up. There is no
+mid-step resume — the new step starts from a fresh workspace clone
+(committed work on the branch is preserved).
 
 From the runner's perspective, interactive and agent steps are identical.
 Signals, artifacts, two-phase completion, and the branch workflow all

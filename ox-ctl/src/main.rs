@@ -88,6 +88,13 @@ enum ExecCommands {
         /// Execution ID.
         id: String,
     },
+    /// Attach to an interactive PTY step.
+    Attach {
+        /// Execution ID.
+        id: String,
+        /// Step name.
+        step: String,
+    },
     /// Show step logs.
     Logs {
         /// Execution ID.
@@ -153,6 +160,7 @@ async fn main() -> Result<()> {
             }
             ExecCommands::Show { id } => cmd_exec_show(&client, json, &id).await,
             ExecCommands::Cancel { id } => cmd_exec_cancel(&client, &id).await,
+            ExecCommands::Attach { id, step } => cmd_attach(&cli.server, &id, &step).await,
             ExecCommands::Logs { id, step, attempt, lines, follow, pretty } => {
                 cmd_logs(&cli.server, &id, &step, attempt, lines, follow, pretty).await
             }
@@ -465,6 +473,140 @@ fn event_summary(data: &str) -> String {
         parts.push(format!("error={e}"));
     }
     parts.join(" ")
+}
+
+// ── Attach ──────────────────────────────────────────────────────────
+
+async fn cmd_attach(server_url: &str, execution_id: &str, step: &str) -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    // Check execution state before connecting
+    let client = OxClient::new(server_url);
+    let exec = client
+        .get_execution(execution_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("execution {execution_id} not found"))?;
+    if exec.status != "running" {
+        anyhow::bail!("execution {execution_id} is {}, not running", exec.status);
+    }
+    if exec.current_step.as_deref() != Some(step) {
+        anyhow::bail!(
+            "current step is '{}', not '{step}'",
+            exec.current_step.as_deref().unwrap_or("none")
+        );
+    }
+
+    let ws_url = server_url
+        .replace("http://", "ws://")
+        .replace("https://", "wss://");
+    let url = format!(
+        "{}/api/executions/{}/steps/{}/pty",
+        ws_url, execution_id, step
+    );
+
+    // Connect websocket — retry a few times since the runner may not have
+    // established its relay yet.
+    let mut ws = None;
+    for attempt in 0..10u32 {
+        match tokio_tungstenite::connect_async(&url).await {
+            Ok((stream, _)) => {
+                ws = Some(stream);
+                break;
+            }
+            Err(_) if attempt < 9 => {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                anyhow::bail!("failed to connect to PTY relay: {e}");
+            }
+        }
+    }
+    let mut ws = ws.unwrap();
+
+    // Enter raw mode
+    let orig_termios = unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        libc::tcgetattr(0, &mut termios);
+        let orig = termios;
+        libc::cfmakeraw(&mut termios);
+        libc::tcsetattr(0, libc::TCSANOW, &termios);
+        orig
+    };
+
+    let restore = move || unsafe {
+        libc::tcsetattr(0, libc::TCSANOW, &orig_termios);
+    };
+
+    // Send a newline to nudge the shell into printing its prompt
+    let _ = ws.send(Message::Binary(b"\n".to_vec().into())).await;
+
+    let mut stdout = tokio::io::stdout();
+
+    // Split ws so we can read and write concurrently
+    let (ws_tx, mut ws_rx) = ws.split();
+
+    // Periodic check: is the step still running?
+    let poll_client = OxClient::new(server_url);
+    let poll_exec_id = execution_id.to_string();
+    let poll_step = step.to_string();
+    let step_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let step_alive_writer = step_alive.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            if let Ok(exec) = poll_client.get_execution(&poll_exec_id).await {
+                if exec.status != "running" || exec.current_step.as_deref() != Some(&poll_step) {
+                    step_alive_writer.store(false, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+    });
+
+    // stdin → ws (spawned task)
+    let stdin_task = tokio::spawn(async move {
+        let mut ws_tx = ws_tx;  // move into task
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = match stdin.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if ws_tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // ws → stdout (main loop)
+    loop {
+        // Check if step is still alive
+        if !step_alive.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_secs(1), ws_rx.next()).await {
+            Ok(Some(Ok(Message::Binary(data)))) => {
+                let _ = stdout.write_all(&data).await;
+                let _ = stdout.flush().await;
+            }
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
+            Ok(Some(Err(_))) => break,
+            Ok(Some(Ok(Message::Text(t)))) if t.as_str() == "__ox_pty_eof__" => break,
+            Err(_) => continue, // timeout — check step_alive and retry
+            _ => {}
+        }
+    }
+
+    stdin_task.abort();
+    restore();
+    eprintln!("\r\n[ox-ctl: session ended]");
+    std::process::exit(0);
 }
 
 // ── Logs ────────────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ pub struct ServerState {
     pub runtimes: HashMap<String, RuntimeDef>,
     pub search_path: Vec<PathBuf>,
     pub repo_path: PathBuf,
+    pub pty_relays: crate::pty_relay::PtyRelays,
 }
 
 impl ServerState {
@@ -67,6 +68,7 @@ impl ServerState {
             runtimes,
             search_path,
             repo_path: PathBuf::from(repo_root),
+            pty_relays: crate::pty_relay::new_relays(),
         })
     }
 }

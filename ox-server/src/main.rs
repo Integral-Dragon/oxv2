@@ -7,6 +7,7 @@ mod git;
 mod merge;
 mod pool;
 mod projections;
+mod pty_relay;
 mod sse;
 mod state;
 
@@ -94,6 +95,7 @@ async fn main() -> Result<()> {
         .merge(api::router())
         .merge(sse::router())
         .merge(git::router())
+        .merge(pty_relay::router())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

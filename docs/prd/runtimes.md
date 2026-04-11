@@ -506,8 +506,21 @@ ox-ctl exec logs <execution-id> <step> --attempt 2  # specific attempt
 
 ### TTY mode
 
-If `tty = true`, ox-runner uses the interactive command. The runtime
-interface works identically inside interactive sessions.
+If `tty = true`, ox-runner allocates a PTY (via `openpty`) and spawns
+the interactive command attached to it. PTY I/O is relayed through
+ox-server via websocket — the runner connects to the server's
+`/pty/runner` endpoint and clients connect to the `/pty` endpoint.
+
+Attach to a running interactive step:
+
+```
+ox-ctl exec attach <execution-id> <step>
+```
+
+PTY output is teed to the step log file so the log pusher works
+identically to standard mode. The unix socket for `ox-rt done` /
+metrics / artifacts is also available — the process can signal
+completion the same way an agent would.
 
 ox-runner has no concept of "human step" vs "agent step" — only whether
 a TTY is needed. The distinction is purely in the runtime definition.

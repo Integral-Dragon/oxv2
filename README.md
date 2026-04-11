@@ -351,6 +351,41 @@ type   = "counter"               # counter, histogram, or label
 source = "proxy"
 ```
 
+**Interactive (TTY) mode** -- when a step sets `tty = true`, ox-runner
+allocates a PTY and relays I/O through ox-server via websocket. Attach
+to a running interactive step:
+
+```
+ox-ctl exec attach <execution-id> <step>
+```
+
+The runtime's `interactive_cmd` is used instead of `cmd`. PTY output is
+teed to the step log. The unix socket (`$OX_SOCKET`) is available inside
+the session for `ox-rt done` / metrics / artifacts.
+
+```toml
+[[step]]
+name = "human-review"
+[step.runtime]
+type = "shell"
+tty = true
+[step.workspace]
+git_clone = true
+branch = "{task_id}"
+push = true
+```
+
+A built-in `interactive` workflow provides a single-step interactive shell
+session on a feature branch. Launch it and attach:
+
+```bash
+curl -s -X POST http://localhost:4840/api/executions \
+  -H 'Content-Type: application/json' \
+  -d '{"task_id":"mywork","workflow":"interactive","trigger":"manual"}'
+
+ox-ctl exec attach mywork-e1 shell
+```
+
 ## ox-rt: step-to-runner communication
 
 Steps communicate back to the runner through `ox-rt`, a helper that talks over

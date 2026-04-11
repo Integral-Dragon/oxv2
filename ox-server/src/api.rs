@@ -588,6 +588,8 @@ struct StepDoneRequest {
 #[derive(Deserialize)]
 struct StepRunningRequest {
     attempt: u32,
+    #[serde(default)]
+    connect_addr: Option<String>,
 }
 
 async fn step_running(
@@ -599,6 +601,7 @@ async fn step_running(
         execution_id: ExecutionId(params.id),
         step: params.step,
         attempt: req.attempt,
+        connect_addr: req.connect_addr,
     };
     state
         .bus

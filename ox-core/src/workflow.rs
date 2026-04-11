@@ -573,6 +573,40 @@ action = "merge_to_main"
     }
 
     #[test]
+    fn tty_flag_survives_toml_to_json_round_trip() {
+        let toml = r#"
+[workflow]
+name = "interactive"
+description = "Interactive shell"
+
+[[step]]
+name = "shell"
+
+[step.runtime]
+type = "shell"
+tty = true
+
+[step.workspace]
+git_clone = true
+branch = "{task_id}"
+push = true
+"#;
+
+        let def = WorkflowDef::from_toml(toml).unwrap();
+        let rt = def.steps[0].runtime.as_ref().unwrap();
+        assert!(rt.tty, "tty should be true after TOML parse");
+
+        // Simulate what the herder does: serialize RuntimeSpec to JSON
+        let json = serde_json::to_value(rt).unwrap();
+        assert_eq!(json.get("tty").and_then(|v| v.as_bool()), Some(true),
+            "tty should be true in JSON: {json}");
+
+        // Simulate what the server does: deserialize back to RuntimeSpec
+        let rt2: RuntimeSpec = serde_json::from_value(json).unwrap();
+        assert!(rt2.tty, "tty should be true after JSON round-trip");
+    }
+
+    #[test]
     fn parse_triggers_file() {
         let toml = r#"
 [[trigger]]

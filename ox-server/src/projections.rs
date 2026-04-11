@@ -71,6 +71,7 @@ pub struct StepAttemptState {
     pub signals: Vec<String>,
     pub error: Option<String>,
     pub transition: Option<String>,
+    pub connect_addr: Option<String>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -148,6 +149,7 @@ impl ExecutionState {
             signals: vec![],
             error: None,
             transition: None,
+            connect_addr: None,
             started_at: ts,
             completed_at: None,
         });
@@ -222,6 +224,7 @@ impl Projections {
                             signals: vec![],
                             error: None,
                             transition: None,
+                            connect_addr: None,
                             started_at: event.ts,
                             completed_at: None,
                         });
@@ -234,6 +237,9 @@ impl Projections {
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
                         let attempt = exec.find_or_create_attempt(&data.step, data.attempt, event.ts);
                         attempt.status = StepStatus::Running;
+                        if data.connect_addr.is_some() {
+                            attempt.connect_addr = data.connect_addr;
+                        }
                     }
                 }
             }

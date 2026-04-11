@@ -435,61 +435,110 @@ impl Runner {
             return Ok(());
         }
 
-        // 6. Spawn the runtime process
-        let mut cmd = Command::new(&cmd_args[0]);
-        cmd.args(&cmd_args[1..])
-            .current_dir(&work_dir)
-            .env("OX_SOCKET", &socket_path)
-            .env("OX_TASK_ID", assignment.execution_id.split('-').next().unwrap_or(""));
+        // 6. Build common env vars
+        env_vars.insert("OX_SOCKET".into(), socket_path.to_string_lossy().to_string());
+        env_vars.insert(
+            "OX_TASK_ID".into(),
+            assignment.execution_id.split('-').next().unwrap_or("").to_string(),
+        );
 
         // Add ox bin directory to PATH so ox-rt is available
         let current_path = std::env::var("PATH").unwrap_or_default();
         if let Ok(exe) = std::env::current_exe() {
-            // ox-runner is at target/debug/ox-runner, ox-rt is at bin/ox-rt
-            // Go up to the project root and find bin/
             if let Some(project_root) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
                 let bin_dir = project_root.join("bin");
                 if bin_dir.join("ox-rt").exists() {
-                    cmd.env("PATH", format!("{}:{}", bin_dir.display(), current_path));
+                    env_vars.insert("PATH".into(), format!("{}:{}", bin_dir.display(), current_path));
                 }
             }
         }
 
-        for (k, v) in &env_vars {
-            cmd.env(k, v);
-        }
-
-        tracing::info!(cmd = ?cmd_args, "spawning runtime process");
-
-        // Set up log file for stdout/stderr capture
         let log_file_path = tmp_dir.join("step.log");
-        let log_file = std::fs::File::create(&log_file_path)?;
-        let log_file_err = log_file.try_clone()?;
+        let is_tty = assignment.resolved.as_ref().map_or(false, |r| r.tty);
 
-        let mut child = match cmd
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::from(log_file))
-            .stderr(std::process::Stdio::from(log_file_err))
-            .spawn()
-        {
-            Ok(c) => {
-                // Signal that the runtime process is now running
-                if let Err(e) = self.client.step_running(exec_id, step, attempt).await {
-                    tracing::warn!(err = %e, "failed to report step running");
+        tracing::info!(cmd = ?cmd_args, is_tty, "spawning runtime process");
+
+        // 6a. Spawn: PTY path (tty=true) vs standard path
+        let mut pty_relay: Option<crate::pty::PtyRelay> = None;
+        let mut pty_process: Option<crate::pty::PtyProcess> = None;
+        let mut child: Option<tokio::process::Child> = None;
+
+        if is_tty {
+            // Interactive mode: spawn on a PTY, relay through server
+            match crate::pty::spawn_pty(&cmd_args, &work_dir, &env_vars) {
+                Ok(proc) => {
+                    match crate::pty::start_pty_relay(
+                        &proc.master_fd,
+                        &log_file_path,
+                        &self.server_url,
+                        exec_id,
+                        step,
+                    ).await {
+                        Ok(relay) => {
+                            tracing::info!("PTY relay connected to server");
+                            if let Err(e) = self.client.step_running(exec_id, step, attempt, None).await {
+                                tracing::warn!(err = %e, "failed to report step running");
+                            }
+                            pty_relay = Some(relay);
+                        }
+                        Err(e) => {
+                            tracing::error!(err = %e, "failed to start PTY relay");
+                            self.client
+                                .step_fail(exec_id, step, attempt, &format!("PTY relay failed: {e}"))
+                                .await?;
+                            cleanup(&work_dir, &tmp_dir);
+                            return Ok(());
+                        }
+                    }
+                    pty_process = Some(proc);
                 }
-                c
+                Err(e) => {
+                    tracing::error!(err = %e, "failed to spawn PTY process");
+                    self.client
+                        .step_fail(exec_id, step, attempt, &format!("PTY spawn failed: {e}"))
+                        .await?;
+                    cleanup(&work_dir, &tmp_dir);
+                    return Ok(());
+                }
             }
-            Err(e) => {
-                tracing::error!(err = %e, "failed to spawn runtime");
-                self.client
-                    .step_fail(exec_id, step, attempt, &format!("spawn failed: {e}"))
-                    .await?;
-                cleanup(&work_dir, &tmp_dir);
-                return Ok(());
+        } else {
+            // Standard mode: spawn with piped stdout/stderr to log file
+            let mut cmd = Command::new(&cmd_args[0]);
+            cmd.args(&cmd_args[1..])
+                .current_dir(&work_dir);
+
+            for (k, v) in &env_vars {
+                cmd.env(k, v);
             }
-        };
+
+            let log_file = std::fs::File::create(&log_file_path)?;
+            let log_file_err = log_file.try_clone()?;
+
+            match cmd
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::from(log_file))
+                .stderr(std::process::Stdio::from(log_file_err))
+                .spawn()
+            {
+                Ok(c) => {
+                    if let Err(e) = self.client.step_running(exec_id, step, attempt, None).await {
+                        tracing::warn!(err = %e, "failed to report step running");
+                    }
+                    child = Some(c);
+                }
+                Err(e) => {
+                    tracing::error!(err = %e, "failed to spawn runtime");
+                    self.client
+                        .step_fail(exec_id, step, attempt, &format!("spawn failed: {e}"))
+                        .await?;
+                    cleanup(&work_dir, &tmp_dir);
+                    return Ok(());
+                }
+            }
+        }
 
         // Spawn log pusher — tails the log file and ships chunks to ox-server
+        // (For PTY mode, the bridge tees output to the same log file)
         let log_pos = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let log_pusher_client = OxClient::new(&self.server_url);
         let log_exec_id = exec_id.to_string();
@@ -542,8 +591,26 @@ impl Runner {
             }
         });
 
-        let status = child.wait().await?;
-        tracing::info!(exit_code = status.code(), "runtime process exited");
+        // Wait for process exit (PTY or standard)
+        let status = if let Some(ref pty_proc) = pty_process {
+            // PTY: wait in a blocking thread (waitpid)
+            let pid = pty_proc.child_pid;
+            let exit_code = tokio::task::spawn_blocking(move || {
+                let mut status: libc::c_int = 0;
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else {
+                    -1
+                }
+            }).await?;
+            tracing::info!(exit_code = exit_code, "PTY process exited");
+            exit_code
+        } else {
+            let status = child.as_mut().unwrap().wait().await?;
+            tracing::info!(exit_code = status.code(), "runtime process exited");
+            status.code().unwrap_or(-1)
+        };
 
         // Final log flush — send anything written since the last periodic push
         log_pusher.abort();
@@ -565,7 +632,7 @@ impl Runner {
         // If the process exited 0 but never called ox-rt done, treat as implicit done.
         // Output is empty — the workflow engine will fall through to the next step
         // by declaration order, or the step's transitions can match on "".
-        if !got_done && status.success() {
+        if !got_done && status == 0 {
             tracing::info!("runtime exited 0 without calling ox-rt done, inferring done");
             got_done = true;
             output = String::new();
@@ -619,7 +686,7 @@ impl Runner {
             let metrics = serde_json::json!({
                 "runner": {
                     "duration_ms": duration.as_millis() as u64,
-                    "exit_code": status.code(),
+                    "exit_code": status,
                 },
                 "proxy": proxy_metrics,
             });
@@ -629,11 +696,14 @@ impl Runner {
             tracing::info!(exec = %exec_id, step = %step, "step confirmed");
         }
 
-        // 14. Cleanup: stop proxies, socket, and workspace
+        // 14. Cleanup: stop proxies, socket, PTY bridge, and workspace
         for handle in proxy_handles {
             handle.task.abort();
         }
         socket_handle.abort();
+        if let Some(relay) = pty_relay {
+            relay.task.abort();
+        }
         cleanup(&work_dir, &tmp_dir);
 
         Ok(())

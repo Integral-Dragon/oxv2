@@ -65,6 +65,7 @@ Modules:
 | `secrets` | Secrets projection, CRUD API handlers |
 | `git` | Git smart HTTP protocol handlers (`/git/*`) |
 | `artifacts` | Artifact storage, chunk writes, fetch, streaming reads |
+| `pty_relay` | WebSocket relay for interactive PTY sessions (bridges runner ↔ client) |
 | `merge` | `merge_to_main` implementation, cx diff extraction |
 | `cx` | cx state projection, diff parsing, cx event derivation |
 
@@ -98,7 +99,7 @@ Modules:
 | `main` | CLI arg parsing, registration, SSE subscription, idle loop |
 | `workspace` | Git clone, branch checkout, workspace provisioning |
 | `runtime` | Resolved step spec execution — file placement, env assembly, command spawning |
-| `spawn` | Process spawning, PTY allocation, stdout/stderr capture |
+| `pty` | PTY allocation (openpty), process spawning, websocket relay to server for interactive sessions |
 | `socket` | Unix domain socket server for the runtime interface |
 | `proxy` | API proxy — local listener, request/response interception, metric extraction |
 | `signals` | Post-exit signal collection (no_commits, dirty_workspace, etc.) |
@@ -150,8 +151,8 @@ binary crate. ox-core depends on no ox crate.
 | `serde` / `serde_json` | all | Serialization |
 | `toml` | ox-core | Config parsing |
 | `git2` | ox-server, ox-runner | Git operations |
-| `tokio-tungstenite` | — | Not used — SSE over HTTP, not WebSocket |
-| `nix` | ox-runner | Unix socket, PTY allocation, signal handling |
+| `tokio-tungstenite` | ox-runner, ox-ctl | WebSocket client for PTY relay |
+| `libc` | ox-runner | PTY allocation (openpty/fork), process control |
 | `hyper` | ox-runner (proxy) | Low-level HTTP for API proxy |
 | `tracing` | all | Structured logging |
 
