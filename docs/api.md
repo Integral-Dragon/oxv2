@@ -718,6 +718,62 @@ Response:
 
 ### Status
 
+#### `POST /api/config/reload`
+
+Reload configuration from disk. Re-reads all workflow, runtime,
+persona, and trigger files from the search path, validates them,
+and swaps the live config atomically. If validation fails, the old
+config is kept and errors are returned.
+
+Response (success):
+
+```json
+{
+  "status": "ok",
+  "workflows": 5,
+  "runtimes": 3,
+  "personas": 3,
+  "triggers": 1
+}
+```
+
+Response (failure, `422 Unprocessable Entity`):
+
+```json
+{
+  "status": "error",
+  "errors": ["persona 'test/eng': sets var 'modle' which runtime 'claude' does not declare"]
+}
+```
+
+#### `POST /api/config/check`
+
+Validate configuration files without applying. Returns validation
+errors (if any) and a diff of what would change compared to the
+currently loaded config.
+
+Response (valid):
+
+```json
+{
+  "valid": true,
+  "changes": {
+    "workflows": { "added": ["new-wf"], "removed": [] },
+    "runtimes": { "added": [], "removed": [] },
+    "personas": { "added": ["test/new"], "removed": [] }
+  }
+}
+```
+
+Response (invalid):
+
+```json
+{
+  "valid": false,
+  "errors": ["persona 'test/eng': sets var 'modle' which runtime 'claude' does not declare"]
+}
+```
+
 #### `GET /api/status`
 
 Server health check.

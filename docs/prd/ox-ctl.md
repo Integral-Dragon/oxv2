@@ -359,6 +359,55 @@ workflows   8 loaded
 
 ---
 
+## Config
+
+### `ox-ctl reload`
+
+Reload configuration from disk. Reads all workflow, runtime, persona,
+and trigger files from the search path, validates them, and swaps the
+live config atomically. If validation fails, the old config is kept.
+
+```
+ox-ctl reload
+```
+
+Output:
+
+```
+Config reloaded:
+  workflows: 5
+  runtimes:  3
+  personas:  3
+  triggers:  1
+```
+
+On failure, prints validation errors and exits non-zero.
+
+### `ox-ctl config check`
+
+Validate configuration files without applying. Reports errors and
+shows what would change compared to the currently loaded config.
+
+```
+ox-ctl config check
+```
+
+Output:
+
+```
+Config valid.
+  personas: +1 -0
+```
+
+On validation failure:
+
+```
+Config invalid:
+  persona 'test/eng': sets var 'modle' which runtime 'claude' does not declare
+```
+
+---
+
 ## Output Format
 
 All commands default to human-readable tabular output. Pass `--json` for

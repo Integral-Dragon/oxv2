@@ -213,6 +213,27 @@ names must be unique across the merged search path — if the same name
 appears in multiple directories, the first match (highest priority) is
 used.
 
+### Hot Reload
+
+Configuration can be reloaded without restarting ox-server. Three
+triggers:
+
+- **SIGHUP signal** — `kill -HUP <pid>`. Standard Unix convention.
+- **API endpoint** — `POST /api/config/reload`.
+- **CLI** — `ox-ctl reload`.
+
+On reload, ox-server re-reads all files from the search path, validates
+them (persona vars checked against runtime definitions), and atomically
+swaps the live config. If validation fails, the old config is kept and
+an error is returned.
+
+`ox-ctl config check` validates config files without applying —
+reports errors and shows what would change (added/removed workflows,
+runtimes, personas).
+
+In-flight executions are unaffected by a reload. The herder picks up
+new config on its next trigger evaluation cycle (within 30 seconds).
+
 ---
 
 ## Key Principles
