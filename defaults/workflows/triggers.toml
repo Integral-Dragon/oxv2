@@ -2,3 +2,8 @@
 on       = "cx.task_ready"
 tag      = "workflow:code-task"
 workflow = "code-task"
+
+[[trigger]]
+on       = "cx.task_ready"
+tag      = "workflow:consultation"
+workflow = "consultation"

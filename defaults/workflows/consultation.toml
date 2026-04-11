@@ -1,0 +1,26 @@
+# Consultation workflow: interactive session with a management consultant.
+#
+# Single step — drops into an interactive Claude session with the
+# consultant persona. The consultant has full access to the codebase
+# and issue tracker to explore, assess, and advise.
+#
+# Connect via TCP to the address advertised in the step.running event.
+# Run `ox-rt done` when finished.
+
+[workflow]
+name        = "consultation"
+description = "Interactive session with a management consultant"
+persona     = "consultant"
+
+[workflow.vars]
+branch = { default = "main", description = "branch to work on" }
+
+[[step]]
+name = "consult"
+
+[step.workspace]
+git_clone = true
+branch    = "{branch}"
+
+[step.runtime]
+tty = true
