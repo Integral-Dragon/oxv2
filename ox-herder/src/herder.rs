@@ -529,7 +529,8 @@ impl Herder {
                     tracing::error!(err = %e, "failed to emit step.advanced");
                 }
                 if let Some(exec) = self.executions.get_mut(exec_id) {
-                    exec.phase = ExecPhase::Ready { step: next_step, attempt: 1 };
+                    let attempt = exec.visit_counts.get(&next_step).copied().unwrap_or(1);
+                    exec.phase = ExecPhase::Ready { step: next_step, attempt };
                 }
             }
             StepAdvance::Complete => {
