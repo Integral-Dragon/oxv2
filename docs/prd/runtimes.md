@@ -14,10 +14,9 @@ search path.
 
 ## Runtime Definitions
 
-A runtime definition declares what fields it accepts, how to construct
-the command line, what files to place in the workspace, and what
-environment variables to set. All values support string interpolation
-of declared fields.
+A runtime definition declares its vars, how to construct the command
+line, what files to place, and what environment variables to set. All
+values support interpolation.
 
 ```toml
 # .ox/runtimes/claude.toml
@@ -25,9 +24,8 @@ of declared fields.
 name = "claude"
 
 [runtime.vars]
-model   = { type = "string", required = false }
-persona = { type = "string" }
-prompt  = { type = "string", required = false, default = "" }
+model  = { type = "string" }
+prompt = { type = "string", default = "" }
 
 [runtime.command]
 cmd = [
@@ -42,6 +40,12 @@ interactive_cmd = ["claude"]
 [[runtime.command.optional]]
 when = "model"
 args = ["--model", "{var.model}"]
+
+# Assemble persona + prompt into a single prompt file.
+# {workflow.persona} is a file-typed workflow var — resolved to content at dispatch.
+[[runtime.files]]
+content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+to      = "{tmp_dir}/ox-prompt"
 
 # Inject OAuth credentials from secrets
 [[runtime.files]]
@@ -58,20 +62,14 @@ needed:
 ox-ctl secrets set claude_credentials --value "$(cat ~/.claude/.credentials.json)"
 ```
 
-The `persona` var receives file content (resolved by the workflow's
-file-typed var declaration) and is prepended to the prompt. The
-combined persona + prompt is written to a single prompt file passed
-via `-p`. See [Prompt Assembly](#prompt-assembly) below.
-
 ```toml
 # .ox/runtimes/codex.toml
 [runtime]
 name = "codex"
 
 [runtime.vars]
-model   = { type = "string", required = false }
-persona = { type = "string" }
-prompt  = { type = "string", required = false, default = "" }
+model  = { type = "string" }
+prompt = { type = "string", default = "" }
 
 [runtime.command]
 cmd = ["codex", "{tmp_dir}/ox-prompt"]
@@ -80,9 +78,15 @@ cmd = ["codex", "{tmp_dir}/ox-prompt"]
 when = "model"
 args = ["--model", "{var.model}"]
 
+# Assemble persona + prompt
 [[runtime.files]]
-from = "{persona}"
-to   = "{workspace}/.codex/system-prompt.md"
+content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+to      = "{tmp_dir}/ox-prompt"
+
+# Place persona as system prompt for codex
+[[runtime.files]]
+content = "{workflow.persona}"
+to      = "{workspace}/.codex/system-prompt.md"
 
 [[runtime.proxy]]
 env      = "OPENAI_BASE_URL"
@@ -116,37 +120,36 @@ source = "proxy"
 name = "openclaw"
 
 [runtime.vars]
-prompt = { type = "string", required = false, default = "" }
+prompt = { type = "string", default = "" }
 
 [runtime.command]
 cmd = ["openclaw", "--task", "{tmp_dir}/ox-prompt"]
+
+[[runtime.files]]
+content = "{var.prompt}"
+to      = "{tmp_dir}/ox-prompt"
 ```
 
 ---
 
 ## Interpolation
 
-Any string value in a runtime definition can reference declared fields
-and built-in variables using `{name}` syntax. Interpolation applies to
-command templates, file mappings, and environment variables.
-
-### Built-in Variables
-
-These are always available, resolved by ox-runner at execution time:
+All string values in a runtime definition support `{name}` interpolation.
+There are four namespaces, distinguished by prefix:
 
 | Pattern | Source |
 |---------|--------|
 | `{var.name}` | Runtime vars (e.g. `{var.prompt}`, `{var.model}`) |
 | `{workflow.name}` | Workflow/execution vars (e.g. `{workflow.persona}`, `{workflow.task_id}`) |
 | `{secret.name}` | Secrets (e.g. `{secret.claude_credentials}`) |
-| `{workspace}` | Builtin: absolute path to the provisioned workspace |
-| `{tmp_dir}` | Builtin: runner's temp directory (outside git) |
-| `{home}` | Builtin: runner process HOME directory |
+| `{name}` | Builtins: `{workspace}`, `{tmp_dir}`, `{home}` |
+
+Interpolation applies to command templates, file content, file paths,
+and environment variable values.
 
 ### Secret References
 
-Secrets are referenced using `{secret.name}` syntax. This is distinct
-from runtime var interpolation (`{var.name}`) and built-in variables.
+Secrets are referenced using `{secret.name}` syntax.
 
 ```toml
 [runtime.env]
@@ -154,11 +157,10 @@ ANTHROPIC_API_KEY = "{secret.anthropic_api_key}"
 GITHUB_TOKEN      = "{secret.github_token}"
 ```
 
-Secret references are resolved at dispatch time by ox-server — not by
-the interpolation engine directly. The interpolation engine recognises
-`{secret.NAME}` patterns and collects the referenced names. ox-server
+Secret references are resolved at dispatch time by ox-server. The
+interpolation engine collects `{secret.name}` references; ox-server
 resolves them from its `SecretsState` projection and includes the
-resolved values in the dispatch payload sent to the runner.
+values in the dispatch payload sent to the runner.
 
 See [secrets.md](secrets.md) for the full secrets model.
 
@@ -192,7 +194,6 @@ content at dispatch time:
 content = "{workflow.persona}\n\n---\n\n{var.prompt}"
 to      = "{tmp_dir}/ox-prompt"
 ```
-| `int` | String representation of the integer |
 
 ### Absent Fields
 
@@ -218,9 +219,8 @@ to empty values.
 
 **`runtime.vars`** — declares what parameters the runtime accepts.
 Each var has a `type` (`string`, `bool`, `int`), optionality
-(`required`), and an optional `default`. File-typed vars (`type = "file"`)
-are declared at the workflow level and resolved to content before reaching
-the runtime. Runtime vars see only string content.
+(`required`), and an optional `default`. Runtime vars are referenced
+with the `{var.name}` prefix in templates.
 
 ### Command
 
@@ -231,8 +231,8 @@ strings with interpolation.
 when `tty = true`. If absent, `cmd` is used for both modes.
 
 **`runtime.command.optional`** — conditional argument blocks. Each entry
-has a `when` field (the field name to check) and `args` (an array of
-strings with interpolation). When the field has a value, `args` are
+has a `when` field (the runtime var name to check) and `args` (an array
+of strings with interpolation). When the var has a value, `args` are
 appended to the command. When absent, the block is skipped.
 
 ```toml
@@ -248,8 +248,14 @@ args = ["--verbose"]
 ### Files
 
 **`runtime.files`** — file placement rules. Each entry writes a file
-before the runtime starts. The `to` path uses placeholders that the
-runner resolves:
+before the runtime starts. Files are how runtimes assemble prompts,
+inject credentials, and place configuration.
+
+A file entry has either `from` (copy from search path) or `content`
+(inline content with interpolation), not both. `mode` is an optional
+POSIX permission string (default: `"0644"`).
+
+Path placeholders resolved by the runner:
 
 | Placeholder | Resolves to |
 |-------------|-------------|
@@ -259,15 +265,11 @@ runner resolves:
 
 Bare relative paths (no placeholder prefix) are placed in `{tmp_dir}`.
 
-A file entry has either `from` (copy from search path) or `content`
-(inline content with interpolation), not both. `mode` is an optional
-POSIX permission string (default: `"0644"`).
-
 ```toml
-# Copy a file from the search path into the workspace
+# Assemble persona + prompt into a prompt file
 [[runtime.files]]
-from = "{persona}"
-to   = "{workspace}/CLAUDE.md"
+content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+to      = "{tmp_dir}/ox-prompt"
 
 # Write secret content to the runner's home directory
 [[runtime.files]]
@@ -281,10 +283,6 @@ to      = "{home}/.ssh/id_ed25519"
 mode    = "0600"
 ```
 
-`from` is resolved via the configuration search path for `file` type
-fields. If it references an absent optional field, the mapping is
-skipped. `content` supports `{secret.NAME}` interpolation.
-
 ### Environment
 
 **`runtime.env`** — environment variables set on the runtime process.
@@ -292,7 +290,7 @@ Keys are variable names; values are strings with interpolation.
 
 ```toml
 [runtime.env]
-CLAUDE_MODEL = "{model}"
+CLAUDE_MODEL = "{var.model}"
 MY_CONFIG    = "{workspace}/.config"
 ```
 
@@ -375,33 +373,6 @@ description metadata.
 
 ---
 
-## Prompt Assembly
-
-When a runtime declares `prompt` and `persona` vars, ox-server
-assembles them into a single prompt file:
-
-1. The `persona` var contains file content (resolved from the workflow's
-   file-typed var declaration at dispatch time)
-2. Concatenate: persona content + `---` separator + prompt
-3. Write to `{tmp_dir}/ox-prompt`
-4. Set `{prompt_file}` to the absolute path
-
-The prompt file lives in the runner's temp directory, not the workspace,
-so it does not dirty the git working tree.
-
-If only a prompt is provided (no persona), the prompt file contains
-just the prompt text. If only a persona is provided (no prompt), the
-file contains just the persona content.
-
-The command template references the assembled file via `{prompt_file}`:
-
-```toml
-[runtime.command]
-cmd = ["claude", "-p", "{prompt_file}"]
-```
-
----
-
 ## Step Runtime Fields
 
 The step's `[step.runtime]` block passes parameters to the runtime
@@ -413,11 +384,13 @@ definition. See [workflows.md](workflows.md) for how steps are defined.
 | `tty` | no | Allocate a TTY for the process |
 | `env` | no | Extra environment variables passed to the process |
 | `timeout` | no | Maximum wall-clock time before the runner kills the process |
-| *(any declared field)* | — | Fields defined by the runtime definition (e.g. `model`, `persona`, `prompt`) |
+| *(any declared var)* | — | Vars defined by the runtime (e.g. `model`, `prompt`) |
+| *(any workflow var)* | — | Overrides for workflow vars (e.g. `persona` per step) |
 
 `type`, `tty`, `env`, and `timeout` are handled by ox-runner directly.
-All other fields are passed to the runtime definition for interpolation.
-A field not declared by the definition is an error.
+Runtime vars are passed to the runtime definition for interpolation.
+Workflow var overrides (like `persona`) are resolved at dispatch time
+before reaching the runtime.
 
 ```toml
 [step.runtime]
@@ -426,10 +399,6 @@ model   = "sonnet"
 persona = "inspired/software-engineer"
 prompt  = "Implement the task following the approved proposal."
 ```
-
-There are no "common" or "special" fields beyond `type`, `tty`, `env`,
-and `timeout`. Whether a runtime uses `persona`, `prompt`, `model`, or
-any other field is entirely up to the runtime definition.
 
 ---
 
@@ -472,9 +441,9 @@ Runtime definitions are resolved by **ox-server**, not by ox-runner.
 When the herder dispatches a step, ox-server:
 
 1. Finds the runtime definition via the configuration search path
-2. Validates the step's fields against the definition
-3. Resolves all `{name}` interpolations and collects `{secret.NAME}` refs
-4. Resolves file-typed workflow vars (persona, etc.) to content from the search path
+2. Merges step runtime field overrides with workflow vars
+3. Resolves file-typed workflow vars to content from the search path
+4. Resolves all `{var.name}`, `{workflow.name}`, `{secret.name}` interpolations
 5. Resolves secrets from the `SecretsState` projection
 6. Builds the command from `cmd` (or `interactive_cmd`) plus `optional` blocks
 7. Assembles the complete resolved step spec
@@ -529,14 +498,14 @@ ox-ctl exec logs <execution-id> <step> --attempt 2  # specific attempt
 ### TTY mode
 
 If `tty = true`, ox-runner allocates a PTY (via `openpty`) and spawns
-the interactive command attached to it. PTY I/O is relayed through
-ox-server via websocket — the runner connects to the server's
-`/pty/runner` endpoint and clients connect to the `/pty` endpoint.
+the interactive command attached to it. A TCP bridge listens on a
+random port and the address is reported in the `step.running` event's
+`connect_addr` field.
 
-Attach to a running interactive step:
+Clients connect via TCP:
 
 ```
-ox-ctl exec attach <execution-id> <step>
+socat - TCP:<runner-host>:<port>
 ```
 
 PTY output is teed to the step log file so the log pusher works
