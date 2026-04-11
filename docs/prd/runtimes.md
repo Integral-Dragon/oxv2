@@ -7,8 +7,35 @@ search path (see [README.md](README.md#configuration-search)) under
 `claude`, `codex`, and any other runtime are all defined the same way,
 as configuration.
 
+Runtimes are mechanical. They describe how to launch a process, what
+proxies to set up, what files to place. They do not describe who the
+agent is or what it should do — that's the persona's job. A workflow
+step names a persona; the persona declares which runtime it uses;
+the runtime definition tells ox-runner how to execute it.
+
 Adding a new runtime means adding a TOML file to any directory on the
 search path.
+
+---
+
+## Skills
+
+A runtime can declare base skills — capability packages available to
+every step that uses this runtime. These are capabilities so
+fundamental to the runtime that they're always present regardless of
+persona or workflow.
+
+```toml
+[runtime]
+name   = "claude"
+skills = ["ox-skills/shell", "ox-skills/web-search"]
+```
+
+At dispatch time, ox-server resolves the union of runtime + persona +
+workflow + step skills, provisions them into the runner environment,
+and assembles a skill index for prompt injection. See
+[skills.md](skills.md) for the full skill model: format, hierarchy,
+resolution, and packaging.
 
 ---
 
@@ -41,10 +68,10 @@ interactive_cmd = ["claude"]
 when = "model"
 args = ["--model", "{var.model}"]
 
-# Assemble persona + prompt into a single prompt file.
-# {workflow.persona} is a file-typed workflow var — resolved to content at dispatch.
+# Assemble persona instructions + prompt into a single prompt file.
+# {persona.instructions} is resolved from the persona's markdown body at dispatch.
 [[runtime.files]]
-content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+content = "{persona.instructions}\n\n---\n\n{var.prompt}"
 to      = "{tmp_dir}/ox-prompt"
 
 # Inject OAuth credentials from secrets
@@ -78,14 +105,14 @@ cmd = ["codex", "{tmp_dir}/ox-prompt"]
 when = "model"
 args = ["--model", "{var.model}"]
 
-# Assemble persona + prompt
+# Assemble persona instructions + prompt
 [[runtime.files]]
-content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+content = "{persona.instructions}\n\n---\n\n{var.prompt}"
 to      = "{tmp_dir}/ox-prompt"
 
-# Place persona as system prompt for codex
+# Place persona instructions as system prompt for codex
 [[runtime.files]]
-content = "{workflow.persona}"
+content = "{persona.instructions}"
 to      = "{workspace}/.codex/system-prompt.md"
 
 [[runtime.proxy]]
@@ -135,12 +162,13 @@ to      = "{tmp_dir}/ox-prompt"
 ## Interpolation
 
 All string values in a runtime definition support `{name}` interpolation.
-There are four namespaces, distinguished by prefix:
+There are five namespaces, distinguished by prefix:
 
 | Pattern | Source |
 |---------|--------|
 | `{var.name}` | Runtime vars (e.g. `{var.prompt}`, `{var.model}`) |
-| `{workflow.name}` | Workflow/execution vars (e.g. `{workflow.persona}`, `{workflow.task_id}`) |
+| `{persona.name}` | Persona fields (e.g. `{persona.instructions}`, `{persona.name}`) |
+| `{workflow.name}` | Workflow/execution vars (e.g. `{workflow.task_id}`) |
 | `{secret.name}` | Secrets (e.g. `{secret.claude_credentials}`) |
 | `{name}` | Builtins: `{workspace}`, `{tmp_dir}`, `{home}` |
 
@@ -182,17 +210,29 @@ when = "model"
 args = ["--model", "{var.model}"]
 ```
 
+### Persona Fields
+
+The persona's metadata and instructions are available with the
+`persona.` prefix. `{persona.instructions}` resolves to the markdown
+body of the persona file (everything after the YAML frontmatter).
+
+```toml
+# In runtime files — reference persona instructions
+[[runtime.files]]
+content = "{persona.instructions}\n\n---\n\n{var.prompt}"
+to      = "{tmp_dir}/ox-prompt"
+```
+
 ### Workflow Variables
 
 Workflow vars (from the execution's `vars` map) are available with
-the `workflow.` prefix. File-typed workflow vars are resolved to
-content at dispatch time:
+the `workflow.` prefix:
 
 ```toml
 # In runtime files — reference workflow vars
 [[runtime.files]]
-content = "{workflow.persona}\n\n---\n\n{var.prompt}"
-to      = "{tmp_dir}/ox-prompt"
+content = "Task: {workflow.task_id}\n\n{var.prompt}"
+to      = "{tmp_dir}/ox-context"
 ```
 
 ### Absent Fields
@@ -266,9 +306,9 @@ Path placeholders resolved by the runner:
 Bare relative paths (no placeholder prefix) are placed in `{tmp_dir}`.
 
 ```toml
-# Assemble persona + prompt into a prompt file
+# Assemble persona instructions + prompt into a prompt file
 [[runtime.files]]
-content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+content = "{persona.instructions}\n\n---\n\n{var.prompt}"
 to      = "{tmp_dir}/ox-prompt"
 
 # Write secret content to the runner's home directory
@@ -375,29 +415,41 @@ description metadata.
 
 ## Step Runtime Fields
 
-The step's `[step.runtime]` block passes parameters to the runtime
-definition. See [workflows.md](workflows.md) for how steps are defined.
+Steps normally don't specify a runtime directly — the persona declares
+which runtime to use. The step's optional `[step.runtime]` block is an
+escape hatch for overriding persona defaults.
+
+See [workflows.md](workflows.md) for how steps are defined.
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | yes | Name of the runtime definition |
+| `type` | no | Override the persona's runtime selection |
+| `model` | no | Override the persona's model selection |
 | `tty` | no | Allocate a TTY for the process |
 | `env` | no | Extra environment variables passed to the process |
 | `timeout` | no | Maximum wall-clock time before the runner kills the process |
-| *(any declared var)* | — | Vars defined by the runtime (e.g. `model`, `prompt`) |
-| *(any workflow var)* | — | Overrides for workflow vars (e.g. `persona` per step) |
+| *(any declared var)* | — | Vars defined by the runtime (e.g. `prompt`) |
 
-`type`, `tty`, `env`, and `timeout` are handled by ox-runner directly.
-Runtime vars are passed to the runtime definition for interpolation.
-Workflow var overrides (like `persona`) are resolved at dispatch time
-before reaching the runtime.
+The normal path is persona-driven:
 
 ```toml
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
+[[step]]
+name    = "implement"
 persona = "inspired/software-engineer"
 prompt  = "Implement the task following the approved proposal."
+```
+
+The override path for when a step needs to force a specific runtime
+or model:
+
+```toml
+[[step]]
+name    = "implement"
+persona = "inspired/software-engineer"
+prompt  = "Implement the task following the approved proposal."
+
+[step.runtime]
+model = "opus"     # override persona's default model for this step
 ```
 
 ---
@@ -437,22 +489,30 @@ go through the runtime interface.
 
 ## Runtime Resolution
 
-Runtime definitions are resolved by **ox-server**, not by ox-runner.
-When the herder dispatches a step, ox-server:
+Resolution is persona-driven and handled by **ox-server**, not by
+ox-runner. When the herder dispatches a step, ox-server:
 
-1. Finds the runtime definition via the configuration search path
-2. Merges step runtime field overrides with workflow vars
-3. Resolves file-typed workflow vars to content from the search path
-4. Resolves all `{var.name}`, `{workflow.name}`, `{secret.name}` interpolations
-5. Resolves secrets from the `SecretsState` projection
-6. Builds the command from `cmd` (or `interactive_cmd`) plus `optional` blocks
-7. Assembles the complete resolved step spec
+1. Resolves the persona (from step or workflow default) via the
+   search path
+2. Reads the persona's frontmatter: runtime, model, skills
+3. Finds the runtime definition via the configuration search path
+   (using the persona's `runtime` field, or the step's override)
+4. Merges persona vars, step runtime field overrides, and workflow vars
+5. Resolves persona instructions (the markdown body) as
+   `{persona.instructions}`
+6. Collects skills from runtime + persona + workflow + step
+7. Resolves all `{var.name}`, `{persona.name}`, `{workflow.name}`,
+   `{secret.name}` interpolations
+8. Resolves secrets from the `SecretsState` projection
+9. Builds the command from `cmd` (or `interactive_cmd`) plus `optional`
+   blocks
+10. Assembles the complete resolved step spec
 
 The resolved spec is included in the `step.dispatched` event data (with
 secret values excluded from the persisted event — see
 [secrets.md](secrets.md)). The runner receives everything it needs to
-execute the step without access to runtime definitions or the
-configuration search path.
+execute the step without access to runtime definitions, personas, or
+the configuration search path.
 
 ## Runner Execution
 

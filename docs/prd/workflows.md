@@ -18,34 +18,32 @@ Workflows are TOML files found via the configuration search path (see
 engine loads all definitions at startup. A workflow file contains a
 `[workflow]` header and one or more `[[step]]` blocks.
 
+Workflows reference personas by name. The persona declares its own
+runtime and model — the workflow doesn't need to. Personas and skills
+can be referenced by ecosystem registry name (e.g.
+`ox-community/senior-reviewer`) or by local name. See
+[ecosystem.md](ecosystem.md) for registry resolution.
+
 ```toml
 [workflow]
 name        = "code-task"
 description = "Propose → review plan → implement → review code → merge"
+persona     = "inspired/software-engineer"    # default persona for steps
 
 [[step]]
 name      = "propose"
 workspace = { git_clone = true, branch = "{task_id}", push = true }
 output    = "diff"
+prompt    = "Read the task spec, explore the codebase, write a proposal."
 max_visits      = 3
 max_visits_goto = "plan-tiebreak"
 
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/software-engineer"
-prompt  = "Read the task spec, explore the codebase, write a proposal."
-
 [[step]]
 name      = "review-plan"
+persona   = "inspired/tech-lead"              # override workflow default
 workspace = { git_clone = true, branch = "{task_id}", push = true }
 output    = "verdict"
 max_retries = 1
-
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/tech-lead"
 
 [[step.transition]]
 match = "pass"
@@ -63,25 +61,16 @@ goto  = "escalate"
 name      = "implement"
 workspace = { git_clone = true, branch = "{task_id}", push = true }
 output    = "diff"
+prompt    = "Implement the task following the approved proposal."
 max_visits      = 3
 max_visits_goto = "code-tiebreak"
 
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/software-engineer"
-prompt  = "Implement the task following the approved proposal."
-
 [[step]]
 name      = "review-code"
+persona   = "inspired/reviewer"
 workspace = { git_clone = true, branch = "{task_id}", push = true }
 output      = "verdict"
 max_retries = 2
-
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/reviewer"
 
 [[step.transition]]
 match = "pass"
@@ -114,19 +103,51 @@ for the full reference implementation.
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `name` | yes | — | Step identifier, unique within the workflow |
-| `runtime` | no | — | Runtime spec — the process ox-runner spawns (see Runtime). Mutually exclusive with `action` |
-| `action` | no | — | In-process ox-server action (see Ox Actions). Mutually exclusive with `runtime` |
+| `persona` | no | workflow default | Persona for this step (declares runtime, model, skills) |
+| `prompt` | no | `""` | Task-specific prompt passed to the runtime |
+| `runtime` | no | — | Runtime overrides (model, tty, env, timeout). Escape hatch — normally the persona declares the runtime |
+| `action` | no | — | In-process ox-server action (see Ox Actions). Mutually exclusive with `persona`/`runtime` |
 | `output` | no | — | Named output label passed to the next step via `{prev_output}` |
 | `workspace` | no | — | Workspace spec (see below) |
+| `skills` | no | `[]` | Additional skills available to this step (added to runtime + persona + workflow skills) |
 | `max_retries` | no | engine default | Per-step retry limit |
 | `max_visits` | no | — | Maximum times this step can be visited across retry loops |
 | `max_visits_goto` | no | `"escalate"` | Step to jump to when `max_visits` is exceeded |
 | `on_fail` | no | — | Step to jump to on failure (see Failure Handling) |
 | `squash` | no | `false` | Squash branch commits into one before merging (action steps only) |
 
-A step has either `runtime` (dispatched to a runner) or `action` (runs
-in-process on ox-server). If neither is specified, the step defaults to
-`runtime = { type = "claude" }`.
+A step has either a `persona` (dispatched to a runner) or an `action`
+(runs in-process on ox-server). If a step has no persona and no action,
+it inherits the workflow's default persona.
+
+---
+
+## Skills
+
+Skills compose additively across four levels: runtime, persona,
+workflow, and step. The agent sees the union of all.
+
+```toml
+[workflow]
+name   = "data-pipeline"
+skills = ["acme-corp/pg-tools", "acme-corp/grafana-reader"]
+
+[[step]]
+name    = "analyze-logs"
+persona = "inspired/software-engineer"
+skills  = ["acme-corp/es-query"]      # added on top of runtime + persona + workflow skills
+prompt  = "Analyze the recent error logs."
+```
+
+The agent executing `analyze-logs` sees skills from:
+- The runtime (e.g. `ox-skills/shell` declared in claude.toml)
+- The persona (e.g. whatever `inspired/software-engineer` declares)
+- The workflow (`acme-corp/pg-tools`, `acme-corp/grafana-reader`)
+- The step (`acme-corp/es-query`)
+
+Skills only add — a step cannot remove a skill granted by the runtime,
+persona, or workflow level. See [skills.md](skills.md) for the full
+skill model.
 
 ---
 
@@ -205,27 +226,37 @@ worker receiving a retry knows what went wrong.
 
 ---
 
-## Runtime
+## Personas and Runtimes
 
-The `runtime` field on a step selects which runtime to use and passes
-parameters to it. Runtime definitions are found via the configuration
-search path — ox-runner has no hardcoded knowledge of any agent CLI.
+Steps name a persona. The persona declares which runtime and model to
+use. This means the workflow author thinks in terms of roles ("who
+does this step"), not infrastructure ("which CLI to run").
 
 ```toml
 [[step]]
-name = "implement"
-
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
+name    = "implement"
 persona = "inspired/software-engineer"
 prompt  = "Implement the task following the approved proposal."
 ```
 
-`type` selects the runtime definition. `tty`, `env`, and `timeout` are
-handled by ox-runner directly. All other fields (`model`, `persona`,
-`prompt`, etc.) are defined by the runtime definition — there are no
-special or common fields.
+The persona `inspired/software-engineer` might declare `runtime: claude`
+and `model: sonnet` in its frontmatter. The workflow doesn't need to
+know. Swapping to a Codex-based persona is just changing the persona
+name — the workflow TOML stays the same.
+
+For cases where a step needs to override the persona's defaults, the
+`[step.runtime]` block is an escape hatch:
+
+```toml
+[[step]]
+name    = "implement"
+persona = "inspired/software-engineer"
+prompt  = "Implement the task following the approved proposal."
+
+[step.runtime]
+model   = "opus"        # override persona's model for this step
+timeout = "30m"
+```
 
 See [runtimes.md](runtimes.md) for the full runtime model: definition
 format, field declarations, interpolation, file placement, the runtime

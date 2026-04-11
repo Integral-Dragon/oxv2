@@ -9,9 +9,26 @@ everything. The human acts as the repository owner — setting direction,
 reviewing escalations, controlling budget — while agents handle contribution.
 
 The workflow system is fully configurable. Personas define who an agent is;
-workflow TOML files define what steps run, in what order, with what
-transitions. The engine is generic — complex multi-agent orchestrations
-are configuration, not code.
+skills define what an agent can do; workflow TOML files define what steps
+run, in what order, with what transitions. The engine is generic — complex
+multi-agent orchestrations are configuration, not code.
+
+The system is designed in concentric rings — each ring works independently
+but amplifies the others:
+
+1. **Engine** — the core: event-sourced workflow execution with isolated
+   runners. Run locally on a laptop with `ox-up`.
+2. **Skills** — capability packages (tools, scripts, instructions) that
+   give agents abilities beyond reading and writing code. Composable
+   at the runtime, persona, workflow, and step level.
+3. **Ecosystem** — a registry and community for sharing skills, personas,
+   and workflows. Publish, discover, and compose building blocks across
+   projects and teams.
+4. **Platform** — hosted infrastructure: cloud runners, GitHub integration,
+   web dashboard, multi-tenancy, billing. The same engine, managed.
+5. **Self-improvement** — retro workflows that review execution history
+   and update memory files, so agents get better at working in a project
+   over time.
 
 ---
 
@@ -186,7 +203,9 @@ The directory structure is the same at every level:
 <search-dir>/
   runtimes/    *.toml — runtime definitions
   workflows/   *.toml — workflow definitions
-  personas/    *.toml — persona files
+  personas/    *.md — persona files (markdown with YAML frontmatter)
+  skills/      <name>.md or <name>/ — skill packages (markdown + optional bin/)
+  memory/      *.md — accumulated agent memory (per-persona, per-project)
 ```
 
 ox-server resolves the search path at startup. Workflow and runtime
@@ -231,10 +250,29 @@ advance until confirmation. See [execution.md](execution.md).
 cx activity, and declared files. Streaming artifacts are observable in
 real-time. See [artifacts.md](artifacts.md).
 
-**Orchestration is configuration.** Personas and workflow definitions are
-TOML files. The infrastructure is generic. The Inspired workflow
-(PM → tech lead → engineer → reviewer) is one expression of the model,
-not the model itself. See [docs/workflows/](../workflows/).
+**Personas are primary.** A workflow step names a persona, not a
+runtime. The persona declares what runtime it uses, what model, and
+what skills it needs. Runtimes are mechanical — "how to run claude" —
+and personas are meaningful — "who is doing this work." Swapping a
+persona can change the runtime, model, and skills without touching
+the workflow.
+
+**Orchestration is configuration.** Personas, skills, and workflow
+definitions are files. The infrastructure is generic. The Inspired
+workflow (PM → tech lead → engineer → reviewer) is one expression of
+the model, not the model itself. See [docs/workflows/](../workflows/).
+
+**Skills are portable.** A skill is files on disk and executables on
+PATH. No protocol dependency. Any agent that can read files and run
+commands can use ox skills. The ecosystem grows because the format is
+agent-agnostic — the lock-in is in orchestration and the registry, not
+the file format. See [skills.md](skills.md).
+
+**The system improves itself.** Execution artifacts, metrics, and
+signals feed retro workflows that update memory files. Personas
+accumulate project-specific knowledge over time. The improvement loop
+is a workflow like any other — no special infrastructure. See
+[self-improvement.md](self-improvement.md).
 
 **The herder is dumb.** No AI in the infrastructure layer. The herder counts
 things, checks conditions, and fires triggers. Intelligence lives in agents
@@ -244,9 +282,10 @@ and personas.
 
 ## What Ox Is Not
 
-**Not a UI.** ox-server exposes an API and SSE stream sufficient
-for a rich human interface, but that interface is a separate product. ox-ctl
-is the human interface within this repository.
+**Not a UI (yet).** ox-server exposes an API and SSE stream sufficient
+for a rich human interface. ox-ctl is the CLI interface within this
+repository. The web dashboard is part of the platform layer — see
+[platform.md](platform.md).
 
 **Not cx.** cx is a standalone tool that works without ox. Ox depends on cx;
 cx does not depend on ox.
@@ -272,6 +311,10 @@ describe how to use them.
 - [metrics.md](metrics.md) — step metrics, collection, metric types
 - [cx.md](cx.md) — cx integration, branch discipline, git log events
 - [ox-ctl.md](ox-ctl.md) — CLI reference
+- [skills.md](skills.md) — skill format, hierarchy, resolution, packaging
+- [ecosystem.md](ecosystem.md) — registry for skills, personas, workflows
+- [self-improvement.md](self-improvement.md) — retro workflows, memory layers
+- [platform.md](platform.md) — SaaS architecture, cloud runners, web dashboard
 - [../design.md](../design.md) — implementation architecture
 - [../vm-layout.md](../vm-layout.md) — VM filesystem layout for runners
 - [../workflows/](../workflows/) — reference workflow definitions
