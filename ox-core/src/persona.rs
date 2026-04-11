@@ -46,11 +46,14 @@ struct PersonaFrontmatter {
 
 /// Parse a persona from its file content (markdown with optional YAML frontmatter).
 ///
-/// Format:
+/// Structural fields (`runtime`, `skills`, `secrets`) are parsed explicitly.
+/// All other frontmatter fields are captured as runtime var defaults.
+///
 /// ```markdown
 /// ---
 /// runtime: claude
 /// model: sonnet
+/// temperature: 0.7
 /// skills: [shell, web-search]
 /// ---
 ///
