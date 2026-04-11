@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 /// A persona definition, loaded from a markdown file with YAML frontmatter.
 ///
-/// The frontmatter declares metadata (runtime, model, skills).
+/// The frontmatter declares structural fields (runtime, skills, secrets)
+/// plus arbitrary vars that flow through to the runtime as defaults.
 /// The markdown body is the agent's instructions.
 #[derive(Debug, Clone)]
 pub struct PersonaDef {
@@ -13,27 +14,34 @@ pub struct PersonaDef {
     pub name: String,
     /// Runtime to use (e.g. "claude"). If None, must be specified at the step level.
     pub runtime: Option<String>,
-    /// Default model (e.g. "sonnet"). Overridable at the step level.
-    pub model: Option<String>,
     /// Skills this persona needs.
     pub skills: Vec<String>,
     /// Secrets this persona expects (informational).
     pub secrets: Vec<String>,
+    /// Runtime variable defaults from frontmatter (e.g. model, temperature,
+    /// max_tokens — anything the runtime definition declares as a var).
+    /// These are injected into the runtime spec as defaults, overridable
+    /// at the step level.
+    pub vars: HashMap<String, String>,
     /// The markdown body — everything after the frontmatter.
     pub instructions: String,
 }
 
 /// Raw YAML frontmatter fields.
+///
+/// Structural fields are parsed explicitly. Everything else is captured
+/// by the flattened `vars` map and passed through as runtime var defaults.
 #[derive(Debug, Default, Deserialize)]
 struct PersonaFrontmatter {
     #[serde(default)]
     runtime: Option<String>,
     #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
     skills: Vec<String>,
     #[serde(default)]
     secrets: Vec<String>,
+    /// All other frontmatter fields become runtime var defaults.
+    #[serde(flatten)]
+    vars: HashMap<String, serde_yaml::Value>,
 }
 
 /// Parse a persona from its file content (markdown with optional YAML frontmatter).
@@ -58,13 +66,28 @@ pub fn parse_persona(name: &str, content: &str) -> PersonaDef {
         .and_then(|yaml| serde_yaml::from_str(yaml).ok())
         .unwrap_or_default();
 
+    // Convert YAML values to strings for runtime var injection.
+    let vars: HashMap<String, String> = fm.vars.into_iter()
+        .map(|(k, v)| (k, yaml_value_to_string(&v)))
+        .collect();
+
     PersonaDef {
         name: name.to_string(),
         runtime: fm.runtime,
-        model: fm.model,
         skills: fm.skills,
         secrets: fm.secrets,
+        vars,
         instructions,
+    }
+}
+
+/// Convert a serde_yaml::Value to a string for use as a runtime var.
+fn yaml_value_to_string(v: &serde_yaml::Value) -> String {
+    match v {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        other => format!("{other:?}"),
     }
 }
 
@@ -192,7 +215,7 @@ You are a software engineer."#;
         let persona = parse_persona("test/engineer", content);
         assert_eq!(persona.name, "test/engineer");
         assert_eq!(persona.runtime.as_deref(), Some("claude"));
-        assert_eq!(persona.model.as_deref(), Some("sonnet"));
+        assert_eq!(persona.vars.get("model").map(|s| s.as_str()), Some("sonnet"));
         assert_eq!(persona.skills, vec!["shell", "web-search"]);
         assert_eq!(persona.secrets, vec!["api_key"]);
         assert_eq!(persona.instructions, "You are a software engineer.");
@@ -204,7 +227,7 @@ You are a software engineer."#;
         let persona = parse_persona("plain", content);
         assert_eq!(persona.name, "plain");
         assert!(persona.runtime.is_none());
-        assert!(persona.model.is_none());
+        assert!(persona.vars.is_empty());
         assert!(persona.skills.is_empty());
         assert_eq!(persona.instructions, content);
     }
@@ -214,7 +237,7 @@ You are a software engineer."#;
         let content = "---\n---\nJust instructions.";
         let persona = parse_persona("empty-fm", content);
         assert!(persona.runtime.is_none());
-        assert!(persona.model.is_none());
+        assert!(persona.vars.is_empty());
         assert_eq!(persona.instructions, "Just instructions.");
     }
 
@@ -223,9 +246,19 @@ You are a software engineer."#;
         let content = "---\nruntime: codex\n---\n\nYou use codex.";
         let persona = parse_persona("partial", content);
         assert_eq!(persona.runtime.as_deref(), Some("codex"));
-        assert!(persona.model.is_none());
+        assert!(persona.vars.is_empty());
         assert!(persona.skills.is_empty());
         assert_eq!(persona.instructions, "You use codex.");
+    }
+
+    #[test]
+    fn parse_arbitrary_vars() {
+        let content = "---\nruntime: claude\nmodel: opus\ntemperature: 0.7\nmax_tokens: 4096\n---\n\nYou are creative.";
+        let persona = parse_persona("custom", content);
+        assert_eq!(persona.runtime.as_deref(), Some("claude"));
+        assert_eq!(persona.vars.get("model").map(|s| s.as_str()), Some("opus"));
+        assert_eq!(persona.vars.get("temperature").map(|s| s.as_str()), Some("0.7"));
+        assert_eq!(persona.vars.get("max_tokens").map(|s| s.as_str()), Some("4096"));
     }
 
     #[test]
@@ -259,7 +292,7 @@ You are a software engineer."#;
         assert!(result.contains_key("team/reviewer"));
         let p = &result["team/reviewer"];
         assert_eq!(p.runtime.as_deref(), Some("claude"));
-        assert_eq!(p.model.as_deref(), Some("opus"));
+        assert_eq!(p.vars.get("model").map(|s| s.as_str()), Some("opus"));
         assert_eq!(p.instructions, "You review code.");
 
         std::fs::remove_dir_all(&tmp).ok();

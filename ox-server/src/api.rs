@@ -547,10 +547,12 @@ async fn dispatch_step(
             });
         }
 
-        // Inject persona's model into runtime fields if not already set
-        if let (Some(model), Some(step_rt)) = (&persona.model, &mut step_runtime) {
-            step_rt.fields.entry("model".to_string())
-                .or_insert_with(|| toml::Value::String(model.clone()));
+        // Inject persona vars as runtime field defaults (model, temperature, etc.)
+        if let Some(step_rt) = &mut step_runtime {
+            for (key, val) in &persona.vars {
+                step_rt.fields.entry(key.clone())
+                    .or_insert_with(|| toml::Value::String(val.clone()));
+            }
         }
 
         // Inject step prompt into runtime fields if not already set
