@@ -155,11 +155,11 @@ pub struct StepDef {
 }
 
 /// Runtime specification on a step — selects which runtime to use and passes parameters.
-/// In persona-primary mode, `type` is optional — the persona declares the runtime.
+/// In persona-primary mode, `runtime` is optional — the persona declares it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeSpec {
-    #[serde(rename = "type", default)]
-    pub runtime_type: String,
+    #[serde(default)]
+    pub runtime: String,
     #[serde(default)]
     pub tty: bool,
     #[serde(default)]
@@ -620,7 +620,7 @@ branch = "{task_id}"
 push = true
 
 [step.runtime]
-type = "claude"
+runtime = "claude"
 model = "sonnet"
 persona = "inspired/engineer"
 prompt = "Write a proposal."
@@ -652,7 +652,7 @@ action = "merge_to_main"
         assert_eq!(def.steps[0].max_visits, Some(3));
         assert!(def.steps[0].runtime.is_some());
         let rt = def.steps[0].runtime.as_ref().unwrap();
-        assert_eq!(rt.runtime_type, "claude");
+        assert_eq!(rt.runtime, "claude");
         assert_eq!(def.steps[1].transitions.len(), 2);
         assert_eq!(def.steps[1].transitions[0].match_pattern, "pass");
         assert_eq!(def.steps[3].action.as_deref(), Some("merge_to_main"));

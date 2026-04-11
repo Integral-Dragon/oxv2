@@ -20,5 +20,5 @@ branch    = "{branch}"
 push      = true
 
 [step.runtime]
-type = "shell"
+runtime = "shell"
 tty  = true

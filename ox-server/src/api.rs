@@ -547,15 +547,15 @@ async fn dispatch_step(
             match &mut step_runtime {
                 None => {
                     step_runtime = Some(RuntimeSpec {
-                        runtime_type: rt_name.clone(),
+                        runtime: rt_name.clone(),
                         tty: false,
                         env: HashMap::new(),
                         timeout: None,
                         fields: HashMap::new(),
                     });
                 }
-                Some(rt) if rt.runtime_type.is_empty() => {
-                    rt.runtime_type = rt_name.clone();
+                Some(rt) if rt.runtime.is_empty() => {
+                    rt.runtime = rt_name.clone();
                 }
                 _ => {} // step already has an explicit runtime type
             }
@@ -580,7 +580,7 @@ async fn dispatch_step(
 
     let (runtime_value, secret_refs) = if let Some(ref step_rt) = step_runtime {
         // Look up the runtime definition
-        if let Some(runtime_def) = hot.runtimes.get(&step_rt.runtime_type) {
+        if let Some(runtime_def) = hot.runtimes.get(&step_rt.runtime) {
             let secrets = state.bus.projections.secrets();
 
             // Build context variables.
@@ -673,7 +673,7 @@ async fn dispatch_step(
                 }
             }
         } else {
-            tracing::warn!(runtime_type = %step_rt.runtime_type, "unknown runtime type");
+            tracing::warn!(runtime = %step_rt.runtime, "unknown runtime");
             (req.runtime.clone(), vec![])
         }
     } else {

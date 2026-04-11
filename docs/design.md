@@ -265,7 +265,7 @@ pub struct StepDef {
 }
 
 pub struct RuntimeSpec {
-    pub runtime_type: String,
+    pub runtime: String,
     pub tty: bool,
     pub env: HashMap<String, String>,
     pub timeout: Option<Duration>,

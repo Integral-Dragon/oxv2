@@ -369,7 +369,7 @@ mod tests {
         };
 
         let step_runtime = RuntimeSpec {
-            runtime_type: "test".into(),
+            runtime: "test".into(),
             tty: false,
             env: HashMap::new(),
             timeout: None,
@@ -429,7 +429,7 @@ mod tests {
         fields.insert("prompt".into(), toml::Value::String("overridden".into()));
 
         let step_runtime = RuntimeSpec {
-            runtime_type: "test".into(),
+            runtime: "test".into(),
             tty: false,
             env: HashMap::new(),
             timeout: None,
