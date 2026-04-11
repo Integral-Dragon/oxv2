@@ -39,7 +39,7 @@ struct RunnerView {
 /// Local view of an execution, rebuilt from SSE events.
 #[derive(Debug)]
 struct ExecutionView {
-    task_id: String,
+    vars: HashMap<String, String>,
     workflow: String,
     status: String, // "running", "completed", "escalated", "cancelled"
     phase: ExecPhase,
@@ -251,7 +251,7 @@ impl Herder {
 
             "execution.created" => {
                 let d: ExecutionCreatedData = serde_json::from_value(envelope.data)?;
-                tracing::info!(exec = %d.execution_id, task = %d.task_id, workflow = %d.workflow, "execution created");
+                tracing::info!(exec = %d.execution_id, workflow = %d.workflow, "execution created");
 
                 // Determine first step
                 let first_step = self.workflows.get(&d.workflow)
@@ -262,7 +262,7 @@ impl Herder {
                 self.executions.insert(
                     d.execution_id.0.clone(),
                     ExecutionView {
-                        task_id: d.task_id,
+                        vars: d.vars,
                         workflow: d.workflow,
                         status: "running".into(),
                         phase: ExecPhase::Ready { step: first_step, attempt: 1 },
@@ -707,12 +707,23 @@ impl Herder {
             Some("merge_to_main") => {
                 tracing::info!(exec = %exec_id, step = %step, attempt, "executing merge_to_main action");
 
-                let task_id = match self.executions.get(exec_id) {
-                    Some(e) => e.task_id.clone(),
+                // Resolve branch from workspace spec + execution vars
+                let branch = match self.executions.get(exec_id) {
+                    Some(e) => {
+                        let raw = step_def.workspace.as_ref()
+                            .and_then(|w| w.branch.as_deref())
+                            .unwrap_or("main")
+                            .to_string();
+                        let mut resolved = raw;
+                        for (k, v) in &e.vars {
+                            resolved = resolved.replace(&format!("{{{k}}}"), v);
+                        }
+                        resolved
+                    }
                     None => return,
                 };
 
-                match self.client.merge_to_main(exec_id, step, &task_id, step_def.squash).await {
+                match self.client.merge_to_main(exec_id, step, &branch, step_def.squash).await {
                     Ok(_) => {
                         tracing::info!(exec = %exec_id, "merge_to_main succeeded");
                         // Report done+confirm events for the action step
@@ -751,12 +762,12 @@ impl Herder {
     /// Dispatch all Ready(runner step) executions to idle runners.
     async fn dispatch_ready_steps(&mut self) {
         // Collect all executions that are Ready for a runner step
-        let ready: Vec<(String, String, u32, String)> = self.executions.iter()
+        let ready: Vec<(String, String, u32, HashMap<String, String>)> = self.executions.iter()
             .filter(|(_, e)| e.status == "running")
             .filter_map(|(id, e)| {
                 if let ExecPhase::Ready { ref step, attempt } = e.phase {
                     if !self.is_action_step(id, step) {
-                        Some((id.clone(), step.clone(), attempt, e.task_id.clone()))
+                        Some((id.clone(), step.clone(), attempt, e.vars.clone()))
                     } else {
                         None
                     }
@@ -766,7 +777,7 @@ impl Herder {
             })
             .collect();
 
-        for (exec_id, step, attempt, task_id) in ready {
+        for (exec_id, step, attempt, vars) in ready {
             let runner_id = match self.find_idle_runner() {
                 Some(r) => r,
                 None => break, // No more idle runners
@@ -817,7 +828,7 @@ impl Herder {
                     step: step.clone(),
                     runner_id: runner_id.clone(),
                     attempt,
-                    task_id,
+                    vars,
                     runtime,
                     workspace,
                 })
@@ -870,9 +881,9 @@ impl Herder {
                     continue;
                 }
 
-            // Dedup: skip if there's already an active execution
+            // Dedup: skip if there's already an active execution for this node
             let dominated = self.executions.values().any(|e| {
-                e.task_id == node_id
+                e.vars.get("task_id").map(|s| s.as_str()) == Some(node_id)
                     && e.workflow == trigger.workflow
                     && (e.status == "running"
                         || e.status == "completed"
@@ -905,9 +916,13 @@ impl Herder {
                 "trigger matched, creating execution"
             );
 
+            // For cx-triggered executions, pass node_id as task_id var
+            let mut trigger_vars = HashMap::new();
+            trigger_vars.insert("task_id".to_string(), node_id.to_string());
+
             match self
                 .client
-                .create_execution(node_id, &trigger.workflow, &trigger.on)
+                .create_execution(&trigger.workflow, &trigger.on, trigger_vars)
                 .await
             {
                 Ok(exec_id) => {

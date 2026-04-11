@@ -140,7 +140,7 @@ These are always available, resolved by ox-runner at execution time:
 | `{tmp_dir}` | Absolute path to the runner's temp directory (outside git) |
 | `{home}` | Runner process HOME directory |
 | `{prompt_file}` | Absolute path to the assembled prompt file (in tmp_dir) |
-| `{task_id}` | The cx node ID for this execution |
+| `{varname}` | Any variable from the execution's `vars` map (e.g. `{task_id}`, `{branch}`) |
 
 ### Secret References
 

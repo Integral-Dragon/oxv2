@@ -312,9 +312,9 @@ is the only inter-attempt communication channel.
 
 ### Addressing
 
-Execution IDs are `{task_id}-e{N}` where N is sequential per task
-(`aJuO-e1`, `aJuO-e2`). A task can have multiple executions (re-runs
-after escalation, manual re-triggers).
+Execution IDs are server-generated synthetic identifiers
+(`e-{epoch}-{seq}`). They carry no semantic meaning — the execution's
+purpose is captured in its `vars` map and workflow name.
 
 Step attempts are addressed as `{execution_id}/{step}/{attempt}`:
 
@@ -342,7 +342,7 @@ Runner events (`runner.registered`, `runner.drained`,
 ### Execution events
 
 ```
-execution.created   { execution_id, task_id, workflow, trigger }
+execution.created   { execution_id, workflow, trigger, vars }
 execution.completed { execution_id }
 execution.escalated { execution_id, step, reason }
 execution.cancelled { execution_id, reason }

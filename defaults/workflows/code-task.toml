@@ -7,6 +7,9 @@
 name        = "code-task"
 description = "Propose -> review plan -> implement -> review code -> merge"
 
+[workflow.vars]
+task_id = { required = true, description = "cx task identifier" }
+
 # -- Propose ------------------------------------------------------------------
 
 [[step]]

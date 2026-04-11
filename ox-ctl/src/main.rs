@@ -237,7 +237,7 @@ async fn cmd_exec_list(
             println!(
                 "{:<14} {:<8} {:<16} {:<14} {:<12}",
                 e.get("id").and_then(|v| v.as_str()).unwrap_or("-"),
-                e.get("task_id").and_then(|v| v.as_str()).unwrap_or("-"),
+                e.get("vars").and_then(|v| v.get("task_id")).and_then(|v| v.as_str()).unwrap_or("-"),
                 e.get("workflow").and_then(|v| v.as_str()).unwrap_or("-"),
                 step,
                 display_status,
@@ -252,7 +252,7 @@ async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "id": exec.id,
-            "task_id": exec.task_id,
+            "vars": exec.vars,
             "workflow": exec.workflow,
             "status": exec.status,
             "current_step": exec.current_step,
@@ -260,7 +260,11 @@ async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
         }))?);
     } else {
         println!("Execution: {}", exec.id);
-        println!("Task:      {}", exec.task_id);
+        if !exec.vars.is_empty() {
+            for (k, v) in &exec.vars {
+                println!("  {k}: {v}");
+            }
+        }
         println!("Workflow:  {}", exec.workflow);
         println!("Status:    {}", exec.status);
         println!();

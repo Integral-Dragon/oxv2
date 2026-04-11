@@ -216,23 +216,33 @@ Response:
 
 #### `POST /api/executions`
 
-Create an execution. Called by the herder when a trigger fires.
+Create an execution. Called by the herder when a trigger fires, or
+manually via ox-ctl / API.
 
 Request:
 
 ```json
 {
-  "task_id": "aJuO",
   "workflow": "code-task",
-  "trigger": "cx.task_ready"
+  "trigger": "cx.task_ready",
+  "vars": {
+    "task_id": "aJuO"
+  }
 }
 ```
+
+`vars` is optional (defaults to `{}`). The server validates vars against
+the workflow's `[workflow.vars]` declarations — rejects if a required var
+is missing, fills defaults for omitted optional vars.
+
+`execution_id` is server-generated (`e-{epoch}-{seq}`), not derived from
+any input field.
 
 Response (201):
 
 ```json
 {
-  "execution_id": "aJuO-e1"
+  "execution_id": "e-1744364800-42"
 }
 ```
 
@@ -333,9 +343,14 @@ Request:
 
 ```json
 {
-  "attempt": 1
+  "attempt": 1,
+  "connect_addr": "192.168.1.5:43210"
 }
 ```
+
+`connect_addr` is optional. Present only for interactive steps
+(`tty = true`) — it is the TCP address of the PTY bridge that clients
+connect to. For standard (non-tty) steps this field is omitted.
 
 Response: 204. Appends `step.running`.
 

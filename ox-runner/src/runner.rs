@@ -437,10 +437,7 @@ impl Runner {
 
         // 6. Build common env vars
         env_vars.insert("OX_SOCKET".into(), socket_path.to_string_lossy().to_string());
-        env_vars.insert(
-            "OX_TASK_ID".into(),
-            assignment.execution_id.split('-').next().unwrap_or("").to_string(),
-        );
+        env_vars.insert("OX_EXECUTION_ID".into(), assignment.execution_id.clone());
 
         // Add ox bin directory to PATH so ox-rt is available
         let current_path = std::env::var("PATH").unwrap_or_default();

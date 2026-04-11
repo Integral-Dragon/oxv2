@@ -43,9 +43,9 @@ pub struct ExecutionsState {
 #[derive(Debug, Clone)]
 pub struct ExecutionState {
     pub id: ExecutionId,
-    pub task_id: String,
     pub workflow: String,
     pub status: ExecutionStatus,
+    pub vars: HashMap<String, String>,
     pub attempts: Vec<StepAttemptState>,
     pub current_step: Option<String>,
     pub current_attempt: u32,
@@ -359,9 +359,9 @@ impl Projections {
                         data.execution_id.0.clone(),
                         ExecutionState {
                             id: data.execution_id,
-                            task_id: data.task_id,
                             workflow: data.workflow,
                             status: ExecutionStatus::Running,
+                            vars: data.vars,
                             attempts: vec![],
                             current_step: None,
                             current_attempt: 0,

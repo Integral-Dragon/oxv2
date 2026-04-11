@@ -118,9 +118,10 @@ pub struct RunnerHeartbeatMissedData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionCreatedData {
     pub execution_id: ExecutionId,
-    pub task_id: String,
     pub workflow: String,
     pub trigger: String,
+    #[serde(default)]
+    pub vars: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

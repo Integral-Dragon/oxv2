@@ -38,7 +38,8 @@ pub struct CreateExecutionResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExecutionDetail {
     pub id: String,
-    pub task_id: String,
+    #[serde(default)]
+    pub vars: HashMap<String, String>,
     pub workflow: String,
     pub status: String,
     pub current_step: Option<String>,
@@ -82,9 +83,10 @@ struct RegisterRequest {
 
 #[derive(Serialize)]
 struct CreateExecutionRequest {
-    task_id: String,
     workflow: String,
     trigger: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    vars: HashMap<String, String>,
 }
 
 /// Parameters for dispatching a step to a runner.
@@ -93,7 +95,7 @@ pub struct DispatchStepParams {
     pub step: String,
     pub runner_id: RunnerId,
     pub attempt: u32,
-    pub task_id: String,
+    pub vars: HashMap<String, String>,
     pub runtime: serde_json::Value,
     pub workspace: serde_json::Value,
 }
@@ -102,7 +104,7 @@ pub struct DispatchStepParams {
 struct DispatchRequest {
     runner_id: RunnerId,
     attempt: u32,
-    task_id: String,
+    vars: HashMap<String, String>,
     runtime: serde_json::Value,
     workspace: serde_json::Value,
 }
@@ -225,17 +227,17 @@ impl OxClient {
 
     pub async fn create_execution(
         &self,
-        task_id: &str,
         workflow: &str,
         trigger: &str,
+        vars: HashMap<String, String>,
     ) -> Result<ExecutionId> {
         let resp: CreateExecutionResponse = self
             .http
             .post(self.url("/api/executions"))
             .json(&CreateExecutionRequest {
-                task_id: task_id.to_string(),
                 workflow: workflow.to_string(),
                 trigger: trigger.to_string(),
+                vars,
             })
             .send()
             .await?
@@ -310,7 +312,7 @@ impl OxClient {
             .json(&DispatchRequest {
                 runner_id: params.runner_id.clone(),
                 attempt: params.attempt,
-                task_id: params.task_id.clone(),
+                vars: params.vars.clone(),
                 runtime: params.runtime.clone(),
                 workspace: params.workspace.clone(),
             })

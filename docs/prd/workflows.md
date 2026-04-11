@@ -138,7 +138,7 @@ environment before running the agent.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `git_clone` | `false` | Clone the repo from ox-server's git endpoint |
-| `branch` | — | Branch to check out. `{task_id}` is interpolated. Created from main if it does not exist |
+| `branch` | — | Branch to check out. Execution vars are interpolated (e.g. `{task_id}`). Created from main if it does not exist |
 | `push` | `false` | Whether the step is expected to push commits. Enables `no_commits` signal detection |
 | `read_only` | `false` | Check out in detached HEAD mode. No commits allowed |
 
@@ -441,7 +441,7 @@ Fired by infrastructure events. Built-in — not configurable.
 
 ## Execution Lifecycle
 
-1. **Trigger fires** → herder creates execution (`{task_id}-e{N}`)
+1. **Trigger fires** → herder creates execution (synthetic ID)
 2. **Dispatch** → herder finds an idle runner, emits `step.dispatched`
 3. **Execute** → runner provisions workspace, spawns runtime
 4. **Complete** → `step.done` → signals → `step.confirmed`
@@ -450,9 +450,8 @@ Fired by infrastructure events. Built-in — not configurable.
 7. **cx events** → ox-server diffs `.complex/`, emits `cx.task_integrated`
 8. **Done** → `execution.completed`
 
-Each execution ID is `{task_id}-e{N}` where N is sequential per task
-(`aJuO-e1`, `aJuO-e2`). A task can have multiple executions (retries,
-re-runs). Each execution belongs to exactly one task.
+Execution IDs are server-generated (`e-{epoch}-{seq}`). A cx task can
+have multiple executions (retries, re-runs).
 
 ### Two-phase event processing
 

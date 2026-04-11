@@ -242,7 +242,7 @@ branch = "{task_id}"
 ```toml
 [step.workspace]
 git_clone = true          # Clone the repo into the step workspace
-branch    = "{task_id}"   # Create or checkout this branch
+branch    = "{task_id}"   # Create or checkout this branch (interpolated from vars)
 push      = true          # Push changes after step completes
 read_only = false
 ```
@@ -352,11 +352,12 @@ source = "proxy"
 ```
 
 **Interactive (TTY) mode** -- when a step sets `tty = true`, ox-runner
-allocates a PTY and relays I/O through ox-server via websocket. Attach
-to a running interactive step:
+allocates a PTY and starts a TCP bridge. The bridge address is advertised
+in the `step.running` event's `connect_addr` field. Connect with any TCP
+client:
 
 ```
-ox-ctl exec attach <execution-id> <step>
+socat - TCP:<runner-host>:<port>
 ```
 
 The runtime's `interactive_cmd` is used instead of `cmd`. PTY output is
@@ -371,20 +372,20 @@ type = "shell"
 tty = true
 [step.workspace]
 git_clone = true
-branch = "{task_id}"
+branch = "{branch}"
 push = true
 ```
 
 A built-in `interactive` workflow provides a single-step interactive shell
-session on a feature branch. Launch it and attach:
+session. Launch it:
 
 ```bash
 curl -s -X POST http://localhost:4840/api/executions \
   -H 'Content-Type: application/json' \
-  -d '{"task_id":"mywork","workflow":"interactive","trigger":"manual"}'
-
-ox-ctl exec attach mywork-e1 shell
+  -d '{"workflow":"interactive","vars":{"branch":"my-experiment"}}'
 ```
+
+Then connect to the `connect_addr` from the `step.running` event.
 
 ## ox-rt: step-to-runner communication
 
@@ -409,6 +410,7 @@ ox-rt artifact-done proposal     # Close an artifact stream
 | `OX_ENVIRONMENT`  | runner     | Environment label (default: local)       |
 | `OX_WORKSPACE_DIR`| runner     | Base dir for step workspaces             |
 | `OX_SOCKET`       | step procs | Unix socket for ox-rt (set by runner)    |
+| `OX_EXECUTION_ID` | step procs | Current execution ID (set by runner)     |
 | `RUST_LOG`        | all        | Log level (default: info)                |
 
 ## Quick start

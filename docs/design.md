@@ -172,8 +172,7 @@ pub struct Seq(pub u64);
 /// Format: "run-{4hex}" e.g. "run-4a2f"
 pub struct RunnerId(pub String);
 
-/// Execution identifier. Format: "{task_id}-e{N}"
-/// e.g. "aJuO-e1". N is sequential per task.
+/// Execution identifier. Server-generated: "e-{epoch}-{seq}"
 pub struct ExecutionId(pub String);
 
 /// Addresses a specific step attempt within an execution.
@@ -316,8 +315,8 @@ pub struct ExecutionsState {
 
 pub struct ExecutionState {
     pub id: ExecutionId,
-    pub task_id: String,
     pub workflow: String,
+    pub vars: HashMap<String, String>,
     pub status: ExecutionStatus,
     pub attempts: Vec<StepAttemptState>,
     pub current_step: Option<String>,

@@ -337,7 +337,7 @@ async fn list_executions(
                     return false;
                 }
             if let Some(ref t) = query.task
-                && &e.task_id != t {
+                && e.vars.get("task_id").map(|s| s.as_str()) != Some(t) {
                     return false;
                 }
             true
@@ -351,7 +351,7 @@ async fn list_executions(
 fn execution_summary(e: &projections::ExecutionState) -> serde_json::Value {
     serde_json::json!({
         "id": e.id.0,
-        "task_id": e.task_id,
+        "vars": e.vars,
         "workflow": e.workflow,
         "status": format!("{:?}", e.status).to_lowercase(),
         "current_step": e.current_step,
@@ -361,10 +361,11 @@ fn execution_summary(e: &projections::ExecutionState) -> serde_json::Value {
 
 #[derive(Deserialize)]
 struct CreateExecutionRequest {
-    task_id: String,
     workflow: String,
     #[serde(default = "default_trigger")]
     trigger: String,
+    #[serde(default)]
+    vars: HashMap<String, String>,
 }
 
 fn default_trigger() -> String {
@@ -376,28 +377,31 @@ async fn create_execution(
     Json(req): Json<CreateExecutionRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
     // Validate workflow exists
-    if !state.workflows.contains_key(&req.workflow) {
-        return Err((
+    let workflow = state.workflows.get(&req.workflow).ok_or_else(|| {
+        (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": format!("unknown workflow: {}", req.workflow) })),
-        ));
-    }
+        )
+    })?;
 
-    // Generate execution ID: {task_id}-e{N}
-    let execs = state.bus.projections.executions();
-    let n = execs
-        .executions
-        .values()
-        .filter(|e| e.task_id == req.task_id)
-        .count()
-        + 1;
-    let execution_id = ExecutionId(format!("{}-e{n}", req.task_id));
+    // Validate vars against workflow declarations
+    let vars = workflow.validate_vars(&req.vars).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })?;
+
+    // Generate synthetic execution ID: e-{epoch_secs}-{seq}
+    let epoch = chrono::Utc::now().timestamp();
+    let seq = state.bus.current_seq() + 1;
+    let execution_id = ExecutionId(format!("e-{epoch}-{seq}"));
 
     let data = ExecutionCreatedData {
         execution_id: execution_id.clone(),
-        task_id: req.task_id,
         workflow: req.workflow,
         trigger: req.trigger,
+        vars,
     };
 
     state
@@ -442,7 +446,7 @@ async fn get_execution(
 
     Ok(Json(serde_json::json!({
         "id": exec.id.0,
-        "task_id": exec.task_id,
+        "vars": exec.vars,
         "workflow": exec.workflow,
         "status": format!("{:?}", exec.status).to_lowercase(),
         "current_step": exec.current_step,
@@ -483,7 +487,7 @@ struct DispatchStepRequest {
     runner_id: RunnerId,
     attempt: u32,
     #[serde(default)]
-    task_id: String,
+    vars: HashMap<String, String>,
     runtime: serde_json::Value,
     workspace: serde_json::Value,
     #[serde(default)]
@@ -506,9 +510,8 @@ async fn dispatch_step(
         if let Some(runtime_def) = state.runtimes.get(&step_rt.runtime_type) {
             let secrets = state.bus.projections.secrets();
 
-            // Build context variables
-            let mut context_vars = std::collections::HashMap::new();
-            context_vars.insert("task_id".to_string(), req.task_id.clone());
+            // Build context variables from execution vars
+            let mut context_vars = req.vars.clone();
             context_vars.insert("workspace".to_string(), ".".to_string());
 
             let secret_refs = collect_secret_refs(runtime_def, step_rt);
@@ -548,8 +551,8 @@ async fn dispatch_step(
         (req.runtime.clone(), vec![])
     };
 
-    // Interpolate workspace fields (e.g. branch = "{task_id}")
-    let workspace_value = interpolate_workspace(&req.workspace, &req.task_id);
+    // Interpolate vars in workspace fields (e.g. branch = "{task_id}")
+    let workspace_value = interpolate_workspace(&req.workspace, &req.vars);
 
     let data = StepDispatchedData {
         execution_id: ExecutionId(params.id),
@@ -572,11 +575,13 @@ async fn dispatch_step(
     StatusCode::NO_CONTENT
 }
 
-/// Interpolate `{task_id}` in workspace fields (e.g. branch).
-fn interpolate_workspace(workspace: &serde_json::Value, task_id: &str) -> serde_json::Value {
-    let s = serde_json::to_string(workspace).unwrap_or_default();
-    let interpolated = s.replace("{task_id}", task_id);
-    serde_json::from_str(&interpolated).unwrap_or_else(|_| workspace.clone())
+/// Interpolate all `{varname}` placeholders in workspace fields.
+fn interpolate_workspace(workspace: &serde_json::Value, vars: &HashMap<String, String>) -> serde_json::Value {
+    let mut s = serde_json::to_string(workspace).unwrap_or_default();
+    for (k, v) in vars {
+        s = s.replace(&format!("{{{k}}}"), v);
+    }
+    serde_json::from_str(&s).unwrap_or_else(|_| workspace.clone())
 }
 
 #[derive(Deserialize)]
@@ -909,10 +914,10 @@ async fn evaluate_triggers(
 
         let workflow_name = &trigger.workflow;
 
-        // Dedup check: is there already a running execution for this (task_id, workflow)?
+        // Dedup check: is there already a running execution for this (node, workflow)?
         if !req.force {
             let already_running = execs.executions.values().any(|e| {
-                e.task_id == req.node_id
+                e.vars.get("task_id").map(|s| s.as_str()) == Some(&req.node_id)
                     && e.workflow == *workflow_name
                     && e.status == projections::ExecutionStatus::Running
             });
@@ -922,19 +927,18 @@ async fn evaluate_triggers(
         }
 
         // Create execution
-        let n = execs
-            .executions
-            .values()
-            .filter(|e| e.task_id == req.node_id)
-            .count()
-            + 1;
-        let execution_id = ExecutionId(format!("{}-e{n}", req.node_id));
+        let epoch = chrono::Utc::now().timestamp();
+        let seq = state.bus.current_seq() + 1;
+        let execution_id = ExecutionId(format!("e-{epoch}-{seq}"));
+
+        let mut vars = HashMap::new();
+        vars.insert("task_id".to_string(), req.node_id.clone());
 
         let data = ExecutionCreatedData {
             execution_id: execution_id.clone(),
-            task_id: req.node_id.clone(),
             workflow: workflow_name.clone(),
             trigger: trigger.on.clone(),
+            vars,
         };
 
         state

@@ -8,12 +8,15 @@
 name        = "interactive"
 description = "Interactive shell session on a feature branch"
 
+[workflow.vars]
+branch = { default = "main", description = "branch to work on" }
+
 [[step]]
 name = "shell"
 
 [step.workspace]
 git_clone = true
-branch    = "{task_id}"
+branch    = "{branch}"
 push      = true
 
 [step.runtime]

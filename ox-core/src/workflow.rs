@@ -4,12 +4,25 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+/// A workflow variable declaration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VarDef {
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// A complete workflow definition, loaded from TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDef {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub vars: HashMap<String, VarDef>,
     #[serde(default, rename = "step")]
     pub steps: Vec<StepDef>,
 }
@@ -27,6 +40,8 @@ struct WorkflowHeader {
     name: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    vars: HashMap<String, VarDef>,
 }
 
 impl WorkflowDef {
@@ -36,6 +51,7 @@ impl WorkflowDef {
         Ok(Self {
             name: file.workflow.name,
             description: file.workflow.description,
+            vars: file.workflow.vars,
             steps: file.step,
         })
     }
@@ -44,6 +60,30 @@ impl WorkflowDef {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Ok(Self::from_toml(&content)?)
+    }
+
+    /// Validate caller-provided vars against declarations.
+    ///
+    /// Returns the merged variable map: caller values + defaults for
+    /// omitted optional vars. Returns an error if a required var is missing.
+    pub fn validate_vars(
+        &self,
+        input: &HashMap<String, String>,
+    ) -> Result<HashMap<String, String>, String> {
+        let mut merged = input.clone();
+
+        for (name, def) in &self.vars {
+            if merged.contains_key(name) {
+                continue;
+            }
+            if let Some(ref default) = def.default {
+                merged.insert(name.clone(), default.clone());
+            } else if def.required {
+                return Err(format!("missing required variable: {name}"));
+            }
+        }
+
+        Ok(merged)
     }
 }
 
@@ -143,6 +183,7 @@ pub struct TriggersFile {
 /// Step graph indexed by name for O(1) lookup with preserved declaration order.
 pub struct WorkflowEngine {
     pub name: String,
+    pub vars: HashMap<String, VarDef>,
     pub steps: IndexMap<String, StepDef>,
 }
 
@@ -156,14 +197,36 @@ pub enum StepAdvance {
 
 impl WorkflowEngine {
     pub fn from_def(def: WorkflowDef) -> Self {
+        let vars = def.vars;
         let mut steps = IndexMap::new();
         for step in def.steps {
             steps.insert(step.name.clone(), step);
         }
         Self {
             name: def.name,
+            vars,
             steps,
         }
+    }
+
+    /// Validate caller-provided vars against declarations.
+    /// See [`WorkflowDef::validate_vars`] for details.
+    pub fn validate_vars(
+        &self,
+        input: &HashMap<String, String>,
+    ) -> Result<HashMap<String, String>, String> {
+        let mut merged = input.clone();
+        for (name, def) in &self.vars {
+            if merged.contains_key(name) {
+                continue;
+            }
+            if let Some(ref default) = def.default {
+                merged.insert(name.clone(), default.clone());
+            } else if def.required {
+                return Err(format!("missing required variable: {name}"));
+            }
+        }
+        Ok(merged)
     }
 
     /// Determine the next step after the current step completes with the given output.
@@ -330,6 +393,7 @@ mod tests {
         let def = WorkflowDef {
             name: "test".into(),
             description: String::new(),
+            vars: HashMap::new(),
             steps: vec![
                 StepDef {
                     name: "propose".into(),
@@ -518,6 +582,9 @@ mod tests {
 name = "code-task"
 description = "Propose → review → implement → merge"
 
+[workflow.vars]
+task_id = { required = true, description = "cx task identifier" }
+
 [[step]]
 name = "propose"
 output = "diff"
@@ -567,9 +634,65 @@ action = "merge_to_main"
         assert_eq!(def.steps[1].transitions[0].match_pattern, "pass");
         assert_eq!(def.steps[3].action.as_deref(), Some("merge_to_main"));
 
+        // Verify vars parsed
+        assert!(def.vars.contains_key("task_id"));
+        assert!(def.vars["task_id"].required);
+
         // Verify it can be used as engine
         let engine = WorkflowEngine::from_def(def);
         assert_eq!(engine.first_step(), Some("propose"));
+    }
+
+    #[test]
+    fn validate_vars_required() {
+        let mut vars = HashMap::new();
+        vars.insert("task_id".into(), VarDef {
+            required: true,
+            default: None,
+            description: None,
+        });
+        let def = WorkflowDef {
+            name: "test".into(),
+            description: String::new(),
+            vars,
+            steps: vec![],
+        };
+
+        // Missing required var
+        let result = def.validate_vars(&HashMap::new());
+        assert!(result.is_err());
+
+        // Provided
+        let mut input = HashMap::new();
+        input.insert("task_id".into(), "abc".into());
+        let result = def.validate_vars(&input).unwrap();
+        assert_eq!(result["task_id"], "abc");
+    }
+
+    #[test]
+    fn validate_vars_defaults() {
+        let mut vars = HashMap::new();
+        vars.insert("branch".into(), VarDef {
+            required: false,
+            default: Some("main".into()),
+            description: None,
+        });
+        let def = WorkflowDef {
+            name: "test".into(),
+            description: String::new(),
+            vars,
+            steps: vec![],
+        };
+
+        // No input — default fills in
+        let result = def.validate_vars(&HashMap::new()).unwrap();
+        assert_eq!(result["branch"], "main");
+
+        // Caller overrides default
+        let mut input = HashMap::new();
+        input.insert("branch".into(), "feature-x".into());
+        let result = def.validate_vars(&input).unwrap();
+        assert_eq!(result["branch"], "feature-x");
     }
 
     #[test]
