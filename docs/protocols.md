@@ -243,7 +243,7 @@ When the runner receives `step.dispatched` via SSE:
 ```
 1. Parse the resolved step spec from the event data
 2. Provision workspace
-   └─ git clone http://<ox-server>/git/ --branch <branch>
+   └─ git clone http://<ox-server>/git/ --branch <branch>  (full clone, not --single-branch)
 3. Place files from the resolved spec (persona content, secret files)
 4. Start API proxies (if declared in spec)
 5. Create Unix socket at $OX_SOCKET

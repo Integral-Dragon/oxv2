@@ -241,7 +241,7 @@ branch = "{task_id}"
 
 ```toml
 [step.workspace]
-git_clone = true          # Clone the repo into the step workspace
+git_clone = true          # Full clone — origin/main always available for diff/rebase
 branch    = "{task_id}"   # Create or checkout this branch (interpolated from vars)
 push      = true          # Push changes after step completes
 read_only = false

@@ -47,8 +47,10 @@ useful for debugging ox-runner itself.
 
 ## Branch Lifecycle
 
-1. **Clone**: Runner clones from ox-server. If the branch doesn't
-   exist yet, it clones main and creates the branch locally.
+1. **Clone**: Runner does a full clone from ox-server (not
+   `--single-branch`) so `origin/main` is always available for
+   diffing and rebasing. If the branch doesn't exist yet, it clones
+   main and creates the branch locally.
 
 2. **Work**: Agent makes changes, runs `cx comment`, edits code,
    commits to the branch.

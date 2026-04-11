@@ -142,7 +142,9 @@ environment before running the agent.
 | `push` | `false` | Whether the step is expected to push commits. Enables `no_commits` signal detection |
 | `read_only` | `false` | Check out in detached HEAD mode. No commits allowed |
 
-Each step gets a fresh clone. No state carries over between steps via the
+Each step gets a fresh full clone (not `--single-branch`). Agents always
+have `origin/main` available for `git diff origin/main..HEAD` and
+`git rebase origin/main`. No state carries over between steps via the
 filesystem — all inter-step communication happens through cx comments and
 the `prev_output` value.
 
