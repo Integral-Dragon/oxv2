@@ -96,6 +96,10 @@ pub struct DispatchStepParams {
     pub runner_id: RunnerId,
     pub attempt: u32,
     pub vars: HashMap<String, String>,
+    /// Persona name for this step (persona-primary path).
+    pub persona: Option<String>,
+    /// Step-level prompt.
+    pub prompt: Option<String>,
     pub runtime: serde_json::Value,
     pub workspace: serde_json::Value,
 }
@@ -105,6 +109,10 @@ struct DispatchRequest {
     runner_id: RunnerId,
     attempt: u32,
     vars: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    persona: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
     runtime: serde_json::Value,
     workspace: serde_json::Value,
 }
@@ -326,6 +334,8 @@ impl OxClient {
                 runner_id: params.runner_id.clone(),
                 attempt: params.attempt,
                 vars: params.vars.clone(),
+                persona: params.persona.clone(),
+                prompt: params.prompt.clone(),
                 runtime: params.runtime.clone(),
                 workspace: params.workspace.clone(),
             })

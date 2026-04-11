@@ -784,14 +784,19 @@ impl Herder {
                 None => break, // No more idle runners
             };
 
-            // Look up runtime and workspace from workflow
-            let (runtime, workspace) = {
+            // Look up persona, prompt, runtime, and workspace from workflow
+            let (persona, prompt, runtime, workspace) = {
                 let exec = self.executions.get(&exec_id);
                 let workflow_name = exec.map(|e| e.workflow.as_str());
-                workflow_name
-                    .and_then(|wf| self.workflows.get(wf))
-                    .and_then(|engine| engine.steps.get(&step))
-                    .map(|step_def| {
+                let wf_and_step = workflow_name
+                    .and_then(|wf| self.workflows.get(wf).map(|engine| (wf, engine)));
+
+                if let Some((_wf_name, engine)) = &wf_and_step {
+                    if let Some(step_def) = engine.steps.get(&step) {
+                        // Resolve persona: step-level overrides workflow-level
+                        let persona = step_def.persona.clone()
+                            .or_else(|| engine.persona.clone());
+                        let prompt = step_def.prompt.clone();
                         let runtime = step_def
                             .runtime
                             .as_ref()
@@ -802,9 +807,13 @@ impl Herder {
                             .as_ref()
                             .map(|w| serde_json::to_value(w).unwrap_or_default())
                             .unwrap_or_default();
-                        (runtime, workspace)
-                    })
-                    .unwrap_or_else(|| (serde_json::json!({}), serde_json::json!({})))
+                        (persona, prompt, runtime, workspace)
+                    } else {
+                        (None, None, serde_json::json!({}), serde_json::json!({}))
+                    }
+                } else {
+                    (None, None, serde_json::json!({}), serde_json::json!({}))
+                }
             };
 
             tracing::info!(
@@ -830,6 +839,8 @@ impl Herder {
                     runner_id: runner_id.clone(),
                     attempt,
                     vars,
+                    persona,
+                    prompt,
                     runtime,
                     workspace,
                 })

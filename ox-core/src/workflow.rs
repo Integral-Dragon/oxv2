@@ -38,6 +38,12 @@ pub struct WorkflowDef {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// Default persona for steps that don't specify their own.
+    #[serde(default)]
+    pub persona: Option<String>,
+    /// Workflow-level skills, added to every step.
+    #[serde(default)]
+    pub skills: Vec<String>,
     #[serde(default)]
     pub vars: HashMap<String, VarDef>,
     #[serde(default, rename = "step")]
@@ -58,6 +64,10 @@ struct WorkflowHeader {
     #[serde(default)]
     description: String,
     #[serde(default)]
+    persona: Option<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
     vars: HashMap<String, VarDef>,
 }
 
@@ -68,6 +78,8 @@ impl WorkflowDef {
         Ok(Self {
             name: file.workflow.name,
             description: file.workflow.description,
+            persona: file.workflow.persona,
+            skills: file.workflow.skills,
             vars: file.workflow.vars,
             steps: file.step,
         })
@@ -108,6 +120,16 @@ impl WorkflowDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepDef {
     pub name: String,
+    /// Persona for this step. Overrides the workflow default.
+    #[serde(default)]
+    pub persona: Option<String>,
+    /// Step-level prompt passed to the runtime.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Additional skills for this step (added to runtime + persona + workflow skills).
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Runtime override — escape hatch for overriding persona's runtime/model.
     #[serde(default)]
     pub runtime: Option<RuntimeSpec>,
     #[serde(default)]
@@ -200,6 +222,10 @@ pub struct TriggersFile {
 /// Step graph indexed by name for O(1) lookup with preserved declaration order.
 pub struct WorkflowEngine {
     pub name: String,
+    /// Default persona for steps that don't specify their own.
+    pub persona: Option<String>,
+    /// Workflow-level skills.
+    pub skills: Vec<String>,
     pub vars: HashMap<String, VarDef>,
     pub steps: IndexMap<String, StepDef>,
 }
@@ -221,6 +247,8 @@ impl WorkflowEngine {
         }
         Self {
             name: def.name,
+            persona: def.persona,
+            skills: def.skills,
             vars,
             steps,
         }
@@ -406,33 +434,40 @@ mod option_duration_secs {
 mod tests {
     use super::*;
 
+    fn make_step(name: &str) -> StepDef {
+        StepDef {
+            name: name.into(),
+            persona: None,
+            prompt: None,
+            skills: vec![],
+            runtime: None,
+            action: None,
+            output: None,
+            workspace: None,
+            artifacts: vec![],
+            transitions: vec![],
+            max_retries: None,
+            max_visits: None,
+            max_visits_goto: None,
+            on_fail: None,
+            squash: false,
+        }
+    }
+
     fn make_engine() -> WorkflowEngine {
         let def = WorkflowDef {
             name: "test".into(),
             description: String::new(),
+            persona: None,
+            skills: vec![],
             vars: HashMap::new(),
             steps: vec![
                 StepDef {
-                    name: "propose".into(),
-                    runtime: None,
-                    action: None,
-                    output: None,
-                    workspace: None,
-                    artifacts: vec![],
-                    transitions: vec![],
-                    max_retries: None,
                     max_visits: Some(3),
                     max_visits_goto: Some("tiebreak".into()),
-                    on_fail: None,
-                    squash: false,
+                    ..make_step("propose")
                 },
                 StepDef {
-                    name: "review".into(),
-                    runtime: None,
-                    action: None,
-                    output: None,
-                    workspace: None,
-                    artifacts: vec![],
                     transitions: vec![
                         TransitionDef {
                             match_pattern: "pass".into(),
@@ -447,40 +482,10 @@ mod tests {
                             goto: "escalate".into(),
                         },
                     ],
-                    max_retries: None,
-                    max_visits: None,
-                    max_visits_goto: None,
-                    on_fail: None,
-                    squash: false,
+                    ..make_step("review")
                 },
-                StepDef {
-                    name: "implement".into(),
-                    runtime: None,
-                    action: None,
-                    output: None,
-                    workspace: None,
-                    artifacts: vec![],
-                    transitions: vec![],
-                    max_retries: None,
-                    max_visits: None,
-                    max_visits_goto: None,
-                    on_fail: None,
-                    squash: false,
-                },
-                StepDef {
-                    name: "tiebreak".into(),
-                    runtime: None,
-                    action: None,
-                    output: None,
-                    workspace: None,
-                    artifacts: vec![],
-                    transitions: vec![],
-                    max_retries: None,
-                    max_visits: None,
-                    max_visits_goto: None,
-                    on_fail: None,
-                    squash: false,
-                },
+                make_step("implement"),
+                make_step("tiebreak"),
             ],
         };
         WorkflowEngine::from_def(def)
@@ -673,6 +678,8 @@ action = "merge_to_main"
         let def = WorkflowDef {
             name: "test".into(),
             description: String::new(),
+            persona: None,
+            skills: vec![],
             vars,
             steps: vec![],
         };
@@ -701,6 +708,8 @@ action = "merge_to_main"
         let def = WorkflowDef {
             name: "test".into(),
             description: String::new(),
+            persona: None,
+            skills: vec![],
             vars,
             steps: vec![],
         };

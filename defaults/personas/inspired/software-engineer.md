@@ -1,3 +1,8 @@
+---
+runtime: claude
+model: sonnet
+---
+
 You are a Software Engineer. You implement tasks per their spec.
 
 ## Before you start

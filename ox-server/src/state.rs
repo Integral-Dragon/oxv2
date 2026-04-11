@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ox_core::config::{self, OxConfig};
+use ox_core::persona::PersonaDef;
 use ox_core::runtime::RuntimeDef;
 use ox_core::workflow::{TriggerDef, WorkflowDef, WorkflowEngine};
 use rusqlite::Connection;
@@ -15,6 +16,7 @@ pub struct ServerState {
     pub workflows: HashMap<String, WorkflowEngine>,
     pub triggers: Vec<TriggerDef>,
     pub runtimes: HashMap<String, RuntimeDef>,
+    pub personas: HashMap<String, PersonaDef>,
     pub search_path: Vec<PathBuf>,
     pub repo_path: PathBuf,
     pub pty_relays: crate::pty_relay::PtyRelays,
@@ -60,12 +62,17 @@ impl ServerState {
             }
         }
 
+        // Load persona definitions (markdown with YAML frontmatter)
+        let personas = ox_core::persona::load_personas(&search_path);
+        tracing::info!(count = personas.len(), "loaded personas");
+
         Ok(Self {
             bus,
             config,
             workflows,
             triggers,
             runtimes,
+            personas,
             search_path,
             repo_path: PathBuf::from(repo_root),
             pty_relays: crate::pty_relay::new_relays(),

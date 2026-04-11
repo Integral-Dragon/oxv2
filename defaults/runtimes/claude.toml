@@ -8,16 +8,16 @@
 #
 #   ox-ctl secrets set claude_credentials --value "$(cat ~/.claude/.credentials.json)"
 #
-# The step spec selects the mode:
-#   [step.runtime]
-#   type = "claude"
-#   model = "sonnet"
+# Steps name a persona; the persona declares runtime = "claude".
+# The persona's instructions are available as {persona.instructions}.
+#
+#   [[step]]
 #   persona = "inspired/software-engineer"
-#   prompt = "Implement the feature."
+#   prompt  = "Implement the feature."
 #
 # For interactive steps:
+#   [[step]]
 #   [step.runtime]
-#   type = "claude"
 #   tty = true
 
 [runtime]
@@ -41,9 +41,11 @@ interactive_cmd = ["claude"]
 when = "model"
 args = ["--model", "{var.model}"]
 
-# Assemble persona + prompt into a single prompt file.
+# Assemble persona instructions + prompt into a single prompt file.
+# {persona.instructions} is resolved from the persona's markdown body.
+# {workflow.persona} is kept as a backwards-compat alias.
 [[runtime.files]]
-content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+content = "{persona.instructions}\n\n---\n\n{var.prompt}"
 to      = "{tmp_dir}/ox-prompt"
 
 # Inject OAuth credentials from secrets into the runner's home directory.

@@ -2,14 +2,15 @@
 #
 # Agents use cx for task specs and comments, ox-rt for signaling completion.
 # Each step gets a cloned workspace on a feature branch named after the task.
+# Steps name a persona; the persona declares its runtime and model.
 
 [workflow]
 name        = "code-task"
 description = "Propose -> review plan -> implement -> review code -> merge"
+persona     = "inspired/software-engineer"
 
 [workflow.vars]
 task_id = { required = true, description = "cx task identifier" }
-persona = { type = "file", search_dir = "personas", description = "persona file to load" }
 
 # -- Propose ------------------------------------------------------------------
 
@@ -18,17 +19,7 @@ name      = "propose"
 output    = "diff"
 max_visits      = 3
 max_visits_goto = "plan-tiebreak"
-
-[step.workspace]
-git_clone = true
-branch    = "{task_id}"
-push      = true
-
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/software-engineer"
-prompt  = """Read the task spec and explore the codebase. Write a proposal.
+prompt    = """Read the task spec and explore the codebase. Write a proposal.
 
 1. Read the task spec: `cx show {workflow.task_id}`
 2. Explore the codebase to understand the current state.
@@ -53,6 +44,11 @@ Do NOT modify the issue body -- it is the spec. Write your proposal as
 a comment. Do NOT write code yet.
 """
 
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
 [[step.artifact]]
 name = "proposal"
 
@@ -60,19 +56,10 @@ name = "proposal"
 
 [[step]]
 name        = "review-plan"
+persona     = "inspired/tech-lead"
 output      = "verdict"
 max_retries = 1
-
-[step.workspace]
-git_clone = true
-branch    = "{task_id}"
-push      = true
-
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/tech-lead"
-prompt  = """Review the implementation plan proposed for this task.
+prompt      = """Review the implementation plan proposed for this task.
 
 1. Read the task spec: `cx show {workflow.task_id}`
 2. Read the proposal: `cx comments {workflow.task_id} --tag proposal`
@@ -100,6 +87,11 @@ prompt  = """Review the implementation plan proposed for this task.
    - `ox-rt done "fail:<score>"` if verdict is fail
 """
 
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
 [[step.transition]]
 match = "pass"
 goto  = "implement"
@@ -116,18 +108,9 @@ goto  = "escalate"
 
 [[step]]
 name          = "plan-tiebreak"
+persona       = "inspired/tech-lead"
 max_visits    = 2
-
-[step.workspace]
-git_clone = true
-branch    = "{task_id}"
-push      = true
-
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/tech-lead"
-prompt  = """This task has failed plan review 3 times. You are the tiebreaker.
+prompt        = """This task has failed plan review 3 times. You are the tiebreaker.
 
 1. Read the task spec: `cx show {workflow.task_id}`
 2. Read ALL proposals and reviews: `cx comments {workflow.task_id}`
@@ -143,6 +126,11 @@ prompt  = """This task has failed plan review 3 times. You are the tiebreaker.
      `git push origin {workflow.task_id}`
      `ox-rt done fail`
 """
+
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
 
 [[step.transition]]
 match = "pass"
@@ -163,17 +151,7 @@ name      = "implement"
 output    = "diff"
 max_visits      = 3
 max_visits_goto = "code-tiebreak"
-
-[step.workspace]
-git_clone = true
-branch    = "{task_id}"
-push      = true
-
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/software-engineer"
-prompt  = """Implement the task following the approved proposal.
+prompt    = """Implement the task following the approved proposal.
 
 1. Read the task spec: `cx show {workflow.task_id}`
 2. Read the approved proposal: `cx comments {workflow.task_id} --tag proposal`
@@ -207,23 +185,19 @@ prompt  = """Implement the task following the approved proposal.
    ```
 """
 
-# -- Review Code ---------------------------------------------------------------
-
-[[step]]
-name        = "review-code"
-output      = "verdict"
-max_retries = 2
-
 [step.workspace]
 git_clone = true
 branch    = "{task_id}"
 push      = true
 
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/reviewer"
-prompt  = """Review the implementation against the task spec and approved proposal.
+# -- Review Code ---------------------------------------------------------------
+
+[[step]]
+name        = "review-code"
+persona     = "inspired/reviewer"
+output      = "verdict"
+max_retries = 2
+prompt      = """Review the implementation against the task spec and approved proposal.
 
 1. Read the task spec: `cx show {workflow.task_id}`
 2. Read the proposal: `cx comments {workflow.task_id} --tag proposal`
@@ -263,6 +237,11 @@ prompt  = """Review the implementation against the task spec and approved propos
    ```
 """
 
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
 [[step.transition]]
 match = "pass"
 goto  = "merge"
@@ -279,18 +258,9 @@ goto  = "escalate"
 
 [[step]]
 name          = "code-tiebreak"
+persona       = "inspired/tech-lead"
 max_visits    = 2
-
-[step.workspace]
-git_clone = true
-branch    = "{task_id}"
-push      = true
-
-[step.runtime]
-type    = "claude"
-model   = "sonnet"
-persona = "inspired/tech-lead"
-prompt  = """This task needs tiebreaking — either code review failed repeatedly or
+prompt        = """This task needs tiebreaking — either code review failed repeatedly or
 the merge had conflicts. You are the tiebreaker.
 
 1. Read the task spec: `cx show {workflow.task_id}`
@@ -323,6 +293,11 @@ the merge had conflicts. You are the tiebreaker.
      `ox-rt done fail`
 """
 
+[step.workspace]
+git_clone = true
+branch    = "{task_id}"
+push      = true
+
 [[step.transition]]
 match = "pass"
 goto  = "merge"
@@ -346,4 +321,3 @@ max_retries = 2
 
 [step.workspace]
 branch = "{task_id}"
-

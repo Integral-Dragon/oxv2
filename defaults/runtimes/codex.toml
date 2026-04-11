@@ -14,14 +14,14 @@ cmd = ["codex", "{tmp_dir}/ox-prompt"]
 when = "model"
 args = ["--model", "{var.model}"]
 
-# Assemble persona + prompt into a single prompt file.
+# Assemble persona instructions + prompt into a single prompt file.
 [[runtime.files]]
-content = "{workflow.persona}\n\n---\n\n{var.prompt}"
+content = "{persona.instructions}\n\n---\n\n{var.prompt}"
 to      = "{tmp_dir}/ox-prompt"
 
-# Place persona as system prompt for codex
+# Place persona instructions as system prompt for codex
 [[runtime.files]]
-content = "{workflow.persona}"
+content = "{persona.instructions}"
 to      = "{workspace}/.codex/system-prompt.md"
 
 [runtime.env]

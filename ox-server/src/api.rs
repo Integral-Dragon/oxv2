@@ -506,6 +506,12 @@ struct DispatchStepRequest {
     attempt: u32,
     #[serde(default)]
     vars: HashMap<String, String>,
+    /// Persona name for this step (persona-primary path).
+    #[serde(default)]
+    persona: Option<String>,
+    /// Step-level prompt.
+    #[serde(default)]
+    prompt: Option<String>,
     runtime: serde_json::Value,
     workspace: serde_json::Value,
     #[serde(default)]
@@ -521,7 +527,40 @@ async fn dispatch_step(
     use ox_core::workflow::{RuntimeSpec, VarType};
 
     // Try to resolve the runtime spec if a runtime type is provided
-    let step_runtime: Option<RuntimeSpec> = serde_json::from_value(req.runtime.clone()).ok();
+    let mut step_runtime: Option<RuntimeSpec> = serde_json::from_value(req.runtime.clone()).ok();
+
+    // ── Persona-primary resolution ─────────────────────────────────
+    // If a persona name is provided, look it up and derive runtime/model from it.
+    let persona_def = req.persona.as_ref().and_then(|name| state.personas.get(name));
+
+    if let Some(persona) = &persona_def {
+        // If no runtime spec from the step, build one from the persona
+        if step_runtime.is_none()
+            && let Some(rt_name) = &persona.runtime
+        {
+            step_runtime = Some(RuntimeSpec {
+                runtime_type: rt_name.clone(),
+                tty: false,
+                env: HashMap::new(),
+                timeout: None,
+                fields: HashMap::new(),
+            });
+        }
+
+        // Inject persona's model into runtime fields if not already set
+        if let (Some(model), Some(step_rt)) = (&persona.model, &mut step_runtime) {
+            step_rt.fields.entry("model".to_string())
+                .or_insert_with(|| toml::Value::String(model.clone()));
+        }
+
+        // Inject step prompt into runtime fields if not already set
+        if let (Some(prompt), Some(step_rt)) = (&req.prompt, &mut step_runtime) {
+            step_rt.fields.entry("prompt".to_string())
+                .or_insert_with(|| toml::Value::String(prompt.clone()));
+        }
+    } else if let Some(ref name) = req.persona {
+        tracing::warn!(persona = %name, "persona not found, falling back to runtime spec");
+    }
 
     let (runtime_value, secret_refs) = if let Some(ref step_rt) = step_runtime {
         // Look up the runtime definition
@@ -533,6 +572,13 @@ async fn dispatch_step(
             // collisions with runtime vars (e.g. workflow.persona vs prompt).
             let mut context_vars: HashMap<String, String> = HashMap::new();
             context_vars.insert("workspace".to_string(), ".".to_string());
+
+            // ── Persona context ────────────────────────────────────
+            // Populate {persona.instructions} and {persona.name} for interpolation.
+            if let Some(persona) = &persona_def {
+                context_vars.insert("persona.instructions".to_string(), persona.instructions.clone());
+                context_vars.insert("persona.name".to_string(), persona.name.clone());
+            }
 
             // Resolve file-typed workflow vars and add all with "workflow." prefix
             let execs = state.bus.projections.executions();
@@ -567,6 +613,13 @@ async fn dispatch_step(
                         }
                     }
                 }
+            }
+
+            // Backwards compat: if persona instructions resolved, also populate
+            // workflow.persona so {workflow.persona} in runtime templates still works.
+            if let Some(persona) = &persona_def {
+                workflow_vars.entry("persona".to_string())
+                    .or_insert_with(|| persona.instructions.clone());
             }
 
             // Add workflow vars with "workflow." prefix
