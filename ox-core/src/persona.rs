@@ -3,6 +3,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::runtime::RuntimeDef;
+
 /// A persona definition, loaded from a markdown file with YAML frontmatter.
 ///
 /// The frontmatter declares structural fields (runtime, skills, secrets)
@@ -160,6 +162,40 @@ pub fn load_personas(search_path: &[PathBuf]) -> HashMap<String, PersonaDef> {
     personas
 }
 
+/// Validate all personas against the loaded runtime definitions.
+///
+/// Errors if a persona sets a var that its runtime doesn't declare
+/// (catches typos like `modle` instead of `model`). Personas that
+/// don't specify a runtime are skipped.
+pub fn validate_personas(
+    personas: &HashMap<String, PersonaDef>,
+    runtimes: &HashMap<String, RuntimeDef>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    for (name, persona) in personas {
+        let Some(rt_name) = &persona.runtime else {
+            continue;
+        };
+        let Some(runtime_def) = runtimes.get(rt_name) else {
+            errors.push(format!(
+                "persona '{name}': references unknown runtime '{rt_name}'"
+            ));
+            continue;
+        };
+
+        for var_name in persona.vars.keys() {
+            if !runtime_def.vars.contains_key(var_name) {
+                errors.push(format!(
+                    "persona '{name}': sets var '{var_name}' which runtime '{rt_name}' does not declare"
+                ));
+            }
+        }
+    }
+
+    errors
+}
+
 /// Recursively walk a personas directory, loading .md files.
 fn walk_personas_dir(
     base: &Path,
@@ -299,5 +335,136 @@ You are a software engineer."#;
         assert_eq!(p.instructions, "You review code.");
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn validate_catches_unknown_var() {
+        use indexmap::IndexMap;
+        use crate::workflow::VarDef;
+
+        let mut personas = HashMap::new();
+        personas.insert("test/eng".to_string(), PersonaDef {
+            name: "test/eng".into(),
+            runtime: Some("claude".into()),
+            skills: vec![],
+            secrets: vec![],
+            vars: HashMap::from([
+                ("model".into(), "sonnet".into()),
+                ("modle".into(), "typo".into()),  // typo
+            ]),
+            instructions: String::new(),
+        });
+
+        let mut runtimes = HashMap::new();
+        let mut vars = IndexMap::new();
+        vars.insert("model".into(), VarDef {
+            var_type: Default::default(),
+            required: false,
+            default: None,
+            description: None,
+            search_dir: None,
+        });
+        runtimes.insert("claude".into(), RuntimeDef {
+            name: "claude".into(),
+            vars,
+            command: crate::runtime::CommandDef {
+                cmd: vec!["claude".into()],
+                interactive_cmd: None,
+                optional: vec![],
+            },
+            files: vec![],
+            env: HashMap::new(),
+            proxy: vec![],
+            metrics: vec![],
+        });
+
+        let errors = validate_personas(&personas, &runtimes);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("modle"));
+        assert!(errors[0].contains("does not declare"));
+    }
+
+    #[test]
+    fn validate_catches_unknown_runtime() {
+        let mut personas = HashMap::new();
+        personas.insert("test/eng".to_string(), PersonaDef {
+            name: "test/eng".into(),
+            runtime: Some("nonexistent".into()),
+            skills: vec![],
+            secrets: vec![],
+            vars: HashMap::new(),
+            instructions: String::new(),
+        });
+
+        let runtimes = HashMap::new();
+        let errors = validate_personas(&personas, &runtimes);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("unknown runtime"));
+    }
+
+    #[test]
+    fn validate_skips_persona_without_runtime() {
+        let mut personas = HashMap::new();
+        personas.insert("plain".to_string(), PersonaDef {
+            name: "plain".into(),
+            runtime: None,
+            skills: vec![],
+            secrets: vec![],
+            vars: HashMap::from([("anything".into(), "value".into())]),
+            instructions: String::new(),
+        });
+
+        let runtimes = HashMap::new();
+        let errors = validate_personas(&personas, &runtimes);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_passes_valid_persona() {
+        use indexmap::IndexMap;
+        use crate::workflow::VarDef;
+
+        let mut personas = HashMap::new();
+        personas.insert("test/eng".to_string(), PersonaDef {
+            name: "test/eng".into(),
+            runtime: Some("claude".into()),
+            skills: vec![],
+            secrets: vec![],
+            vars: HashMap::from([("model".into(), "sonnet".into())]),
+            instructions: String::new(),
+        });
+
+        let mut runtimes = HashMap::new();
+        let mut vars = IndexMap::new();
+        vars.insert("model".into(), VarDef {
+            var_type: Default::default(),
+            required: false,
+            default: None,
+            description: None,
+            search_dir: None,
+        });
+        vars.insert("prompt".into(), VarDef {
+            var_type: Default::default(),
+            required: false,
+            default: Some(String::new()),
+            description: None,
+            search_dir: None,
+        });
+        runtimes.insert("claude".into(), RuntimeDef {
+            name: "claude".into(),
+            vars,
+            command: crate::runtime::CommandDef {
+                cmd: vec!["claude".into()],
+                interactive_cmd: None,
+                optional: vec![],
+            },
+            files: vec![],
+            env: HashMap::new(),
+            proxy: vec![],
+            metrics: vec![],
+        });
+
+        let errors = validate_personas(&personas, &runtimes);
+        assert!(errors.is_empty());
     }
 }

@@ -66,6 +66,18 @@ impl ServerState {
         let personas = ox_core::persona::load_personas(&search_path);
         tracing::info!(count = personas.len(), "loaded personas");
 
+        // Validate persona vars against runtime definitions
+        let persona_errors = ox_core::persona::validate_personas(&personas, &runtimes);
+        for err in &persona_errors {
+            tracing::error!("{err}");
+        }
+        if !persona_errors.is_empty() {
+            anyhow::bail!(
+                "{} persona validation error(s) — see log above",
+                persona_errors.len()
+            );
+        }
+
         Ok(Self {
             bus,
             config,
