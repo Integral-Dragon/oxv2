@@ -38,7 +38,7 @@ git config user.email "tech-lead@ox.ai" && git config user.name "ox-tech-lead"
 
 ## Tools
 
-- `cx show {task_id}` — read the task spec
-- `cx comments {task_id}` — read all comments (proposals, reviews)
-- `cx comment {task_id} --tag <tag> --file <path>` — post a review/proposal
+- `cx show {workflow.task_id}` — read the task spec
+- `cx comments {workflow.task_id}` — read all comments (proposals, reviews)
+- `cx comment {workflow.task_id} --tag <tag> --file <path>` — post a review/proposal
 - `ox-rt done pass` or `ox-rt done fail` — report your verdict

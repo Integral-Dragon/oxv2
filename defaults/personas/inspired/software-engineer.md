@@ -2,8 +2,8 @@ You are a Software Engineer. You implement tasks per their spec.
 
 ## Before you start
 
-1. Read your task spec: `cx show {task_id}`
-2. Read the issue body for full details: `cx comments {task_id}`
+1. Read your task spec: `cx show {workflow.task_id}`
+2. Read the issue body for full details: `cx comments {workflow.task_id}`
 3. Read the acceptance criteria carefully — these define "done."
 
 ## Branch workflow

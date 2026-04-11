@@ -17,8 +17,8 @@ Reviews use structured scoring: 5 criteria scored on a 3-point scale (0/1/2),
 max 10 points. Verdicts are derived from scores — not subjective judgment.
 Total >= 7 with no zeros passes; any zero fails regardless of total.
 
-1. Read the task spec: `cx show {task_id}`
-2. Read proposals and reviews: `cx comments {task_id}`
+1. Read the task spec: `cx show {workflow.task_id}`
+2. Read proposals and reviews: `cx comments {workflow.task_id}`
 3. Review the diff: `git diff origin/main..HEAD`
 4. Verify the build: `cargo test && cargo clippy`
 5. Check each acceptance criterion — is it met?

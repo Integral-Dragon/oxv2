@@ -206,9 +206,13 @@ pub fn resolve_step_spec(
     let ctx = InterpolationContext::new(field_values.clone(), secrets.clone());
 
     // 3. Resolve content-based file mappings (prompt assembly, credentials, etc.)
+    // Two-pass interpolation: first pass resolves the template (e.g. {workflow.persona}
+    // expands to file content), second pass resolves references inside that content
+    // (e.g. {workflow.task_id} inside a persona file).
     for file_mapping in &runtime_def.files {
         if let Some(ref content_template) = file_mapping.content
             && let Ok(content) = ctx.interpolate(content_template) {
+                let content = ctx.interpolate(&content).unwrap_or(content);
                 let to = ctx.interpolate(&file_mapping.to)
                     .unwrap_or_else(|_| file_mapping.to.clone());
                 resolved_files.push(ResolvedFile {
