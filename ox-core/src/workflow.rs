@@ -155,9 +155,10 @@ pub struct StepDef {
 }
 
 /// Runtime specification on a step — selects which runtime to use and passes parameters.
+/// In persona-primary mode, `type` is optional — the persona declares the runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeSpec {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub runtime_type: String,
     #[serde(default)]
     pub tty: bool,

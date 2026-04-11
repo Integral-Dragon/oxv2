@@ -541,17 +541,24 @@ async fn dispatch_step(
     let persona_def = req.persona.as_ref().and_then(|name| hot.personas.get(name));
 
     if let Some(persona) = &persona_def {
-        // If no runtime spec from the step, build one from the persona
-        if step_runtime.is_none()
-            && let Some(rt_name) = &persona.runtime
-        {
-            step_runtime = Some(RuntimeSpec {
-                runtime_type: rt_name.clone(),
-                tty: false,
-                env: HashMap::new(),
-                timeout: None,
-                fields: HashMap::new(),
-            });
+        // Fill in runtime type from persona if the step didn't specify one.
+        // A step may have [step.runtime] with just tty=true but no type.
+        if let Some(rt_name) = &persona.runtime {
+            match &mut step_runtime {
+                None => {
+                    step_runtime = Some(RuntimeSpec {
+                        runtime_type: rt_name.clone(),
+                        tty: false,
+                        env: HashMap::new(),
+                        timeout: None,
+                        fields: HashMap::new(),
+                    });
+                }
+                Some(rt) if rt.runtime_type.is_empty() => {
+                    rt.runtime_type = rt_name.clone();
+                }
+                _ => {} // step already has an explicit runtime type
+            }
         }
 
         // Inject persona vars as runtime field defaults (model, temperature, etc.)
