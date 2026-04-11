@@ -21,7 +21,7 @@ arrive on the SSE stream.
 cx.task_ready event arrives
   │
   ▼
-herder: for each trigger in all loaded workflows:
+herder: for each trigger in loaded trigger files:
   │
   ├─ does trigger.on match the event type?
   ├─ does trigger.tag match any tag on the node?

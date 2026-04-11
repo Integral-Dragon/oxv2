@@ -1,0 +1,8 @@
+# Default ox configuration.
+# Trigger files are resolved relative to this file's parent directory.
+
+triggers = [
+    "workflows/triggers.toml",
+]
+
+heartbeat_grace = 60

@@ -12,18 +12,14 @@ pub struct WorkflowDef {
     pub description: String,
     #[serde(default, rename = "step")]
     pub steps: Vec<StepDef>,
-    #[serde(default, rename = "trigger")]
-    pub triggers: Vec<TriggerDef>,
 }
 
-/// TOML file layout: [workflow] header + [[step]] + [[trigger]] arrays.
+/// TOML file layout: [workflow] header + [[step]] arrays.
 #[derive(Debug, Deserialize)]
 struct WorkflowFile {
     workflow: WorkflowHeader,
     #[serde(default)]
     step: Vec<StepDef>,
-    #[serde(default)]
-    trigger: Vec<TriggerDef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,7 +37,6 @@ impl WorkflowDef {
             name: file.workflow.name,
             description: file.workflow.description,
             steps: file.step,
-            triggers: file.trigger,
         })
     }
 
@@ -136,13 +131,19 @@ pub struct TriggerDef {
     pub poll_interval: Option<String>,
 }
 
+/// TOML layout for a standalone triggers file: [[trigger]] arrays.
+#[derive(Debug, Deserialize)]
+pub struct TriggersFile {
+    #[serde(default)]
+    pub trigger: Vec<TriggerDef>,
+}
+
 // ── Workflow Engine ─────────────────────────────────────────────────
 
 /// Step graph indexed by name for O(1) lookup with preserved declaration order.
 pub struct WorkflowEngine {
     pub name: String,
     pub steps: IndexMap<String, StepDef>,
-    pub triggers: Vec<TriggerDef>,
 }
 
 /// Result of advancing to the next step.
@@ -162,7 +163,6 @@ impl WorkflowEngine {
         Self {
             name: def.name,
             steps,
-            triggers: def.triggers,
         }
     }
 
@@ -401,7 +401,6 @@ mod tests {
                     squash: false,
                 },
             ],
-            triggers: vec![],
         };
         WorkflowEngine::from_def(def)
     }
@@ -554,11 +553,6 @@ name = "implement"
 [[step]]
 name = "merge"
 action = "merge_to_main"
-
-[[trigger]]
-on = "cx.task_ready"
-tag = "workflow:code-task"
-workflow = "code-task"
 "#;
 
         let def = WorkflowDef::from_toml(toml).unwrap();
@@ -572,11 +566,29 @@ workflow = "code-task"
         assert_eq!(def.steps[1].transitions.len(), 2);
         assert_eq!(def.steps[1].transitions[0].match_pattern, "pass");
         assert_eq!(def.steps[3].action.as_deref(), Some("merge_to_main"));
-        assert_eq!(def.triggers.len(), 1);
-        assert_eq!(def.triggers[0].on, "cx.task_ready");
 
         // Verify it can be used as engine
         let engine = WorkflowEngine::from_def(def);
         assert_eq!(engine.first_step(), Some("propose"));
+    }
+
+    #[test]
+    fn parse_triggers_file() {
+        let toml = r#"
+[[trigger]]
+on = "cx.task_ready"
+tag = "workflow:code-task"
+workflow = "code-task"
+
+[[trigger]]
+on = "cx.comment_added"
+tag = "review-requested"
+workflow = "code-task"
+"#;
+        let file: TriggersFile = toml::from_str(toml).unwrap();
+        assert_eq!(file.trigger.len(), 2);
+        assert_eq!(file.trigger[0].on, "cx.task_ready");
+        assert_eq!(file.trigger[0].workflow, "code-task");
+        assert_eq!(file.trigger[1].on, "cx.comment_added");
     }
 }

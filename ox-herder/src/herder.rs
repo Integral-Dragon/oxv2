@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use ox_core::client::OxClient;
 use ox_core::events::*;
 use ox_core::types::*;
-use ox_core::workflow::{RetryDecision, RetryTracker, StepAdvance, WorkflowDef, WorkflowEngine};
+use ox_core::workflow::{RetryDecision, RetryTracker, StepAdvance, TriggerDef, WorkflowDef, WorkflowEngine};
 use reqwest_eventsource::{Event as SseEvent, EventSource};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -68,6 +68,7 @@ pub struct Herder {
     runners: HashMap<String, RunnerView>,
     executions: HashMap<String, ExecutionView>,
     workflows: HashMap<String, WorkflowEngine>,
+    triggers: Vec<TriggerDef>,
     pending_triggers: Vec<PendingTrigger>,
     last_seq: u64,
     /// True while replaying historical events — suppresses side effects.
@@ -95,6 +96,7 @@ impl Herder {
             runners: HashMap::new(),
             executions: HashMap::new(),
             workflows: HashMap::new(),
+            triggers: Vec::new(),
             pending_triggers: Vec::new(),
             last_seq: 0,
             replaying: true,
@@ -179,6 +181,12 @@ impl Herder {
         tracing::info!(count = workflows.len(), "loaded workflows from server");
 
         let search_path = ox_core::config::resolve_search_path(std::path::Path::new("."));
+
+        // Load config and triggers
+        let config = ox_core::config::load_config(&search_path);
+        self.triggers = ox_core::config::load_triggers(&config);
+        tracing::info!(count = self.triggers.len(), "loaded triggers from config");
+
         for (name, path) in ox_core::config::load_all_configs(&search_path, "workflows") {
             match WorkflowDef::from_file(&path) {
                 Ok(def) => {
@@ -852,63 +860,61 @@ impl Herder {
         event_type: &str,
         tags: &[String],
     ) {
-        for engine in self.workflows.values() {
-            for trigger in &engine.triggers {
-                if trigger.on != event_type {
+        for trigger in &self.triggers {
+            if trigger.on != event_type {
+                continue;
+            }
+
+            if let Some(ref tag_pattern) = trigger.tag
+                && !tags.iter().any(|t| t == tag_pattern) {
                     continue;
                 }
 
-                if let Some(ref tag_pattern) = trigger.tag
-                    && !tags.iter().any(|t| t == tag_pattern) {
-                        continue;
-                    }
+            // Dedup: skip if there's already an active execution
+            let dominated = self.executions.values().any(|e| {
+                e.task_id == node_id
+                    && e.workflow == trigger.workflow
+                    && (e.status == "running"
+                        || e.status == "completed"
+                        || e.status == "escalated")
+            });
+            if dominated {
+                tracing::debug!(
+                    node = %node_id,
+                    workflow = %trigger.workflow,
+                    "trigger suppressed: execution already exists"
+                );
+                continue;
+            }
 
-                // Dedup: skip if there's already an active execution
-                let dominated = self.executions.values().any(|e| {
-                    e.task_id == node_id
-                        && e.workflow == trigger.workflow
-                        && (e.status == "running"
-                            || e.status == "completed"
-                            || e.status == "escalated")
-                });
-                if dominated {
+            // Check current cx state
+            let cx_state = get_cx_node_state(&self.server_url, node_id).await;
+            if let Some(ref state) = cx_state
+                && (state == "integrated" || state == "shadowed") {
                     tracing::debug!(
                         node = %node_id,
-                        workflow = %trigger.workflow,
-                        "trigger suppressed: execution already exists"
+                        state = %state,
+                        "trigger suppressed: node is {state}"
                     );
                     continue;
                 }
 
-                // Check current cx state
-                let cx_state = get_cx_node_state(&self.server_url, node_id).await;
-                if let Some(ref state) = cx_state
-                    && (state == "integrated" || state == "shadowed") {
-                        tracing::debug!(
-                            node = %node_id,
-                            state = %state,
-                            "trigger suppressed: node is {state}"
-                        );
-                        continue;
-                    }
+            tracing::info!(
+                node = %node_id,
+                workflow = %trigger.workflow,
+                "trigger matched, creating execution"
+            );
 
-                tracing::info!(
-                    node = %node_id,
-                    workflow = %trigger.workflow,
-                    "trigger matched, creating execution"
-                );
-
-                match self
-                    .client
-                    .create_execution(node_id, &trigger.workflow, &trigger.on)
-                    .await
-                {
-                    Ok(exec_id) => {
-                        tracing::info!(exec = %exec_id, "execution created by trigger");
-                    }
-                    Err(e) => {
-                        tracing::error!(err = %e, "failed to create execution from trigger");
-                    }
+            match self
+                .client
+                .create_execution(node_id, &trigger.workflow, &trigger.on)
+                .await
+            {
+                Ok(exec_id) => {
+                    tracing::info!(exec = %exec_id, "execution created by trigger");
+                }
+                Err(e) => {
+                    tracing::error!(err = %e, "failed to create execution from trigger");
                 }
             }
         }

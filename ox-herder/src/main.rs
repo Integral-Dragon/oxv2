@@ -16,8 +16,9 @@ struct Args {
     pool_target: usize,
 
     /// Heartbeat grace period in seconds before re-dispatching.
-    #[arg(long, default_value = "30")]
-    heartbeat_grace: u64,
+    /// Falls back to config.toml heartbeat_grace, then 30s.
+    #[arg(long)]
+    heartbeat_grace: Option<u64>,
 
     /// Tick interval in seconds for periodic checks.
     #[arg(long, default_value = "5")]
@@ -32,17 +33,21 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    let search_path = ox_core::config::resolve_search_path(std::path::Path::new("."));
+    let config = ox_core::config::load_config(&search_path);
+    let heartbeat_grace = args.heartbeat_grace.unwrap_or(config.heartbeat_grace);
+
     tracing::info!(
         server = %args.server,
         pool_target = args.pool_target,
-        heartbeat_grace = args.heartbeat_grace,
+        heartbeat_grace = heartbeat_grace,
         "ox-herder starting"
     );
 
     let mut h = herder::Herder::new(
         &args.server,
         args.pool_target,
-        args.heartbeat_grace,
+        heartbeat_grace,
         args.tick_interval,
     );
 

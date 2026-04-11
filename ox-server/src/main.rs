@@ -35,8 +35,9 @@ struct Args {
     repo: String,
 
     /// Seconds without a heartbeat before a runner is considered stale.
-    #[arg(long, default_value = "60")]
-    heartbeat_grace: u64,
+    /// Falls back to config.toml heartbeat_grace, then 60s.
+    #[arg(long)]
+    heartbeat_grace: Option<u64>,
 }
 
 pub type AppState = Arc<state::ServerState>;
@@ -83,7 +84,7 @@ async fn main() -> Result<()> {
     // Background heartbeat check loop
     {
         let state = Arc::clone(&state);
-        let grace = args.heartbeat_grace;
+        let grace = args.heartbeat_grace.unwrap_or(state.config.heartbeat_grace);
         tokio::spawn(async move {
             pool::check_loop(&state.bus, grace).await;
         });

@@ -88,7 +88,7 @@ ox-herder --server http://localhost:4840
 |---------------------|----------------------------|--------------------------------------|
 | `--server`          | `http://localhost:4840`    | Server URL                           |
 | `--pool-target`     | `2`                        | Desired number of idle runners       |
-| `--heartbeat-grace` | `30s`                      | Time before a runner is marked dead  |
+| `--heartbeat-grace` | config or `60s`            | Time before a runner is marked dead  |
 | `--tick-interval`   | `5s`                       | Scheduling loop interval             |
 
 ### 3. Start runners
@@ -261,14 +261,29 @@ goto  = "next-step"
 
 ### Triggers
 
-Triggers start a workflow execution when an external event arrives:
+Triggers live in separate files (not inside workflow definitions) and are
+loaded via `config.toml`. This lets you reuse template workflows while
+defining your own trigger routing.
 
 ```toml
+# .ox/config.toml (or $OX_HOME/config.toml)
+triggers = [
+    "workflows/triggers.toml",   # paths relative to this file's directory
+]
+heartbeat_grace = 60             # seconds
+```
+
+```toml
+# workflows/triggers.toml
 [[trigger]]
 on       = "cx.task_ready"       # Event type to watch
 tag      = "workflow:code-task"  # Optional tag filter
 workflow = "code-task"           # Workflow to execute
 ```
+
+Trigger files are additive across the search path. If no `config.toml`
+exists, ox looks for `workflows/triggers.toml` in each search-path
+directory as a default.
 
 ## Writing runtimes
 

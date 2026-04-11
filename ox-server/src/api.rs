@@ -291,10 +291,16 @@ async fn list_workflows(State(state): State<AppState>) -> Json<serde_json::Value
         .iter()
         .map(|(name, engine)| {
             let step_names: Vec<&str> = engine.steps.keys().map(|s| s.as_str()).collect();
+            // Collect triggers that target this workflow
+            let workflow_triggers: Vec<&ox_core::workflow::TriggerDef> = state
+                .triggers
+                .iter()
+                .filter(|t| t.workflow == *name)
+                .collect();
             serde_json::json!({
                 "name": name,
                 "steps": step_names,
-                "triggers": engine.triggers,
+                "triggers": workflow_triggers,
             })
         })
         .collect();
@@ -886,60 +892,60 @@ async fn evaluate_triggers(
 
     let mut triggered = vec![];
 
-    for (workflow_name, engine) in &state.workflows {
-        for trigger in &engine.triggers {
-            // Check event type match
-            if trigger.on != "cx.task_ready" {
+    for trigger in &state.triggers {
+        // Check event type match
+        if trigger.on != "cx.task_ready" {
+            continue;
+        }
+
+        // Check tag match
+        if let Some(ref tag_pattern) = trigger.tag
+            && !node_tags.iter().any(|t| t == tag_pattern) {
                 continue;
             }
 
-            // Check tag match
-            if let Some(ref tag_pattern) = trigger.tag
-                && !node_tags.iter().any(|t| t == tag_pattern) {
-                    continue;
-                }
+        let workflow_name = &trigger.workflow;
 
-            // Dedup check: is there already a running execution for this (task_id, workflow)?
-            if !req.force {
-                let already_running = execs.executions.values().any(|e| {
-                    e.task_id == req.node_id
-                        && e.workflow == *workflow_name
-                        && e.status == projections::ExecutionStatus::Running
-                });
-                if already_running {
-                    continue;
-                }
+        // Dedup check: is there already a running execution for this (task_id, workflow)?
+        if !req.force {
+            let already_running = execs.executions.values().any(|e| {
+                e.task_id == req.node_id
+                    && e.workflow == *workflow_name
+                    && e.status == projections::ExecutionStatus::Running
+            });
+            if already_running {
+                continue;
             }
-
-            // Create execution
-            let n = execs
-                .executions
-                .values()
-                .filter(|e| e.task_id == req.node_id)
-                .count()
-                + 1;
-            let execution_id = ExecutionId(format!("{}-e{n}", req.node_id));
-
-            let data = ExecutionCreatedData {
-                execution_id: execution_id.clone(),
-                task_id: req.node_id.clone(),
-                workflow: workflow_name.clone(),
-                trigger: trigger.on.clone(),
-            };
-
-            state
-                .bus
-                .append(
-                    EventType::ExecutionCreated,
-                    serde_json::to_value(data).unwrap(),
-                )
-                .unwrap();
-
-            triggered.push(serde_json::json!({
-                "execution_id": execution_id,
-                "workflow": workflow_name,
-            }));
         }
+
+        // Create execution
+        let n = execs
+            .executions
+            .values()
+            .filter(|e| e.task_id == req.node_id)
+            .count()
+            + 1;
+        let execution_id = ExecutionId(format!("{}-e{n}", req.node_id));
+
+        let data = ExecutionCreatedData {
+            execution_id: execution_id.clone(),
+            task_id: req.node_id.clone(),
+            workflow: workflow_name.clone(),
+            trigger: trigger.on.clone(),
+        };
+
+        state
+            .bus
+            .append(
+                EventType::ExecutionCreated,
+                serde_json::to_value(data).unwrap(),
+            )
+            .unwrap();
+
+        triggered.push(serde_json::json!({
+            "execution_id": execution_id,
+            "workflow": workflow_name,
+        }));
     }
 
     Json(serde_json::json!({ "triggered": triggered }))

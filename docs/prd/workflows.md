@@ -355,6 +355,23 @@ an interactive human step, or any other step type.
 Triggers are the entry point — they create workflow executions in response
 to conditions. There are three trigger sources.
 
+Triggers are defined in standalone TOML files (not inside workflow
+definitions) and loaded via `config.toml`. This decouples trigger
+routing from workflow logic — the same workflow can be started by
+multiple triggers, and you can reuse template workflows while defining
+your own triggers.
+
+```toml
+# config.toml — lists trigger files to load (paths relative to this file)
+triggers = [
+    "workflows/triggers.toml",
+]
+```
+
+Trigger files across the search path are additive — repo-local and
+default triggers all load. If no `config.toml` exists, ox falls back
+to loading `workflows/triggers.toml` from each search-path directory.
+
 ### cx triggers
 
 Fired when a commit lands on main that changes `.complex/` in a way that
@@ -362,6 +379,7 @@ matches a condition. ox-server derives these from `git log` diffs — no
 separate event files in cx.
 
 ```toml
+# workflows/triggers.toml
 [[trigger]]
 on       = "cx.task_ready"
 tag      = "workflow:code-task"

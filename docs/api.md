@@ -649,7 +649,9 @@ does not exist.
 
 #### `GET /api/workflows`
 
-List loaded workflow definitions.
+List loaded workflow definitions. Triggers that target each workflow are
+included for convenience (triggers are defined separately in trigger files,
+not inside workflow definitions).
 
 Response:
 
@@ -657,10 +659,9 @@ Response:
 [
   {
     "name": "code-task",
-    "description": "Propose → review plan → implement → review code → merge",
     "steps": ["propose", "review-plan", "implement", "review-code", "merge"],
     "triggers": [
-      { "on": "cx.task_ready", "tag": "workflow:code-task" }
+      { "on": "cx.task_ready", "tag": "workflow:code-task", "workflow": "code-task" }
     ]
   }
 ]

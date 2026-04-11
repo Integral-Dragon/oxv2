@@ -1,7 +1,7 @@
 use anyhow::Result;
-use ox_core::config;
+use ox_core::config::{self, OxConfig};
 use ox_core::runtime::RuntimeDef;
-use ox_core::workflow::{WorkflowDef, WorkflowEngine};
+use ox_core::workflow::{TriggerDef, WorkflowDef, WorkflowEngine};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,9 @@ use crate::events::EventBus;
 /// The shared server state. Held behind an Arc in the Axum state.
 pub struct ServerState {
     pub bus: EventBus,
+    pub config: OxConfig,
     pub workflows: HashMap<String, WorkflowEngine>,
+    pub triggers: Vec<TriggerDef>,
     pub runtimes: HashMap<String, RuntimeDef>,
     pub search_path: Vec<PathBuf>,
     pub repo_path: PathBuf,
@@ -21,10 +23,16 @@ impl ServerState {
     pub fn new(conn: Connection, repo_root: &str) -> Result<Self> {
         let bus = EventBus::new(conn)?;
 
-        // Load workflow definitions from the config search path
         let search_path = config::resolve_search_path(Path::new(repo_root));
-        let mut workflows = HashMap::new();
 
+        // Load ox config (merges config.toml across search path)
+        let config = config::load_config(&search_path);
+
+        // Load trigger definitions from files listed in config
+        let triggers = config::load_triggers(&config);
+
+        // Load workflow definitions
+        let mut workflows = HashMap::new();
         for (name, path) in config::load_all_configs(&search_path, "workflows") {
             match WorkflowDef::from_file(&path) {
                 Ok(def) => {
@@ -53,7 +61,9 @@ impl ServerState {
 
         Ok(Self {
             bus,
+            config,
             workflows,
+            triggers,
             runtimes,
             search_path,
             repo_path: PathBuf::from(repo_root),

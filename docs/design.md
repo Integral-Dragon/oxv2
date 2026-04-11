@@ -364,7 +364,7 @@ pub struct SecretsState {
 ## Configuration Loading
 
 The search path is resolved once at startup by the process that needs
-it (ox-server for workflows/triggers, ox-runner for runtime definitions).
+it (ox-server for workflows/triggers/config, ox-runner for runtime definitions).
 
 ```rust
 /// Resolve the configuration search path.
@@ -400,10 +400,17 @@ fn find_config(search_path: &[PathBuf], subdir: &str, name: &str) -> Option<Path
 }
 ```
 
+A `config.toml` in each search-path directory controls which trigger
+files to load. Trigger file lists are additive across the search path;
+scalar values (e.g. `heartbeat_grace`) use first-match-wins. If no
+`config.toml` exists, ox falls back to loading `workflows/triggers.toml`
+from each search-path directory.
+
 All workflow definitions are loaded eagerly at ox-server startup —
-names must be unique across the merged search path. Runtime definitions
-are loaded by ox-runner when a step is dispatched — the runner resolves
-the definition by name at that point.
+names must be unique across the merged search path. Triggers are loaded
+separately from files listed in `config.toml`, decoupled from workflow
+definitions. Runtime definitions are loaded by ox-runner when a step is
+dispatched — the runner resolves the definition by name at that point.
 
 ---
 
