@@ -342,10 +342,17 @@ async fn list_executions(
                 && &e.workflow != w {
                     return false;
                 }
-            if let Some(ref t) = query.task
-                && e.vars.get("task_id").map(|s| s.as_str()) != Some(t) {
+            if let Some(ref t) = query.task {
+                // Match a cx-node origin by node id. Other origin variants
+                // never satisfy a --task filter.
+                let matches = matches!(
+                    &e.origin,
+                    ExecutionOrigin::CxNode { node_id } if node_id == t
+                );
+                if !matches {
                     return false;
                 }
+            }
             true
         })
         .collect::<Vec<_>>();
@@ -374,6 +381,7 @@ fn execution_summary(e: &projections::ExecutionState) -> serde_json::Value {
     serde_json::json!({
         "id": e.id.0,
         "vars": e.vars,
+        "origin": e.origin,
         "workflow": e.workflow,
         "status": format!("{:?}", e.status).to_lowercase(),
         "current_step": e.current_step,
@@ -388,10 +396,25 @@ struct CreateExecutionRequest {
     trigger: String,
     #[serde(default)]
     vars: HashMap<String, String>,
+    /// Caller-supplied origin. Omitted by `ox-ctl exec run` style
+    /// manual invocations (defaults to `Manual { user: None }`).
+    #[serde(default)]
+    origin: Option<ExecutionOrigin>,
 }
 
 fn default_trigger() -> String {
     "manual".into()
+}
+
+/// Render an `ExecutionStatus` as the tag string used by the
+/// `is_origin_active` predicate.
+fn status_str(s: &projections::ExecutionStatus) -> &'static str {
+    match s {
+        projections::ExecutionStatus::Running => "running",
+        projections::ExecutionStatus::Completed => "completed",
+        projections::ExecutionStatus::Escalated => "escalated",
+        projections::ExecutionStatus::Cancelled => "cancelled",
+    }
 }
 
 async fn create_execution(
@@ -425,7 +448,10 @@ async fn create_execution(
         workflow: req.workflow,
         trigger: req.trigger,
         vars,
-        origin: None, // slice B green fills this in from req
+        origin: Some(
+            req.origin
+                .unwrap_or(ExecutionOrigin::Manual { user: None }),
+        ),
     };
 
     state
@@ -1045,14 +1071,25 @@ async fn evaluate_triggers(
 
         let workflow_name = &trigger.workflow;
 
-        // Dedup check: is there already a running execution for this (node, workflow)?
+        // Dedup check: is there already a running execution with the same
+        // (origin, workflow) pair? Origin here is the firing cx node.
+        let origin = ox_core::events::ExecutionOrigin::CxNode {
+            node_id: req.node_id.clone(),
+        };
         if !req.force {
-            let already_running = execs.executions.values().any(|e| {
-                e.vars.get("task_id").map(|s| s.as_str()) == Some(&req.node_id)
-                    && e.workflow == *workflow_name
-                    && e.status == projections::ExecutionStatus::Running
-            });
-            if already_running {
+            let existing: Vec<_> = execs
+                .executions
+                .values()
+                .map(|e| (&e.origin, e.workflow.as_str(), status_str(&e.status)))
+                .collect();
+            // API-initiated triggers block only on currently-running
+            // executions. A completed run is eligible for re-trigger.
+            if ox_core::events::is_origin_active(
+                existing.into_iter(),
+                &origin,
+                workflow_name,
+                |s| s == "running",
+            ) {
                 continue;
             }
         }
@@ -1096,7 +1133,7 @@ async fn evaluate_triggers(
             workflow: workflow_name.clone(),
             trigger: trigger.on.clone(),
             vars,
-            origin: None, // slice B green: Some(CxNode { node_id })
+            origin: Some(origin.clone()),
         };
 
         state

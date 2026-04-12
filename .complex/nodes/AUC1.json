@@ -1,12 +1,15 @@
 {
   "id": "AUC1",
   "title": "Slice B: dedup works regardless of var name (ExecutionOrigin)",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "unknown",
   "created_at": "2026-04-12T14:18:43.370076243Z",
-  "updated_at": "2026-04-12T14:27:55.270817199Z",
+  "updated_at": "2026-04-12T14:35:37.311787375Z",
   "parent": "UWfw",
+  "meta": {
+    "_reason": "slice B green: ExecutionOrigin wired through dedup, projection, herder"
+  },
   "edges": [
     {
       "to": "WCtr",

@@ -350,8 +350,13 @@ pub enum ChildKind {
 /// Live code paths should always pass an explicit origin to
 /// `ExecutionCreatedData`. This helper exists solely for event-log replay
 /// compatibility.
-pub fn fallback_origin(_vars: &HashMap<String, String>) -> ExecutionOrigin {
-    todo!("slice B: synthesize CxNode from task_id, else Manual")
+pub fn fallback_origin(vars: &HashMap<String, String>) -> ExecutionOrigin {
+    match vars.get("task_id") {
+        Some(node_id) => ExecutionOrigin::CxNode {
+            node_id: node_id.clone(),
+        },
+        None => ExecutionOrigin::Manual { user: None },
+    }
 }
 
 /// Structural dedup predicate. Returns `true` if any element of `existing`
@@ -362,15 +367,17 @@ pub fn fallback_origin(_vars: &HashMap<String, String>) -> ExecutionOrigin {
 /// and the API handler use different status liveness rules (the API blocks
 /// on `running` only; the herder blocks on `running|escalated`).
 pub fn is_origin_active<'a, I>(
-    _existing: I,
-    _origin: &ExecutionOrigin,
-    _workflow: &str,
-    _is_active: impl Fn(&str) -> bool,
+    existing: I,
+    origin: &ExecutionOrigin,
+    workflow: &str,
+    is_active: impl Fn(&str) -> bool,
 ) -> bool
 where
     I: IntoIterator<Item = (&'a ExecutionOrigin, &'a str, &'a str)>,
 {
-    todo!("slice B: structural origin+workflow match with liveness filter")
+    existing
+        .into_iter()
+        .any(|(o, w, s)| o == origin && w == workflow && is_active(s))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -591,7 +598,7 @@ mod tests {
         let active = |s: &str| s == "running";
 
         // Match on origin + workflow + active status
-        let existing = vec![(&origin_a, wf, "running")];
+        let existing = [(&origin_a, wf, "running")];
         assert!(is_origin_active(
             existing.iter().map(|(o, w, s)| (*o, *w, *s)),
             &origin_a,
@@ -600,7 +607,7 @@ mod tests {
         ));
 
         // Different origin → no match
-        let existing = vec![(&origin_b, wf, "running")];
+        let existing = [(&origin_b, wf, "running")];
         assert!(!is_origin_active(
             existing.iter().map(|(o, w, s)| (*o, *w, *s)),
             &origin_a,
@@ -609,7 +616,7 @@ mod tests {
         ));
 
         // Different workflow → no match
-        let existing = vec![(&origin_a, "other-wf", "running")];
+        let existing = [(&origin_a, "other-wf", "running")];
         assert!(!is_origin_active(
             existing.iter().map(|(o, w, s)| (*o, *w, *s)),
             &origin_a,
@@ -618,7 +625,7 @@ mod tests {
         ));
 
         // Completed status is not active under this rule
-        let existing = vec![(&origin_a, wf, "completed")];
+        let existing = [(&origin_a, wf, "completed")];
         assert!(!is_origin_active(
             existing.iter().map(|(o, w, s)| (*o, *w, *s)),
             &origin_a,

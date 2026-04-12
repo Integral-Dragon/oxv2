@@ -40,6 +40,7 @@ struct RunnerView {
 #[derive(Debug)]
 struct ExecutionView {
     vars: HashMap<String, String>,
+    origin: ExecutionOrigin,
     workflow: String,
     status: String, // "running", "completed", "escalated", "cancelled"
     phase: ExecPhase,
@@ -262,10 +263,16 @@ impl Herder {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
+                let origin = d
+                    .origin
+                    .clone()
+                    .unwrap_or_else(|| fallback_origin(&d.vars));
+
                 self.executions.insert(
                     d.execution_id.0.clone(),
                     ExecutionView {
                         vars: d.vars,
+                        origin,
                         workflow: d.workflow,
                         status: "running".into(),
                         phase: ExecPhase::Ready { step: first_step, attempt: 1 },
@@ -905,15 +912,23 @@ impl Herder {
                     continue;
                 }
 
-            // Dedup: skip if there's already an active execution for this node
-            let dominated = self.executions.values().any(|e| {
-                e.vars.get("task_id").map(|s| s.as_str()) == Some(node_id)
-                    && e.workflow == trigger.workflow
-                    && (e.status == "running"
-                        || e.status == "completed"
-                        || e.status == "escalated")
-            });
-            if dominated {
+            // Dedup: skip if there's already an active execution with the
+            // same (origin, workflow) pair. The herder blocks on running
+            // AND escalated — it won't auto-retry an escalated execution.
+            let origin = ExecutionOrigin::CxNode {
+                node_id: node_id.to_string(),
+            };
+            let existing: Vec<_> = self
+                .executions
+                .values()
+                .map(|e| (&e.origin, e.workflow.as_str(), e.status.as_str()))
+                .collect();
+            if is_origin_active(
+                existing.into_iter(),
+                &origin,
+                &trigger.workflow,
+                |s| s == "running" || s == "escalated",
+            ) {
                 tracing::debug!(
                     node = %node_id,
                     workflow = %trigger.workflow,
@@ -962,7 +977,12 @@ impl Herder {
 
             match self
                 .client
-                .create_execution(&trigger.workflow, &trigger.on, trigger_vars)
+                .create_execution(
+                    &trigger.workflow,
+                    &trigger.on,
+                    trigger_vars,
+                    Some(origin.clone()),
+                )
                 .await
             {
                 Ok(exec_id) => {

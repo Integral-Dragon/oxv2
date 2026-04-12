@@ -46,6 +46,7 @@ pub struct ExecutionState {
     pub workflow: String,
     pub status: ExecutionStatus,
     pub vars: HashMap<String, String>,
+    pub origin: ExecutionOrigin,
     pub attempts: Vec<StepAttemptState>,
     pub current_step: Option<String>,
     pub current_attempt: u32,
@@ -354,6 +355,10 @@ impl Projections {
                 if let Ok(data) =
                     serde_json::from_value::<ExecutionCreatedData>(event.data.clone())
                 {
+                    let origin = data
+                        .origin
+                        .clone()
+                        .unwrap_or_else(|| fallback_origin(&data.vars));
                     let mut execs = self.executions.write().unwrap();
                     execs.executions.insert(
                         data.execution_id.0.clone(),
@@ -362,6 +367,7 @@ impl Projections {
                             workflow: data.workflow,
                             status: ExecutionStatus::Running,
                             vars: data.vars,
+                            origin,
                             attempts: vec![],
                             current_step: None,
                             current_attempt: 0,

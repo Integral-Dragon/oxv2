@@ -1,11 +1,11 @@
 {
   "id": "citW",
   "title": "Slice D: CLI origin column, --task removed",
-  "state": "latent",
+  "state": "ready",
   "shadowed": false,
   "part": null,
   "created_at": "2026-04-12T14:18:43.372409746Z",
-  "updated_at": "2026-04-12T14:18:43.372409746Z",
+  "updated_at": "2026-04-12T14:35:37.311788267Z",
   "parent": "UWfw",
   "edges": [
     {

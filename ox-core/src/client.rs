@@ -87,6 +87,8 @@ struct CreateExecutionRequest {
     trigger: String,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     vars: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<crate::events::ExecutionOrigin>,
 }
 
 /// Parameters for dispatching a step to a runner.
@@ -238,6 +240,7 @@ impl OxClient {
         workflow: &str,
         trigger: &str,
         vars: HashMap<String, String>,
+        origin: Option<crate::events::ExecutionOrigin>,
     ) -> Result<ExecutionId> {
         let resp: CreateExecutionResponse = self
             .http
@@ -246,6 +249,7 @@ impl OxClient {
                 workflow: workflow.to_string(),
                 trigger: trigger.to_string(),
                 vars,
+                origin,
             })
             .send()
             .await?
