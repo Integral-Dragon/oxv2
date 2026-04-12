@@ -1,10 +1,10 @@
 {
   "id": "WCtr",
   "title": "Slice C: bad [trigger.vars] surfaces as trigger.failed event",
-  "state": "ready",
+  "state": "claimed",
   "shadowed": false,
-  "part": null,
+  "part": "unknown",
   "created_at": "2026-04-12T14:18:43.371509585Z",
-  "updated_at": "2026-04-12T14:35:37.311788177Z",
+  "updated_at": "2026-04-12T14:35:41.681568821Z",
   "parent": "UWfw"
 }

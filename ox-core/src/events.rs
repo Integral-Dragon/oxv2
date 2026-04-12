@@ -26,6 +26,9 @@ pub enum EventType {
     RunnerDrained,
     #[serde(rename = "runner.heartbeat_missed")]
     RunnerHeartbeatMissed,
+    // Triggers
+    #[serde(rename = "trigger.failed")]
+    TriggerFailed,
     // Execution
     #[serde(rename = "execution.created")]
     ExecutionCreated,
@@ -380,6 +383,75 @@ where
         .any(|(o, w, s)| o == origin && w == workflow && is_active(s))
 }
 
+// ── Trigger failure events ─────────────────────────────────────────
+
+/// Recorded when a trigger matches a firing event but cannot produce
+/// a valid execution. Always surfaces deterministically — a bad
+/// `[trigger.vars]` template will emit on every SSE replay, so the
+/// herder guards emission behind `!replaying`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerFailedData {
+    /// The `seq` of the event that caused this trigger to fire.
+    /// Lets a UI correlate "which cx event caused this failure".
+    pub source_seq: Seq,
+    /// The matched trigger's `on` field (e.g. `"cx.task_ready"`).
+    pub on: String,
+    /// The matched trigger's `tag`, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// The workflow the trigger would have fired.
+    pub workflow: String,
+    pub reason: TriggerFailureReason,
+}
+
+/// Why a trigger failed to create an execution. Discriminated so UIs
+/// and operators can act on the category without parsing free-text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerFailureReason {
+    /// A `{event.X}` template referenced a field the firing event
+    /// does not expose.
+    MissingEventField { path: String },
+    /// The interpolated vars map failed `WorkflowDef::validate_vars`.
+    ValidationFailed { message: String },
+    /// The trigger's `workflow` is not loaded in the current config.
+    UnknownWorkflow,
+}
+
+impl TriggerFailedData {
+    /// Build a failure record from a missing-field interpolation error.
+    pub fn from_missing_field(
+        source_seq: Seq,
+        on: &str,
+        tag: Option<&str>,
+        workflow: &str,
+        missing_path: String,
+    ) -> Self {
+        todo!("slice C: construct TriggerFailedData::MissingEventField")
+    }
+
+    /// Build a failure record from a `WorkflowDef::validate_vars` error.
+    pub fn from_validation_error(
+        source_seq: Seq,
+        on: &str,
+        tag: Option<&str>,
+        workflow: &str,
+        message: String,
+    ) -> Self {
+        todo!("slice C: construct TriggerFailedData::ValidationFailed")
+    }
+
+    /// Build a failure record when the trigger's workflow doesn't exist.
+    pub fn for_unknown_workflow(
+        source_seq: Seq,
+        on: &str,
+        tag: Option<&str>,
+        workflow: &str,
+    ) -> Self {
+        todo!("slice C: construct TriggerFailedData::UnknownWorkflow")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CxTaskClaimedData {
     pub node_id: String,
@@ -584,6 +656,88 @@ mod tests {
                 node_id: "aJuO".into()
             }
         );
+    }
+
+    // ── slice C: TriggerFailed ─────────────────────────────────────────
+
+    #[test]
+    fn trigger_failed_event_type_serializes_to_dotted_name() {
+        let t = EventType::TriggerFailed;
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(json, "\"trigger.failed\"");
+        let back: EventType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, EventType::TriggerFailed);
+    }
+
+    #[test]
+    fn trigger_failed_data_round_trips_missing_field_reason() {
+        let data = TriggerFailedData::from_missing_field(
+            Seq(42),
+            "cx.task_ready",
+            Some("workflow:consultation"),
+            "consultation",
+            "event.bogus".into(),
+        );
+        assert_eq!(data.source_seq, Seq(42));
+        assert_eq!(data.on, "cx.task_ready");
+        assert_eq!(data.tag.as_deref(), Some("workflow:consultation"));
+        assert_eq!(data.workflow, "consultation");
+        assert_eq!(
+            data.reason,
+            TriggerFailureReason::MissingEventField {
+                path: "event.bogus".into()
+            }
+        );
+
+        let json = serde_json::to_value(&data).unwrap();
+        let back: TriggerFailedData = serde_json::from_value(json).unwrap();
+        assert_eq!(data, back);
+    }
+
+    #[test]
+    fn trigger_failed_data_round_trips_validation_reason() {
+        let data = TriggerFailedData::from_validation_error(
+            Seq(7),
+            "cx.task_ready",
+            None,
+            "code-task",
+            "missing required variable: task_id".into(),
+        );
+        assert_eq!(
+            data.reason,
+            TriggerFailureReason::ValidationFailed {
+                message: "missing required variable: task_id".into()
+            }
+        );
+        let json = serde_json::to_value(&data).unwrap();
+        let back: TriggerFailedData = serde_json::from_value(json).unwrap();
+        assert_eq!(data, back);
+    }
+
+    #[test]
+    fn trigger_failed_data_round_trips_unknown_workflow_reason() {
+        let data = TriggerFailedData::for_unknown_workflow(
+            Seq(1),
+            "cx.task_ready",
+            Some("workflow:ghost"),
+            "ghost",
+        );
+        assert_eq!(data.reason, TriggerFailureReason::UnknownWorkflow);
+        let json = serde_json::to_value(&data).unwrap();
+        let back: TriggerFailedData = serde_json::from_value(json).unwrap();
+        assert_eq!(data, back);
+    }
+
+    #[test]
+    fn trigger_failure_reason_is_tagged_on_wire() {
+        // Discriminator lives in the serialized payload so a UI can
+        // switch on it without deserializing into the full enum.
+        let reason = TriggerFailureReason::MissingEventField {
+            path: "event.bogus".into(),
+        };
+        let json = serde_json::to_value(&reason).unwrap();
+        assert_eq!(json["type"], "missing_event_field");
+        assert_eq!(json["path"], "event.bogus");
     }
 
     #[test]
