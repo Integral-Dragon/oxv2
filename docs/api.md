@@ -144,21 +144,33 @@ Query parameters:
 |-------|-------------|
 | `status` | Filter: `running`, `completed`, `escalated`, `cancelled` |
 | `workflow` | Filter by workflow name |
-| `task` | Filter by task (cx node) ID |
+| `limit` | Max results (default 25) |
+| `offset` | Skip N results |
+
+Filtering by origin is not supported — an execution's origin is a
+structural property, not a flat string, and ancestry queries need a
+different surface. Use `GET /api/executions/{id}` to inspect a
+specific execution's origin.
 
 Response:
 
 ```json
-[
-  {
-    "id": "aJuO-e1",
-    "task_id": "aJuO",
-    "workflow": "code-task",
-    "status": "running",
-    "current_step": "implement",
-    "created_at": "2026-04-04T12:00:00Z"
-  }
-]
+{
+  "executions": [
+    {
+      "id": "e-1744364800-42",
+      "vars": { "task_id": "aJuO" },
+      "origin": { "type": "cx_node", "node_id": "aJuO" },
+      "workflow": "code-task",
+      "status": "running",
+      "current_step": "implement",
+      "created_at": "2026-04-04T12:00:00Z"
+    }
+  ],
+  "total": 1,
+  "offset": 0,
+  "limit": 25
+}
 ```
 
 #### `GET /api/executions/{id}`
@@ -169,8 +181,9 @@ Response:
 
 ```json
 {
-  "id": "aJuO-e1",
-  "task_id": "aJuO",
+  "id": "e-1744364800-42",
+  "vars": { "task_id": "aJuO" },
+  "origin": { "type": "cx_node", "node_id": "aJuO" },
   "workflow": "code-task",
   "status": "running",
   "current_step": "implement",
@@ -227,13 +240,26 @@ Request:
   "trigger": "cx.task_ready",
   "vars": {
     "task_id": "aJuO"
-  }
+  },
+  "origin": { "type": "cx_node", "node_id": "aJuO" }
 }
 ```
 
 `vars` is optional (defaults to `{}`). The server validates vars against
 the workflow's `[workflow.vars]` declarations — rejects if a required var
 is missing, fills defaults for omitted optional vars.
+
+`origin` is optional. If omitted, defaults to
+`{ "type": "manual", "user": null }`. Accepted shapes:
+
+```json
+{ "type": "cx_node", "node_id": "aJuO" }
+{ "type": "execution",
+  "parent_execution_id": "e-1744364800-41",
+  "parent_step": "review-plan",
+  "kind": "step_completed" }
+{ "type": "manual", "user": "alice" }
+```
 
 `execution_id` is server-generated (`e-{epoch}-{seq}`), not derived from
 any input field.
@@ -626,8 +652,8 @@ shape.
 
 #### `POST /api/triggers/evaluate`
 
-Evaluate triggers for a cx node. Called by the herder on cx events, or
-by ox-ctl for manual triggering.
+Evaluate triggers for a cx node. Called by ox-ctl for manual triggering
+(the herder evaluates triggers itself against its SSE stream).
 
 Request:
 
@@ -638,18 +664,59 @@ Request:
 }
 ```
 
+For each matching trigger, the server:
+
+1. Builds an `EventContext::CxTaskReady { node_id }`
+2. Calls `trigger.build_vars(&ctx)` — on error, appends
+   `trigger.failed` and continues
+3. Runs `WorkflowDef::validate_vars` on the interpolated map — on
+   error, appends `trigger.failed` and continues
+4. Checks dedup via `is_origin_active` with the API liveness rule
+   (blocks only on `running` unless `force` is set)
+5. Creates the execution with `origin: CxNode { node_id }`
+
 Response:
 
 ```json
 {
-  "fired": [
+  "triggered": [
     {
       "workflow": "code-task",
-      "execution_id": "aJuO-e1"
+      "execution_id": "e-1744364800-42"
     }
   ]
 }
 ```
+
+#### `POST /api/triggers/failed`
+
+Append a `trigger.failed` event to the event log. Used by the herder
+to report its own `build_vars` failures. Operators normally do not
+call this directly — it exists because the herder cannot touch the
+event bus except through the API.
+
+Request: a `TriggerFailedData` payload:
+
+```json
+{
+  "source_seq": 42,
+  "on": "cx.task_ready",
+  "tag": "workflow:consultation",
+  "workflow": "consultation",
+  "reason": {
+    "type": "missing_event_field",
+    "path": "event.bogus"
+  }
+}
+```
+
+`reason` is tagged with a `"type"` field and may be one of:
+
+- `{ "type": "missing_event_field", "path": "..." }`
+- `{ "type": "validation_failed", "message": "..." }`
+- `{ "type": "unknown_workflow" }`
+
+Response: 204. Appends `trigger.failed`.
 
 ---
 

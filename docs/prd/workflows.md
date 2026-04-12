@@ -417,7 +417,62 @@ separate event files in cx.
 on       = "cx.task_ready"
 tag      = "workflow:code-task"
 workflow = "code-task"
+[trigger.vars]
+task_id = "{event.node_id}"
 ```
+
+Each trigger declares a `[trigger.vars]` block that maps event fields
+onto the workflow's declared variables. Templates may reference
+`{event.X}` for fields the firing event exposes. The mapping is what
+lets different workflows use different var names for the same event —
+`code-task` declares `task_id`, `consultation` declares `branch`, and
+the triggers map `event.node_id` into whichever name the workflow
+wants:
+
+```toml
+[[trigger]]
+on       = "cx.task_ready"
+tag      = "workflow:consultation"
+workflow = "consultation"
+[trigger.vars]
+branch = "{event.node_id}"
+```
+
+A trigger with no `[trigger.vars]` block produces no workflow vars —
+the workflow must declare only optional vars with defaults, or the
+execution will fail `validate_vars` and emit a `trigger.failed` event.
+
+#### Event field namespace (v1)
+
+| Event | Available `event.*` fields |
+|-------|----------------------------|
+| `cx.task_ready` | `event.node_id` |
+| `cx.task_claimed` | `event.node_id` |
+| `cx.task_integrated` | `event.node_id` |
+| `cx.task_shadowed` | `event.node_id`, `event.reason` |
+| `cx.comment_added` | `event.node_id`, `event.tag`, `event.author` |
+
+v1 supports cx events only. The workflow-chaining variants of
+`EventContext` (for `execution.*` and `step.*` events) exist in the
+data model but are not wired through the herder's trigger evaluation
+path yet.
+
+#### Trigger failures
+
+A trigger that cannot produce a valid execution emits a
+`trigger.failed` event instead:
+
+- **`MissingEventField { path }`** — a `[trigger.vars]` template
+  referenced a field the firing event does not expose.
+- **`ValidationFailed { message }`** — the interpolated vars map
+  failed `WorkflowDef::validate_vars` (e.g. a required var was not
+  mapped).
+- **`UnknownWorkflow`** — the trigger references a workflow that is
+  not loaded.
+
+Trigger failures are deterministic and fire-once: the herder guards
+emission behind `!replaying`, so a stale failure is not re-logged on
+every restart. An operator fixes the TOML and re-fires manually.
 
 Common cx trigger conditions:
 

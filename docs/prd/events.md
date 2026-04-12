@@ -94,6 +94,7 @@ Event types are namespaced by component:
 | `secret.*` | [secrets.md](secrets.md) |
 | `cx.*` | [cx.md](cx.md) |
 | `git.*` | [cx.md](cx.md) |
+| `trigger.*` | [workflows.md](workflows.md) |
 
 ---
 

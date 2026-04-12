@@ -25,29 +25,72 @@ herder: for each trigger in loaded trigger files:
   │
   ├─ does trigger.on match the event type?
   ├─ does trigger.tag match any tag on the node?
-  ├─ dedup check: is there already an active execution
-  │  for this (task_id, workflow) pair?
+  │
+  ├─ build EventContext from the event payload
+  │  (CxTaskReady { node_id }, etc.)
+  │
+  ├─ call trigger.build_vars(&ctx):
+  │  ├─ interpolate each [trigger.vars] template
+  │  │  against {event.X} fields
+  │  ├─ on MissingEventField → post trigger.failed, continue
+  │  └─ return the workflow vars map
+  │
+  ├─ dedup check: is_origin_active(
+  │     existing executions,
+  │     origin = CxNode { node_id },
+  │     workflow = trigger.workflow,
+  │     is_active = |s| running or escalated
+  │  )?
   │
   ├─ if all pass:
   │    POST /api/executions
-  │    { task_id, workflow, trigger: "cx.task_ready" }
+  │    { workflow, vars, origin: CxNode{..}, trigger: "cx.task_ready" }
   │
-  └─ if dedup blocks: skip
+  └─ if dedup blocks or build_vars fails: skip (event emitted on failure)
 ```
 
 ### Dedup Rules
 
-A trigger is suppressed if there is already an active execution
-(status = `running`) for the same `(task_id, workflow)` pair. This
-prevents duplicate executions when the same cx event is processed
-multiple times (e.g. after herder restart replay).
+A trigger is suppressed if there is already an active execution with
+the same `(origin, workflow)` pair, where `origin` is typed
+(`ExecutionOrigin::CxNode | Execution | Manual`) and compared
+structurally. This lets dedup work correctly for every workflow
+regardless of what var name it uses for the cx node id.
+
+Two liveness rules share a predicate (`is_origin_active`) with
+different `is_active` callbacks:
+
+- **API path** (`/api/triggers/evaluate`, `ox-ctl trigger`): blocks
+  only on `running`. Explicit re-trigger is allowed once a prior run
+  has completed.
+- **Herder auto-evaluation**: blocks on `running | escalated`. The
+  herder will not auto-retry an escalated execution — that is a
+  human-in-the-loop decision.
 
 The `--force` flag on `ox-ctl trigger` bypasses dedup. This is used
 for manual re-runs after intervention.
 
 Dedup state is derived from the executions projection — no separate
-tracking needed. The herder checks `ExecutionsState` for an active
-execution matching the task and workflow.
+tracking needed.
+
+### Trigger Failures
+
+When a trigger matches an event but cannot produce a valid execution,
+the failure is recorded in the event log as `trigger.failed` rather
+than silently dropped. This happens in three cases:
+
+1. `trigger.build_vars` returns `MissingEventField { path }` — the
+   `[trigger.vars]` block references an `event.*` field not exposed
+   by the firing event type.
+2. `WorkflowDef::validate_vars` rejects the interpolated vars map
+   (e.g. a required var is not mapped) — `ValidationFailed { message }`.
+3. The trigger's `workflow` is not loaded in the current config —
+   `UnknownWorkflow`.
+
+The herder posts its own failures through the `/api/triggers/failed`
+endpoint so all `trigger.failed` events flow through the server's
+event bus. Emission is guarded by `!replaying` so a bad trigger in
+the config does not re-emit on every restart.
 
 ### Poll Triggers
 
