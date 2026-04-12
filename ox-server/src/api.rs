@@ -318,7 +318,6 @@ async fn list_workflows(State(state): State<AppState>) -> Json<serde_json::Value
 struct ListExecutionsQuery {
     status: Option<String>,
     workflow: Option<String>,
-    task: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
 }
@@ -343,17 +342,6 @@ async fn list_executions(
                 && &e.workflow != w {
                     return false;
                 }
-            if let Some(ref t) = query.task {
-                // Match a cx-node origin by node id. Other origin variants
-                // never satisfy a --task filter.
-                let matches = matches!(
-                    &e.origin,
-                    ExecutionOrigin::CxNode { node_id } if node_id == t
-                );
-                if !matches {
-                    return false;
-                }
-            }
             true
         })
         .collect::<Vec<_>>();

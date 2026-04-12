@@ -24,8 +24,25 @@ pub struct ListExecutionsFilter {
 /// Build the query URL for `GET /api/executions` with the given filter.
 /// Pure function — extracted for unit testing.
 pub fn build_list_executions_url(base_url: &str, filter: &ListExecutionsFilter) -> String {
-    let _ = (base_url, filter);
-    todo!("slice D: assemble base + query params")
+    let base = base_url.trim_end_matches('/');
+    let mut params: Vec<String> = Vec::new();
+    if let Some(ref s) = filter.status {
+        params.push(format!("status={s}"));
+    }
+    if let Some(ref w) = filter.workflow {
+        params.push(format!("workflow={w}"));
+    }
+    if let Some(l) = filter.limit {
+        params.push(format!("limit={l}"));
+    }
+    if let Some(o) = filter.offset {
+        params.push(format!("offset={o}"));
+    }
+    if params.is_empty() {
+        format!("{base}/api/executions")
+    } else {
+        format!("{base}/api/executions?{}", params.join("&"))
+    }
 }
 
 // ── Response types ──────────────────────────────────────────────────

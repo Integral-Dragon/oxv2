@@ -300,9 +300,44 @@ async fn cmd_exec_list(
 }
 
 /// Render an `ExecutionOrigin` for display. Truncates with an ellipsis if
-/// longer than 24 characters. Pure — all variants in one place.
-fn format_origin(_origin: &ox_core::events::ExecutionOrigin) -> String {
-    todo!("slice D: format each origin variant with ellipsis truncation")
+/// longer than `ORIGIN_DISPLAY_WIDTH` characters. Pure — all variants in
+/// one place.
+const ORIGIN_DISPLAY_WIDTH: usize = 24;
+
+fn format_origin(origin: &ox_core::events::ExecutionOrigin) -> String {
+    use ox_core::events::ExecutionOrigin::*;
+    let raw = match origin {
+        CxNode { node_id } => format!("cx:{node_id}"),
+        Execution {
+            parent_execution_id,
+            parent_step,
+            ..
+        } => {
+            // Execution IDs have shape `e-{epoch}-{seq}`; the seq suffix
+            // is locally unique and short enough for a narrow column.
+            // The full ID is still in the ID column next to ORIGIN.
+            let id = &parent_execution_id.0;
+            let short = id.rsplit('-').next().unwrap_or(id);
+            match parent_step {
+                Some(step) => format!("exec:{short}/{step}"),
+                None => format!("exec:{short}"),
+            }
+        }
+        Manual { user: Some(u) } => format!("manual:{u}"),
+        Manual { user: None } => "manual".to_string(),
+    };
+    truncate_with_ellipsis(&raw, ORIGIN_DISPLAY_WIDTH)
+}
+
+fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        // Leave room for the ellipsis char.
+        let mut out: String = s.chars().take(max - 1).collect();
+        out.push('…');
+        out
+    }
 }
 
 async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
@@ -311,6 +346,7 @@ async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "id": exec.id,
             "vars": exec.vars,
+            "origin": exec.origin,
             "workflow": exec.workflow,
             "status": exec.status,
             "current_step": exec.current_step,
@@ -322,6 +358,7 @@ async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
             .unwrap_or_else(|_| exec.created_at.clone());
 
         println!("Execution: {}", exec.id);
+        println!("Origin:    {}", format_origin(&exec.origin));
         println!("Created:   {}", created);
         if !exec.vars.is_empty() {
             for (k, v) in &exec.vars {
@@ -1041,8 +1078,8 @@ mod tests {
             parent_step: Some("review-plan".into()),
             kind: ChildKind::StepCompleted,
         };
-        // last-8 of the exec id + step
-        assert_eq!(format_origin(&o), "exec:800-42/review-plan");
+        // seq suffix (after the last dash) + step
+        assert_eq!(format_origin(&o), "exec:42/review-plan");
     }
 
     #[test]
@@ -1052,7 +1089,7 @@ mod tests {
             parent_step: None,
             kind: ChildKind::Escalated,
         };
-        assert_eq!(format_origin(&o), "exec:800-42");
+        assert_eq!(format_origin(&o), "exec:42");
     }
 
     #[test]
