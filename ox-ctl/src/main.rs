@@ -84,8 +84,6 @@ enum ExecCommands {
         status: Option<String>,
         #[arg(long)]
         workflow: Option<String>,
-        #[arg(long)]
-        task: Option<String>,
         /// Max results to show.
         #[arg(long, short = 'n', default_value = "25")]
         limit: usize,
@@ -176,8 +174,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Status => cmd_status(&client, json).await,
         Commands::Exec { command } => match command {
-            ExecCommands::List { status, workflow, task, limit, all } => {
-                cmd_exec_list(&client, json, status, workflow, task, limit, all).await
+            ExecCommands::List { status, workflow, limit, all } => {
+                cmd_exec_list(&client, json, status, workflow, limit, all).await
             }
             ExecCommands::Show { id } => cmd_exec_show(&client, json, &id).await,
             ExecCommands::Cancel { id } => cmd_exec_cancel(&client, &id).await,
@@ -238,14 +236,18 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
 async fn cmd_exec_list(
     client: &OxClient,
     json: bool,
-    _status: Option<String>,
-    _workflow: Option<String>,
-    _task: Option<String>,
+    status: Option<String>,
+    workflow: Option<String>,
     limit: usize,
     all: bool,
 ) -> Result<()> {
-    let api_limit = if all { None } else { Some(limit) };
-    let resp = client.list_executions(api_limit, None).await?;
+    let filter = ox_core::client::ListExecutionsFilter {
+        status,
+        workflow,
+        limit: if all { None } else { Some(limit) },
+        offset: None,
+    };
+    let resp = client.list_executions(filter).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -254,8 +256,8 @@ async fn cmd_exec_list(
         let total = resp.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
 
         println!(
-            "{:<22} {:<16} {:<14} {:<12} {:<20}",
-            "ID", "WORKFLOW", "STEP", "STATUS", "CREATED"
+            "{:<22} {:<16} {:<26} {:<14} {:<12} {:<20}",
+            "ID", "WORKFLOW", "ORIGIN", "STEP", "STATUS", "CREATED"
         );
         if let Some(execs) = execs {
             for e in execs {
@@ -271,10 +273,16 @@ async fn cmd_exec_list(
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_else(|| "-".into());
+                let origin_str = e
+                    .get("origin")
+                    .and_then(|v| serde_json::from_value::<ox_core::events::ExecutionOrigin>(v.clone()).ok())
+                    .map(|o| format_origin(&o))
+                    .unwrap_or_else(|| "-".into());
                 println!(
-                    "{:<22} {:<16} {:<14} {:<12} {:<20}",
+                    "{:<22} {:<16} {:<26} {:<14} {:<12} {:<20}",
                     e.get("id").and_then(|v| v.as_str()).unwrap_or("-"),
                     e.get("workflow").and_then(|v| v.as_str()).unwrap_or("-"),
+                    origin_str,
                     step,
                     display_status,
                     created,
@@ -289,6 +297,12 @@ async fn cmd_exec_list(
         }
     }
     Ok(())
+}
+
+/// Render an `ExecutionOrigin` for display. Truncates with an ellipsis if
+/// longer than 24 characters. Pure — all variants in one place.
+fn format_origin(_origin: &ox_core::events::ExecutionOrigin) -> String {
+    todo!("slice D: format each origin variant with ellipsis truncation")
 }
 
 async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
@@ -989,4 +1003,88 @@ async fn cmd_config_check(client: &OxClient, json: bool) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use ox_core::events::{ChildKind, ExecutionOrigin};
+    use ox_core::types::ExecutionId;
+
+    #[test]
+    fn format_origin_cx_node() {
+        let o = ExecutionOrigin::CxNode {
+            node_id: "aJuO".into(),
+        };
+        assert_eq!(format_origin(&o), "cx:aJuO");
+    }
+
+    #[test]
+    fn format_origin_manual_anonymous() {
+        let o = ExecutionOrigin::Manual { user: None };
+        assert_eq!(format_origin(&o), "manual");
+    }
+
+    #[test]
+    fn format_origin_manual_with_user() {
+        let o = ExecutionOrigin::Manual {
+            user: Some("alice".into()),
+        };
+        assert_eq!(format_origin(&o), "manual:alice");
+    }
+
+    #[test]
+    fn format_origin_execution_with_step() {
+        let o = ExecutionOrigin::Execution {
+            parent_execution_id: ExecutionId("e-1744364800-42".into()),
+            parent_step: Some("review-plan".into()),
+            kind: ChildKind::StepCompleted,
+        };
+        // last-8 of the exec id + step
+        assert_eq!(format_origin(&o), "exec:800-42/review-plan");
+    }
+
+    #[test]
+    fn format_origin_execution_without_step() {
+        let o = ExecutionOrigin::Execution {
+            parent_execution_id: ExecutionId("e-1744364800-42".into()),
+            parent_step: None,
+            kind: ChildKind::Escalated,
+        };
+        assert_eq!(format_origin(&o), "exec:800-42");
+    }
+
+    #[test]
+    fn format_origin_truncates_long_values_with_ellipsis() {
+        let o = ExecutionOrigin::CxNode {
+            node_id: "thisIsAReallyLongNodeIdentifierForcingTruncation".into(),
+        };
+        let s = format_origin(&o);
+        // Max width is 24, ellipsis '…' counts as 1 char.
+        assert!(s.chars().count() <= 24, "got {:?}", s);
+        assert!(s.ends_with('…'), "got {:?}", s);
+        assert!(s.starts_with("cx:"), "got {:?}", s);
+    }
+
+    #[test]
+    fn clap_rejects_task_flag_on_exec_list() {
+        // --task was removed in slice D. clap must surface it as unknown.
+        let result = Cli::try_parse_from(["ox-ctl", "exec", "list", "--task", "aJuO"]);
+        assert!(result.is_err(), "--task should be rejected");
+    }
+
+    #[test]
+    fn clap_accepts_status_and_workflow_filters() {
+        let result = Cli::try_parse_from([
+            "ox-ctl",
+            "exec",
+            "list",
+            "--status",
+            "running",
+            "--workflow",
+            "consultation",
+        ]);
+        assert!(result.is_ok(), "--status/--workflow should parse cleanly");
+    }
 }

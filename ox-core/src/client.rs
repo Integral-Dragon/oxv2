@@ -12,6 +12,22 @@ pub struct OxClient {
     http: Client,
 }
 
+/// Filter parameters for `list_executions`. `None` means unfiltered.
+#[derive(Debug, Default, Clone)]
+pub struct ListExecutionsFilter {
+    pub status: Option<String>,
+    pub workflow: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// Build the query URL for `GET /api/executions` with the given filter.
+/// Pure function — extracted for unit testing.
+pub fn build_list_executions_url(base_url: &str, filter: &ListExecutionsFilter) -> String {
+    let _ = (base_url, filter);
+    todo!("slice D: assemble base + query params")
+}
+
 // ── Response types ──────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,12 +56,21 @@ pub struct ExecutionDetail {
     pub id: String,
     #[serde(default)]
     pub vars: HashMap<String, String>,
+    /// Origin of this execution. `#[serde(default)]` lets pre-refactor
+    /// server responses (which didn't include the field) deserialize as
+    /// `Manual { user: None }` rather than erroring.
+    #[serde(default = "default_manual_origin")]
+    pub origin: crate::events::ExecutionOrigin,
     pub workflow: String,
     pub status: String,
     pub current_step: Option<String>,
     pub current_attempt: u32,
     pub created_at: String,
     pub attempts: Vec<StepAttemptDetail>,
+}
+
+fn default_manual_origin() -> crate::events::ExecutionOrigin {
+    crate::events::ExecutionOrigin::Manual { user: None }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -287,18 +312,9 @@ impl OxClient {
 
     pub async fn list_executions(
         &self,
-        limit: Option<usize>,
-        offset: Option<usize>,
+        filter: ListExecutionsFilter,
     ) -> Result<serde_json::Value> {
-        let mut url = self.url("/api/executions");
-        if let Some(l) = limit {
-            url = format!("{url}?limit={l}");
-            if let Some(o) = offset {
-                url = format!("{url}&offset={o}");
-            }
-        } else if let Some(o) = offset {
-            url = format!("{url}?offset={o}");
-        }
+        let url = build_list_executions_url(&self.base_url, &filter);
         self.http
             .get(&url)
             .send()
@@ -605,5 +621,60 @@ impl OxClient {
             .json()
             .await
             .context("parsing config check response")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_url_no_filters() {
+        let f = ListExecutionsFilter::default();
+        let url = build_list_executions_url("http://ox.local", &f);
+        assert_eq!(url, "http://ox.local/api/executions");
+    }
+
+    #[test]
+    fn build_url_with_status() {
+        let f = ListExecutionsFilter {
+            status: Some("running".into()),
+            ..Default::default()
+        };
+        let url = build_list_executions_url("http://ox.local", &f);
+        assert_eq!(url, "http://ox.local/api/executions?status=running");
+    }
+
+    #[test]
+    fn build_url_with_workflow() {
+        let f = ListExecutionsFilter {
+            workflow: Some("consultation".into()),
+            ..Default::default()
+        };
+        let url = build_list_executions_url("http://ox.local", &f);
+        assert_eq!(url, "http://ox.local/api/executions?workflow=consultation");
+    }
+
+    #[test]
+    fn build_url_with_status_workflow_limit() {
+        let f = ListExecutionsFilter {
+            status: Some("running".into()),
+            workflow: Some("consultation".into()),
+            limit: Some(10),
+            offset: None,
+        };
+        let url = build_list_executions_url("http://ox.local", &f);
+        // Order follows declaration order: status, workflow, limit, offset.
+        assert_eq!(
+            url,
+            "http://ox.local/api/executions?status=running&workflow=consultation&limit=10"
+        );
+    }
+
+    #[test]
+    fn build_url_strips_trailing_slash_from_base() {
+        let f = ListExecutionsFilter::default();
+        let url = build_list_executions_url("http://ox.local/", &f);
+        assert_eq!(url, "http://ox.local/api/executions");
     }
 }
