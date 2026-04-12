@@ -1061,8 +1061,20 @@ async fn evaluate_triggers(
         let seq = state.bus.current_seq() + 1;
         let execution_id = ExecutionId(format!("e-{epoch}-{seq}"));
 
-        let mut vars = HashMap::new();
-        vars.insert("task_id".to_string(), req.node_id.clone());
+        let mut input_vars = HashMap::new();
+        input_vars.insert("task_id".to_string(), req.node_id.clone());
+
+        // Validate against the workflow's var declarations to fill in defaults.
+        let vars = match hot.workflows.get(workflow_name) {
+            Some(wf) => match wf.validate_vars(&input_vars) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(workflow = %workflow_name, err = %e, "trigger var validation failed");
+                    input_vars
+                }
+            },
+            None => input_vars,
+        };
 
         let data = ExecutionCreatedData {
             execution_id: execution_id.clone(),
