@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use ox_core::client::OxClient;
+use ox_core::client::{OxClient, OxClientApi};
 use ox_core::events::*;
 use ox_core::types::*;
 use ox_core::workflow::{RetryDecision, RetryTracker, StepAdvance, TriggerDef, WorkflowDef, WorkflowEngine};
@@ -57,8 +57,8 @@ struct PendingTrigger {
     tags: Vec<String>,
 }
 
-pub struct Herder {
-    client: OxClient,
+pub struct Herder<C: OxClientApi = OxClient> {
+    client: C,
     server_url: String,
     pool_target: usize,
     #[allow(dead_code)]
@@ -83,15 +83,34 @@ pub struct Herder {
     last_config_refresh: Instant,
 }
 
-impl Herder {
+impl Herder<OxClient> {
     pub fn new(
         server_url: &str,
         pool_target: usize,
         heartbeat_grace_secs: u64,
         tick_interval_secs: u64,
     ) -> Self {
+        Self::with_client(
+            OxClient::new(server_url),
+            server_url,
+            pool_target,
+            heartbeat_grace_secs,
+            tick_interval_secs,
+        )
+    }
+}
+
+impl<C: OxClientApi> Herder<C> {
+    /// Generic constructor — used by tests with mock client implementations.
+    pub fn with_client(
+        client: C,
+        server_url: &str,
+        pool_target: usize,
+        heartbeat_grace_secs: u64,
+        tick_interval_secs: u64,
+    ) -> Self {
         Self {
-            client: OxClient::new(server_url),
+            client,
             server_url: server_url.trim_end_matches('/').to_string(),
             pool_target,
             heartbeat_grace: Duration::from_secs(heartbeat_grace_secs),

@@ -6,6 +6,68 @@ use std::collections::HashMap;
 
 use crate::types::{ExecutionId, RunnerId};
 
+/// Snapshot of a single cx node returned by `/api/state/cx`. Mirrors the
+/// shape of `ox-server::projections::CxNodeState` but lives here so the
+/// herder can deserialize it without depending on the server crate.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CxNodeSnapshot {
+    pub node_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub shadowed: bool,
+    #[serde(default)]
+    pub shadow_reason: Option<String>,
+    #[serde(default)]
+    pub comment_count: usize,
+}
+
+/// Snapshot of the cx projection returned by `/api/state/cx`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CxStateSnapshot {
+    pub nodes: HashMap<String, CxNodeSnapshot>,
+}
+
+/// Trait abstracting the subset of the ox-server API the herder calls.
+/// Production code uses [`OxClient`]; tests can substitute a mock impl.
+#[allow(async_fn_in_trait)]
+pub trait OxClientApi: Send + Sync {
+    async fn status(&self) -> Result<StatusResponse>;
+    async fn list_workflows(&self) -> Result<Vec<WorkflowEntry>>;
+
+    async fn get_cx_state(&self) -> Result<CxStateSnapshot>;
+
+    async fn create_execution(
+        &self,
+        workflow: &str,
+        trigger: &str,
+        vars: HashMap<String, String>,
+        origin: Option<crate::events::ExecutionOrigin>,
+    ) -> Result<ExecutionId>;
+
+    async fn complete_execution(&self, id: &str) -> Result<()>;
+    async fn escalate_execution(&self, id: &str, step: &str, reason: &str) -> Result<()>;
+
+    async fn dispatch_step(&self, params: &DispatchStepParams) -> Result<()>;
+    async fn step_done(&self, execution_id: &str, step: &str, attempt: u32, output: &str) -> Result<()>;
+    async fn step_confirm(&self, execution_id: &str, step: &str, attempt: u32, metrics: Option<serde_json::Value>) -> Result<()>;
+    async fn step_fail(&self, execution_id: &str, step: &str, attempt: u32, error: &str) -> Result<()>;
+    async fn step_advance(&self, execution_id: &str, step: &str, from_step: &str, to_step: &str) -> Result<()>;
+
+    async fn drain_runner(&self, runner_id: &RunnerId) -> Result<()>;
+
+    async fn merge_to_main(
+        &self,
+        execution_id: &str,
+        step: &str,
+        branch: &str,
+        squash: bool,
+    ) -> Result<serde_json::Value>;
+
+    async fn post_trigger_failed(&self, data: &crate::events::TriggerFailedData) -> Result<()>;
+}
+
 /// HTTP client for the ox-server API.
 pub struct OxClient {
     base_url: String,
@@ -638,6 +700,75 @@ impl OxClient {
             .json()
             .await
             .context("parsing config check response")
+    }
+
+    /// Fetch the full cx projection snapshot for reconciliation passes.
+    pub async fn get_cx_state(&self) -> Result<CxStateSnapshot> {
+        self.http
+            .get(self.url("/api/state/cx"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("parsing cx state response")
+    }
+}
+
+impl OxClientApi for OxClient {
+    async fn status(&self) -> Result<StatusResponse> {
+        OxClient::status(self).await
+    }
+    async fn list_workflows(&self) -> Result<Vec<WorkflowEntry>> {
+        OxClient::list_workflows(self).await
+    }
+    async fn get_cx_state(&self) -> Result<CxStateSnapshot> {
+        OxClient::get_cx_state(self).await
+    }
+    async fn create_execution(
+        &self,
+        workflow: &str,
+        trigger: &str,
+        vars: HashMap<String, String>,
+        origin: Option<crate::events::ExecutionOrigin>,
+    ) -> Result<ExecutionId> {
+        OxClient::create_execution(self, workflow, trigger, vars, origin).await
+    }
+    async fn complete_execution(&self, id: &str) -> Result<()> {
+        OxClient::complete_execution(self, id).await
+    }
+    async fn escalate_execution(&self, id: &str, step: &str, reason: &str) -> Result<()> {
+        OxClient::escalate_execution(self, id, step, reason).await
+    }
+    async fn dispatch_step(&self, params: &DispatchStepParams) -> Result<()> {
+        OxClient::dispatch_step(self, params).await
+    }
+    async fn step_done(&self, execution_id: &str, step: &str, attempt: u32, output: &str) -> Result<()> {
+        OxClient::step_done(self, execution_id, step, attempt, output).await
+    }
+    async fn step_confirm(&self, execution_id: &str, step: &str, attempt: u32, metrics: Option<serde_json::Value>) -> Result<()> {
+        OxClient::step_confirm(self, execution_id, step, attempt, metrics).await
+    }
+    async fn step_fail(&self, execution_id: &str, step: &str, attempt: u32, error: &str) -> Result<()> {
+        OxClient::step_fail(self, execution_id, step, attempt, error).await
+    }
+    async fn step_advance(&self, execution_id: &str, step: &str, from_step: &str, to_step: &str) -> Result<()> {
+        OxClient::step_advance(self, execution_id, step, from_step, to_step).await
+    }
+    async fn drain_runner(&self, runner_id: &RunnerId) -> Result<()> {
+        OxClient::drain_runner(self, runner_id).await
+    }
+    async fn merge_to_main(
+        &self,
+        execution_id: &str,
+        step: &str,
+        branch: &str,
+        squash: bool,
+    ) -> Result<serde_json::Value> {
+        OxClient::merge_to_main(self, execution_id, step, branch, squash).await
+    }
+    async fn post_trigger_failed(&self, data: &crate::events::TriggerFailedData) -> Result<()> {
+        OxClient::post_trigger_failed(self, data).await
     }
 }
 
