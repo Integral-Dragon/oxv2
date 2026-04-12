@@ -291,13 +291,59 @@ struct CxLogEntry {
 /// `/api/state/cx`. Uses local `tags` (not `effective_tags`) to
 /// match current trigger-evaluation semantics.
 pub fn parse_cx_list(stdout: &[u8]) -> Result<CxStateSnapshot> {
-    unimplemented!("parse_cx_list — implemented in next commit");
+    let nodes_json: Vec<serde_json::Value> =
+        serde_json::from_slice(stdout).context("parsing cx list output")?;
+
+    let mut snap = CxStateSnapshot::default();
+    for node in nodes_json {
+        let Some(id) = node.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(state) = node.get("state").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let tags: Vec<String> = node
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let shadowed = node.get("shadowed").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        snap.nodes.insert(
+            id.to_string(),
+            CxNodeSnapshot {
+                node_id: id.to_string(),
+                state: state.to_string(),
+                tags,
+                shadowed,
+                shadow_reason: None,
+                comment_count: 0,
+            },
+        );
+    }
+    Ok(snap)
 }
 
 /// Pure parser for `cx show <id> --json` output. Extracts only the
 /// fields downstream consumers care about (state, tags, shadowed).
 pub fn parse_cx_show(stdout: &[u8]) -> Option<CxNodeSnapshot> {
-    unimplemented!("parse_cx_show — implemented in next commit");
+    let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    let id = v.get("id").and_then(|s| s.as_str())?;
+    let state = v.get("state").and_then(|s| s.as_str())?;
+    let tags: Vec<String> = v
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let shadowed = v.get("shadowed").and_then(|b| b.as_bool()).unwrap_or(false);
+    Some(CxNodeSnapshot {
+        node_id: id.to_string(),
+        state: state.to_string(),
+        tags,
+        shadowed,
+        shadow_reason: None,
+        comment_count: 0,
+    })
 }
 
 /// Run `cx list --json` in the given repo and parse it. This is the

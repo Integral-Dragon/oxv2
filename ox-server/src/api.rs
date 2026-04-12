@@ -884,8 +884,14 @@ async fn step_advance(
 // ── cx State ───────────────────────────────────────────────────────
 
 async fn get_cx_state(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let cx = state.bus.projections.cx();
-    Json(serde_json::to_value(&cx).unwrap())
+    // Live read from cx — never trust the event log for current state.
+    match cx::fetch_cx_state(&state.repo_path) {
+        Ok(snap) => Json(serde_json::to_value(&snap).unwrap()),
+        Err(e) => {
+            tracing::warn!(err = %e, "cx list failed for /api/state/cx");
+            Json(serde_json::json!({ "nodes": {} }))
+        }
+    }
 }
 
 // ── Complete / Escalate ────────────────────────────────────────────
@@ -1027,14 +1033,17 @@ async fn evaluate_triggers(
     State(state): State<AppState>,
     Json(req): Json<TriggerRequest>,
 ) -> Json<serde_json::Value> {
-    let cx = state.bus.projections.cx();
     let execs = state.bus.projections.executions();
 
-    let node = cx.nodes.get(&req.node_id);
+    // Live single-node lookup via cx — same source-of-truth rule as
+    // /api/state/cx. Returns None if the node doesn't exist; we
+    // continue with empty tags so triggers tagged "*" can still fire
+    // if you have any.
+    let node = cx::fetch_node(&state.repo_path, &req.node_id);
 
     // Check if node is shadowed (skip unless force)
     if !req.force
-        && let Some(n) = node
+        && let Some(n) = &node
             && n.shadowed {
                 return Json(serde_json::json!({
                     "triggered": [],
@@ -1042,7 +1051,7 @@ async fn evaluate_triggers(
                 }));
             }
 
-    let node_tags: Vec<String> = node.map(|n| n.tags.clone()).unwrap_or_default();
+    let node_tags: Vec<String> = node.as_ref().map(|n| n.tags.clone()).unwrap_or_default();
 
     let hot = state.hot.load();
     let mut triggered = vec![];
