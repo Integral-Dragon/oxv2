@@ -137,13 +137,59 @@ prompt    = """Review all executions in this phase. For each execution, examine:
 - Signals: no_commits, dirty_workspace, exited_silent
 - Commits: what code was actually produced?
 - cx-diff: what task state changes happened?
+- Outcomes: did review pass or fail? Did the task escalate or get
+  shadowed? Did a follow-up task have to clean up this work? A retro
+  that only examines process optimizes for legible process; a retro
+  that examines outcomes optimizes for quality.
 
-Write observations to .ox/memory/phases/phase-{task_id}.md.
-Update .ox/memory/personas/ files for each persona that ran.
-Update .ox/memory/project.md if you find cross-persona patterns.
+Write the phase summary to .ox/memory/phases/phase-{task_id}.md.
+Pick at most ONE persona to update this run and propose a diff to
+.ox/memory/personas/<chosen>.md. Cross-persona observations go in
+.ox/memory/project.md. Multiple personas per run dilute review
+attention and produce diffs nobody reads carefully.
 
-Be concise. Only record what will help future runs. Delete observations
-from previous retros that turned out to be wrong or are no longer relevant."""
+Every proposed entry must cite at least THREE concrete execution
+references supporting it. One-off observations are noise; patterns
+are signal. Name the references in the entry itself so future
+retros can re-check the pattern.
+
+For every entry you add, find one to delete — stale, redundant, or
+never-referenced across subsequent runs. Memory files have a tight
+token budget and additive-only updates bloat them until signal
+drowns. Without downward pressure, memory converges to its size
+ceiling and degrades every future run.
+
+Post the proposal as a cx comment with --tag retro-proposal, linking
+to the cited executions so the reviewer can verify the evidence."""
+
+[[step]]
+name    = "review"
+persona = "retro-reviewer"
+prompt  = """Review the retro's proposed memory changes against the
+evidence. Memory has higher leverage than code — a bad memory entry
+shapes every future run, not just one module. Reject aggressively.
+
+1. Read the proposal: `cx comments {workflow.task_id} --tag retro-proposal`
+2. Read the memory diff: `git diff origin/main..HEAD -- .ox/memory/`
+3. For each proposed entry, verify:
+   - Does it cite ≥3 execution references that genuinely support
+     the claim, not retrospective pattern-matching on noise?
+   - If it contradicts an older entry, is the new evidence strong
+     enough to override, or should both be flagged as unresolved?
+   - For deletions: is the entry genuinely stale, or does the retro
+     just not like it?
+
+A rejected retro is cheaper than a memory file poisoned with
+hallucinated patterns. Post verdict as a cx comment and report
+pass/fail."""
+
+[[step.transition]]
+match = "pass"
+goto  = "merge"
+
+[[step.transition]]
+match = "fail"
+goto  = "analyze"
 
 [[step]]
 name   = "merge"
@@ -224,6 +270,26 @@ alongside the persona and task prompt. The prompt assembly order is:
 Memory sections are omitted when the corresponding files don't exist
 or are empty.
 
+### Memory as scratchpad, persona as durable record
+
+Memory is an overlay — injected alongside the persona at dispatch,
+not written back into the persona source. That has a real advantage:
+memory can be pruned, versioned, and experimented with independently
+of the persona. But it also means the persona source (e.g.,
+`inspired/software-engineer.md`) drifts from what the agent actually
+sees at runtime. A reader of the source won't know why the agent
+behaves a certain way; the real behavior lives in a separate file
+they may not think to read.
+
+The correction pressure is **promotion**: when a persona-memory
+entry has stabilized across N phases — still cited, still relevant,
+no contradictions — the consolidation retro proposes promoting it
+into the persona source and retiring the memory entry. Memory is
+the scratchpad where new observations are tested; persona source
+is the durable record of what survived the test. Without promotion,
+memory files become the shadow truth and the persona source
+ossifies into historical documentation.
+
 ---
 
 ## Consolidation
@@ -242,8 +308,13 @@ step actively manages memory size.
 - **Low-value entries** — observations that were never referenced in a
   subsequent run's logs (the agent didn't encounter that situation
   again) are candidates for removal after N phases.
-- **Contradicted entries** — if a newer observation contradicts an older
-  one, the older one is removed.
+- **Contradicted entries** — a new observation that contradicts an
+  older one is a *trigger for investigation*, not an automatic winner.
+  Recency is a heuristic, not truth. Flag both entries as unresolved,
+  require the retro to produce fresh evidence supporting one or the
+  other, and resolve only after the contradiction is examined.
+  Silently removing the older entry is how memory drifts toward
+  whichever observation is loudest, not whichever is correct.
 
 ### Size targets
 
@@ -285,6 +356,24 @@ The platform dashboard (see [platform.md](platform.md)) visualises
 these trends, making the self-improvement loop visible to the human
 operator.
 
+### Goodhart on adoption
+
+The subtle failure mode: a retro that watches its proposals get
+adopted will learn to write *adoptable-looking* proposals rather
+than *useful* ones. The metrics above will drift in whatever
+direction the retro has learned correlates with approval, which is
+not necessarily the direction of quality.
+
+Guard against this with periodic **shadow retros**: a human (or a
+second cold-started retro with no access to the production retro's
+output) reviews a phase independently and compares conclusions. If
+the human consistently agrees, the loop is healthy. If they
+consistently disagree on which patterns matter, the retro has
+drifted — revise its persona, or prune whatever stale framing is
+driving the drift. Without an outside check, a closed feedback loop
+is indistinguishable from progress at the metric level while
+quietly degrading at the quality level.
+
 ---
 
 ## Bootstrapping
@@ -307,3 +396,12 @@ ox init --memory-template ox-community/rust-project-memory
 Community-maintained memory templates capture common patterns for
 specific ecosystems (Rust, Python, React, etc.) so new projects
 don't start completely cold.
+
+Seeded entries should enter tagged as **unverified** and be the
+first candidates for consolidation until a retro has had a chance
+to confirm or prune them against actual project behavior. A seeded
+entry has the same syntactic authority as one earned through three
+retro cycles, but none of the evidence — and inherited-but-wrong
+memory is worse than no memory, because it biases every future
+retro against noticing the error. Treat seeds as hypotheses to
+test, not facts to inherit.
