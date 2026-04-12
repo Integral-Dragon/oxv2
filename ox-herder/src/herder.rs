@@ -1067,6 +1067,10 @@ impl<C: OxClientApi> Herder<C> {
                 }
             };
 
+            // Clone before moving into create_execution so we can build
+            // the optimistic local view from the same data on success.
+            let vars_for_local = trigger_vars.clone();
+            let workflow_for_local = trigger.workflow.clone();
             match self
                 .client
                 .create_execution(
@@ -1079,6 +1083,28 @@ impl<C: OxClientApi> Herder<C> {
             {
                 Ok(exec_id) => {
                     tracing::info!(exec = %exec_id, "execution created by trigger");
+
+                    // Optimistic local insert: dedup checks against
+                    // self.executions, but the SSE round-trip carrying
+                    // execution.created back can lag behind a tight
+                    // reconcile loop. Without this, two reconcile passes
+                    // can fire two creates for the same node before SSE
+                    // catches up. Phase=AwaitingStep keeps the state
+                    // machine inert until the real SSE event replaces
+                    // this entry with the proper Ready{first_step}.
+                    self.executions.insert(
+                        exec_id.0.clone(),
+                        ExecutionView {
+                            vars: vars_for_local,
+                            origin: origin.clone(),
+                            workflow: workflow_for_local,
+                            status: "running".into(),
+                            phase: ExecPhase::AwaitingStep,
+                            visit_counts: HashMap::new(),
+                            last_output: None,
+                            retry_tracker: RetryTracker::new(),
+                        },
+                    );
                 }
                 Err(e) => {
                     tracing::error!(err = %e, "failed to create execution from trigger");
