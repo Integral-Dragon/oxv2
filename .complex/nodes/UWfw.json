@@ -1,0 +1,12 @@
+{
+  "id": "UWfw",
+  "title": "Config-driven trigger vars + ExecutionOrigin refactor",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-12T14:18:12.827229842Z",
+  "updated_at": "2026-04-12T14:18:12.827229842Z",
+  "tags": [
+    "workflow:code-task-tdd"
+  ]
+}

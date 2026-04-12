@@ -1,8 +1,10 @@
+use crate::events::EventContext;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
+use thiserror::Error;
 
 /// Variable type — shared by workflow vars and runtime vars.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +211,28 @@ pub struct TriggerDef {
     pub workflow: String,
     #[serde(default)]
     pub poll_interval: Option<String>,
+    /// Mapping from workflow var name to a template interpolated against
+    /// `{event.*}` fields of the firing event context.
+    #[serde(default)]
+    pub vars: HashMap<String, String>,
+}
+
+/// Errors returned when a trigger cannot produce workflow vars from an event.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TriggerError {
+    #[error("missing event field: {path}")]
+    MissingEventField { path: String },
+}
+
+impl TriggerDef {
+    /// Resolve the trigger's `[trigger.vars]` block against an event context,
+    /// returning the map of workflow vars to pass to `create_execution`.
+    pub fn build_vars(
+        &self,
+        _ctx: &EventContext,
+    ) -> Result<HashMap<String, String>, TriggerError> {
+        todo!("slice A: interpolate self.vars templates against ctx")
+    }
 }
 
 /// TOML layout for a standalone triggers file: [[trigger]] arrays.
@@ -778,5 +802,100 @@ workflow = "code-task"
         assert_eq!(file.trigger[0].on, "cx.task_ready");
         assert_eq!(file.trigger[0].workflow, "code-task");
         assert_eq!(file.trigger[1].on, "cx.comment_added");
+    }
+
+    #[test]
+    fn parse_trigger_with_vars_block() {
+        let toml = r#"
+[[trigger]]
+on       = "cx.task_ready"
+tag      = "workflow:consultation"
+workflow = "consultation"
+[trigger.vars]
+branch = "{event.node_id}"
+"#;
+        let file: TriggersFile = toml::from_str(toml).unwrap();
+        assert_eq!(file.trigger.len(), 1);
+        let t = &file.trigger[0];
+        assert_eq!(t.vars.get("branch").map(String::as_str), Some("{event.node_id}"));
+    }
+
+    #[test]
+    fn build_vars_interpolates_event_node_id_into_named_var() {
+        // The consultation workflow uses `branch` as its var name.
+        // A cx.task_ready trigger must map event.node_id → branch.
+        let trigger = TriggerDef {
+            on: "cx.task_ready".into(),
+            tag: Some("workflow:consultation".into()),
+            state: None,
+            workflow: "consultation".into(),
+            poll_interval: None,
+            vars: HashMap::from([("branch".into(), "{event.node_id}".into())]),
+        };
+        let ctx = EventContext::CxTaskReady { node_id: "aJuO".into() };
+
+        let result = trigger.build_vars(&ctx).expect("build_vars should succeed");
+
+        assert_eq!(result.get("branch").map(String::as_str), Some("aJuO"));
+        assert!(
+            !result.contains_key("task_id"),
+            "consultation trigger must NOT silently populate task_id"
+        );
+    }
+
+    #[test]
+    fn build_vars_interpolates_for_code_task_shape() {
+        // The code-task workflow uses `task_id` as its var name.
+        let trigger = TriggerDef {
+            on: "cx.task_ready".into(),
+            tag: Some("workflow:code-task".into()),
+            state: None,
+            workflow: "code-task".into(),
+            poll_interval: None,
+            vars: HashMap::from([("task_id".into(), "{event.node_id}".into())]),
+        };
+        let ctx = EventContext::CxTaskReady { node_id: "bXYz".into() };
+
+        let result = trigger.build_vars(&ctx).unwrap();
+
+        assert_eq!(result.get("task_id").map(String::as_str), Some("bXYz"));
+    }
+
+    #[test]
+    fn build_vars_errors_on_unknown_event_field() {
+        let trigger = TriggerDef {
+            on: "cx.task_ready".into(),
+            tag: None,
+            state: None,
+            workflow: "whatever".into(),
+            poll_interval: None,
+            vars: HashMap::from([("x".into(), "{event.bogus}".into())]),
+        };
+        let ctx = EventContext::CxTaskReady { node_id: "n".into() };
+
+        let err = trigger.build_vars(&ctx).expect_err("should fail on bogus field");
+
+        assert_eq!(
+            err,
+            TriggerError::MissingEventField { path: "event.bogus".into() }
+        );
+    }
+
+    #[test]
+    fn build_vars_empty_block_returns_empty_map() {
+        // A trigger with no [trigger.vars] block should produce no vars —
+        // NOT magically inject task_id or anything else.
+        let trigger = TriggerDef {
+            on: "cx.task_ready".into(),
+            tag: None,
+            state: None,
+            workflow: "whatever".into(),
+            poll_interval: None,
+            vars: HashMap::new(),
+        };
+        let ctx = EventContext::CxTaskReady { node_id: "n".into() };
+
+        let result = trigger.build_vars(&ctx).unwrap();
+        assert!(result.is_empty());
     }
 }

@@ -266,6 +266,42 @@ pub struct CxTaskReadyData {
     pub workflow: Option<String>,
 }
 
+/// Trigger-firing event context. Exposes the subset of event payload fields
+/// that can be referenced as `{event.X}` inside a `[trigger.vars]` block.
+///
+/// v1 supports cx events only; workflow-chaining variants are deferred.
+#[derive(Debug, Clone)]
+pub enum EventContext {
+    CxTaskReady { node_id: String },
+    CxTaskClaimed { node_id: String },
+    CxTaskIntegrated { node_id: String },
+    CxTaskShadowed { node_id: String, reason: String },
+    CxCommentAdded {
+        node_id: String,
+        tag: Option<String>,
+        author: Option<String>,
+    },
+}
+
+impl EventContext {
+    /// Resolve a dotted path like `event.node_id` to its string value.
+    /// Returns `None` if the path is not defined for this variant.
+    pub fn resolve(&self, path: &str) -> Option<String> {
+        let field = path.strip_prefix("event.")?;
+        match (self, field) {
+            (Self::CxTaskReady { node_id }, "node_id") => Some(node_id.clone()),
+            (Self::CxTaskClaimed { node_id }, "node_id") => Some(node_id.clone()),
+            (Self::CxTaskIntegrated { node_id }, "node_id") => Some(node_id.clone()),
+            (Self::CxTaskShadowed { node_id, .. }, "node_id") => Some(node_id.clone()),
+            (Self::CxTaskShadowed { reason, .. }, "reason") => Some(reason.clone()),
+            (Self::CxCommentAdded { node_id, .. }, "node_id") => Some(node_id.clone()),
+            (Self::CxCommentAdded { tag, .. }, "tag") => tag.clone(),
+            (Self::CxCommentAdded { author, .. }, "author") => author.clone(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CxTaskClaimedData {
     pub node_id: String,
