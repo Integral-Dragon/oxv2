@@ -908,7 +908,31 @@ impl<C: OxClientApi> Herder<C> {
     /// already have an active execution are skipped via the existing
     /// `is_origin_active` dedup.
     async fn reconcile_triggers(&mut self) {
-        unimplemented!("reconcile_triggers — implemented in next commit");
+        let cx_state = match self.client.get_cx_state().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(err = %e, "cx state fetch failed during reconcile");
+                return;
+            }
+        };
+
+        // Snapshot the ready set first so we can mutate self inside the loop.
+        let ready_nodes: Vec<(String, String, Vec<String>)> = cx_state
+            .nodes
+            .values()
+            .filter(|n| n.state == "ready" && !n.shadowed)
+            .map(|n| (n.node_id.clone(), n.state.clone(), n.tags.clone()))
+            .collect();
+
+        for (node_id, state, tags) in ready_nodes {
+            self.evaluate_triggers_for_node_with_state(
+                &node_id,
+                "cx.task_ready",
+                &tags,
+                Some(state.as_str()),
+            )
+            .await;
+        }
     }
 
     async fn evaluate_pending_triggers(&mut self) {
