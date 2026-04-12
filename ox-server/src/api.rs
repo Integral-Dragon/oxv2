@@ -1236,9 +1236,6 @@ async fn get_step_metrics(
         None => return Json(serde_json::json!(null)),
     };
 
-    // Find the latest confirmed attempt for this step with metrics
-    // We need to look at the event log for the actual metrics
-    // For now, return the attempt info
     let attempts: Vec<serde_json::Value> = exec
         .attempts
         .iter()

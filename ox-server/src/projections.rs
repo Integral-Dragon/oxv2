@@ -501,7 +501,6 @@ mod tests {
     }
 
     /// A new attempt number (workflow retry / loop) must still create a new row.
-    /// This guards against over-collapsing when slice 1 is implemented.
     #[test]
     fn dispatch_new_attempt_pushes_new_row() {
         let proj = Projections::default();

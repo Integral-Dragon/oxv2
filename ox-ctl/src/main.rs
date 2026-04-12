@@ -431,8 +431,6 @@ async fn cmd_exec_cancel(client: &OxClient, id: &str) -> Result<()> {
 // ── Runners ─────────────────────────────────────────────────────────
 
 async fn cmd_runners_list(client: &OxClient, json: bool) -> Result<()> {
-    let resp = client.status().await?; // pool state from status for now
-    // Use the raw pool state endpoint
     let pool: serde_json::Value = reqwest::Client::new()
         .get(format!("{}/api/state/pool", client.base_url()))
         .send()
@@ -443,7 +441,6 @@ async fn cmd_runners_list(client: &OxClient, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&pool)?);
     } else {
-        let _ = resp;
         let runners = pool
             .get("runners")
             .and_then(|v| v.as_array())
