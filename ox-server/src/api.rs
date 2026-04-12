@@ -486,6 +486,7 @@ async fn get_execution(
     Ok(Json(serde_json::json!({
         "id": exec.id.0,
         "vars": exec.vars,
+        "origin": exec.origin,
         "workflow": exec.workflow,
         "status": format!("{:?}", exec.status).to_lowercase(),
         "current_step": exec.current_step,
