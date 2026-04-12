@@ -327,7 +327,7 @@ You are a software engineer."#;
             "---\nruntime: claude\nmodel: opus\n---\n\nYou review code.",
         ).unwrap();
 
-        let result = load_personas(&[tmp.clone()]);
+        let result = load_personas(std::slice::from_ref(&tmp));
         assert!(result.contains_key("team/reviewer"));
         let p = &result["team/reviewer"];
         assert_eq!(p.runtime.as_deref(), Some("claude"));

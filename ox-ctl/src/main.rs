@@ -690,11 +690,12 @@ async fn cmd_attach(server_url: &str, execution_id: &str, step: &str) -> Result<
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             interval.tick().await;
-            if let Ok(exec) = poll_client.get_execution(&poll_exec_id).await {
-                if exec.status != "running" || exec.current_step.as_deref() != Some(&poll_step) {
-                    step_alive_writer.store(false, std::sync::atomic::Ordering::Relaxed);
-                    break;
-                }
+            if let Ok(exec) = poll_client.get_execution(&poll_exec_id).await
+                && (exec.status != "running"
+                    || exec.current_step.as_deref() != Some(&poll_step))
+            {
+                step_alive_writer.store(false, std::sync::atomic::Ordering::Relaxed);
+                break;
             }
         }
     });

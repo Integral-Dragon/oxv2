@@ -622,7 +622,7 @@ async fn dispatch_step(
             let mut workflow_vars = req.vars.clone();
             if let Some(wf) = workflow_name.and_then(|n| hot.workflows.get(n)) {
                 // Step runtime fields can override workflow var values (e.g. persona per step)
-                for (name, _) in &wf.vars {
+                for name in wf.vars.keys() {
                     if let Some(val) = step_rt.fields.get(name) {
                         workflow_vars.insert(name.clone(), ox_core::runtime::toml_value_to_string(val));
                     }
@@ -630,19 +630,18 @@ async fn dispatch_step(
 
                 // Resolve file-typed workflow vars to content
                 for (name, def) in &wf.vars {
-                    if def.var_type == VarType::File {
-                        if let Some(file_ref) = workflow_vars.get(name).cloned()
-                            && !file_ref.is_empty()
-                        {
-                            let search_dir = def.search_dir.clone()
-                                .unwrap_or_else(|| format!("{name}s"));
-                            if let Some(content) = find_and_read_file(
-                                &hot.search_path, &search_dir, &file_ref,
-                            ) {
-                                workflow_vars.insert(name.clone(), content);
-                            } else {
-                                tracing::warn!(var = %name, file = %file_ref, "file var not found on search path");
-                            }
+                    if def.var_type == VarType::File
+                        && let Some(file_ref) = workflow_vars.get(name).cloned()
+                        && !file_ref.is_empty()
+                    {
+                        let search_dir = def.search_dir.clone()
+                            .unwrap_or_else(|| format!("{name}s"));
+                        if let Some(content) = find_and_read_file(
+                            &hot.search_path, &search_dir, &file_ref,
+                        ) {
+                            workflow_vars.insert(name.clone(), content);
+                        } else {
+                            tracing::warn!(var = %name, file = %file_ref, "file var not found on search path");
                         }
                     }
                 }

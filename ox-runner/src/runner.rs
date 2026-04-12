@@ -438,17 +438,18 @@ impl Runner {
 
         // Add ox bin directory to PATH so ox-rt is available
         let current_path = std::env::var("PATH").unwrap_or_default();
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(project_root) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
-                let bin_dir = project_root.join("bin");
-                if bin_dir.join("ox-rt").exists() {
-                    env_vars.insert("PATH".into(), format!("{}:{}", bin_dir.display(), current_path));
-                }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(project_root) =
+                exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+        {
+            let bin_dir = project_root.join("bin");
+            if bin_dir.join("ox-rt").exists() {
+                env_vars.insert("PATH".into(), format!("{}:{}", bin_dir.display(), current_path));
             }
         }
 
         let log_file_path = tmp_dir.join("step.log");
-        let is_tty = assignment.resolved.as_ref().map_or(false, |r| r.tty);
+        let is_tty = assignment.resolved.as_ref().is_some_and(|r| r.tty);
 
         tracing::info!(cmd = ?cmd_args, is_tty, "spawning runtime process");
 
