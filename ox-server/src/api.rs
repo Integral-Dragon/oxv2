@@ -55,6 +55,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/config/check", post(check_config))
         // Triggers
         .route("/api/triggers/evaluate", post(evaluate_triggers))
+        .route("/api/triggers/failed", post(post_trigger_failed))
         // Metrics
         .route(
             "/api/executions/{id}/steps/{step}/metrics",
@@ -1100,32 +1101,86 @@ async fn evaluate_triggers(
         let execution_id = ExecutionId(format!("e-{epoch}-{seq}"));
 
         // Build workflow vars by interpolating the trigger's [trigger.vars]
-        // block against the firing event context.
+        // block against the firing event context. On any error, emit a
+        // trigger.failed event and skip this trigger.
         let event_ctx = ox_core::events::EventContext::CxTaskReady {
             node_id: req.node_id.clone(),
         };
         let input_vars = match trigger.build_vars(&event_ctx) {
             Ok(v) => v,
-            Err(e) => {
+            Err(ox_core::workflow::TriggerError::MissingEventField { path }) => {
                 tracing::warn!(
                     workflow = %workflow_name,
-                    err = %e,
-                    "trigger var interpolation failed — skipping"
+                    path = %path,
+                    "trigger var interpolation failed — missing event field"
                 );
+                let failed = ox_core::events::TriggerFailedData::from_missing_field(
+                    ox_core::types::Seq(state.bus.current_seq()),
+                    &trigger.on,
+                    trigger.tag.as_deref(),
+                    workflow_name,
+                    path,
+                );
+                state
+                    .bus
+                    .append(
+                        EventType::TriggerFailed,
+                        serde_json::to_value(failed).unwrap(),
+                    )
+                    .unwrap();
                 continue;
             }
         };
 
-        // Validate against the workflow's var declarations to fill in defaults.
+        // Validate against the workflow's var declarations. If the workflow
+        // isn't loaded, that's an UnknownWorkflow failure. If validation
+        // fails, that's a ValidationFailed — both surface as trigger.failed.
         let vars = match hot.workflows.get(workflow_name) {
             Some(wf) => match wf.validate_vars(&input_vars) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!(workflow = %workflow_name, err = %e, "trigger var validation failed");
-                    input_vars
+                    tracing::warn!(
+                        workflow = %workflow_name,
+                        err = %e,
+                        "trigger var validation failed"
+                    );
+                    let failed = ox_core::events::TriggerFailedData::from_validation_error(
+                        ox_core::types::Seq(state.bus.current_seq()),
+                        &trigger.on,
+                        trigger.tag.as_deref(),
+                        workflow_name,
+                        e,
+                    );
+                    state
+                        .bus
+                        .append(
+                            EventType::TriggerFailed,
+                            serde_json::to_value(failed).unwrap(),
+                        )
+                        .unwrap();
+                    continue;
                 }
             },
-            None => input_vars,
+            None => {
+                tracing::warn!(
+                    workflow = %workflow_name,
+                    "trigger references unknown workflow"
+                );
+                let failed = ox_core::events::TriggerFailedData::for_unknown_workflow(
+                    ox_core::types::Seq(state.bus.current_seq()),
+                    &trigger.on,
+                    trigger.tag.as_deref(),
+                    workflow_name,
+                );
+                state
+                    .bus
+                    .append(
+                        EventType::TriggerFailed,
+                        serde_json::to_value(failed).unwrap(),
+                    )
+                    .unwrap();
+                continue;
+            }
         };
 
         let data = ExecutionCreatedData {
@@ -1151,6 +1206,24 @@ async fn evaluate_triggers(
     }
 
     Json(serde_json::json!({ "triggered": triggered }))
+}
+
+/// Append a `trigger.failed` event. Used by the herder when its own
+/// `build_vars` pass errors before the server ever sees the request.
+async fn post_trigger_failed(
+    State(state): State<AppState>,
+    Json(data): Json<TriggerFailedData>,
+) -> StatusCode {
+    match state
+        .bus
+        .append(EventType::TriggerFailed, serde_json::to_value(data).unwrap())
+    {
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(e) => {
+            tracing::error!(err = %e, "failed to append trigger.failed event");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 // ── Metrics ────────────────────────────────────────────────────────

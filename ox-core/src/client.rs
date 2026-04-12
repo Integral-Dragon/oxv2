@@ -259,6 +259,21 @@ impl OxClient {
         Ok(resp.execution_id)
     }
 
+    /// Append a `trigger.failed` event to the server's event log. Called
+    /// by the herder when its local `build_vars` pass errors out.
+    pub async fn post_trigger_failed(
+        &self,
+        data: &crate::events::TriggerFailedData,
+    ) -> Result<()> {
+        self.http
+            .post(self.url("/api/triggers/failed"))
+            .json(data)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     pub async fn get_execution(&self, id: &str) -> Result<ExecutionDetail> {
         self.http
             .get(self.url(&format!("/api/executions/{id}")))

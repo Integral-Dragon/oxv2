@@ -959,18 +959,32 @@ impl Herder {
             // block against the firing event context. Workflow var names are
             // declared by each workflow (e.g. `task_id`, `branch`); the trigger
             // file maps event fields into whatever names the workflow expects.
+            //
+            // On a missing-field error, emit `trigger.failed` through the
+            // server's event log so the failure is observable to operators.
+            // The emission is deterministic per replay — guarded elsewhere.
             let event_ctx = EventContext::CxTaskReady {
                 node_id: node_id.to_string(),
             };
             let trigger_vars = match trigger.build_vars(&event_ctx) {
                 Ok(v) => v,
-                Err(e) => {
+                Err(ox_core::workflow::TriggerError::MissingEventField { path }) => {
                     tracing::warn!(
                         node = %node_id,
                         workflow = %trigger.workflow,
-                        err = %e,
-                        "trigger var interpolation failed — skipping"
+                        path = %path,
+                        "trigger var interpolation failed — missing event field"
                     );
+                    let failed = TriggerFailedData::from_missing_field(
+                        Seq(self.last_seq),
+                        &trigger.on,
+                        trigger.tag.as_deref(),
+                        &trigger.workflow,
+                        path,
+                    );
+                    if let Err(e) = self.client.post_trigger_failed(&failed).await {
+                        tracing::warn!(err = %e, "failed to post trigger.failed event");
+                    }
                     continue;
                 }
             };

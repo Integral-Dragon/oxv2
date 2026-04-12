@@ -419,6 +419,22 @@ pub enum TriggerFailureReason {
 }
 
 impl TriggerFailedData {
+    fn new(
+        source_seq: Seq,
+        on: &str,
+        tag: Option<&str>,
+        workflow: &str,
+        reason: TriggerFailureReason,
+    ) -> Self {
+        Self {
+            source_seq,
+            on: on.to_string(),
+            tag: tag.map(str::to_string),
+            workflow: workflow.to_string(),
+            reason,
+        }
+    }
+
     /// Build a failure record from a missing-field interpolation error.
     pub fn from_missing_field(
         source_seq: Seq,
@@ -427,7 +443,13 @@ impl TriggerFailedData {
         workflow: &str,
         missing_path: String,
     ) -> Self {
-        todo!("slice C: construct TriggerFailedData::MissingEventField")
+        Self::new(
+            source_seq,
+            on,
+            tag,
+            workflow,
+            TriggerFailureReason::MissingEventField { path: missing_path },
+        )
     }
 
     /// Build a failure record from a `WorkflowDef::validate_vars` error.
@@ -438,7 +460,13 @@ impl TriggerFailedData {
         workflow: &str,
         message: String,
     ) -> Self {
-        todo!("slice C: construct TriggerFailedData::ValidationFailed")
+        Self::new(
+            source_seq,
+            on,
+            tag,
+            workflow,
+            TriggerFailureReason::ValidationFailed { message },
+        )
     }
 
     /// Build a failure record when the trigger's workflow doesn't exist.
@@ -448,7 +476,13 @@ impl TriggerFailedData {
         tag: Option<&str>,
         workflow: &str,
     ) -> Self {
-        todo!("slice C: construct TriggerFailedData::UnknownWorkflow")
+        Self::new(
+            source_seq,
+            on,
+            tag,
+            workflow,
+            TriggerFailureReason::UnknownWorkflow,
+        )
     }
 }
 
