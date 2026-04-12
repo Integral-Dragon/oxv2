@@ -36,8 +36,6 @@ pub trait OxClientApi: Send + Sync {
     async fn status(&self) -> Result<StatusResponse>;
     async fn list_workflows(&self) -> Result<Vec<WorkflowEntry>>;
 
-    async fn get_cx_state(&self) -> Result<CxStateSnapshot>;
-
     async fn create_execution(
         &self,
         workflow: &str,
@@ -702,17 +700,6 @@ impl OxClient {
             .context("parsing config check response")
     }
 
-    /// Fetch the full cx projection snapshot for reconciliation passes.
-    pub async fn get_cx_state(&self) -> Result<CxStateSnapshot> {
-        self.http
-            .get(self.url("/api/state/cx"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await
-            .context("parsing cx state response")
-    }
 }
 
 impl OxClientApi for OxClient {
@@ -721,9 +708,6 @@ impl OxClientApi for OxClient {
     }
     async fn list_workflows(&self) -> Result<Vec<WorkflowEntry>> {
         OxClient::list_workflows(self).await
-    }
-    async fn get_cx_state(&self) -> Result<CxStateSnapshot> {
-        OxClient::get_cx_state(self).await
     }
     async fn create_execution(
         &self,

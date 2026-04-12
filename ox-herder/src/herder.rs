@@ -50,11 +50,16 @@ struct ExecutionView {
 }
 
 /// A pending trigger to evaluate in the next scheduling pass.
+/// `state` is the node's cx state at the time the event was emitted,
+/// carried in the event payload so the herder doesn't have to round
+/// trip back to the server. Empty string = unknown (historical events
+/// written before the field existed); treated as None at the call site.
 #[derive(Debug)]
 struct PendingTrigger {
     node_id: String,
     event_type: String,
     tags: Vec<String>,
+    state: String,
 }
 
 pub struct Herder<C: OxClientApi = OxClient> {
@@ -387,12 +392,13 @@ impl<C: OxClientApi> Herder<C> {
             // cx events — queue for trigger evaluation
             "cx.task_ready" => {
                 let d: CxTaskReadyData = serde_json::from_value(envelope.data)?;
-                tracing::info!(node = %d.node_id, tags = ?d.tags, replaying = self.replaying, "cx.task_ready");
+                tracing::info!(node = %d.node_id, tags = ?d.tags, state = %d.state, replaying = self.replaying, "cx.task_ready");
                 if !self.replaying {
                     self.pending_triggers.push(PendingTrigger {
                         node_id: d.node_id,
                         event_type: "cx.task_ready".into(),
                         tags: d.tags,
+                        state: d.state,
                     });
                 }
             }
@@ -456,12 +462,10 @@ impl<C: OxClientApi> Herder<C> {
     // ── The Scheduler ──────────────────────────────────────────────
 
     async fn schedule(&mut self) {
-        // Phase 0: Reconcile triggers against the current cx state.
-        // This is the source of truth — pending_triggers below is just a
-        // low-latency hint, not load-bearing for correctness.
-        self.reconcile_triggers().await;
-
-        // Phase 1: Evaluate pending triggers
+        // Phase 1: Evaluate pending triggers. cx state flows in as SSE
+        // events derived from `cx log` + `cx show` in ox-server; every
+        // trigger-relevant change reaches us that way, so there is no
+        // separate reconcile pass.
         self.evaluate_pending_triggers().await;
 
         // Phase 2: Process execution state machines (loop until stable)
@@ -902,39 +906,6 @@ impl<C: OxClientApi> Herder<C> {
 
     // ── Triggers ───────────────────────────────────────────────────
 
-    /// Walk all currently-ready cx nodes and evaluate triggers against
-    /// them. State-driven — fires regardless of whether a `cx.task_ready`
-    /// event was ever observed for the node. Idempotent: nodes that
-    /// already have an active execution are skipped via the existing
-    /// `is_origin_active` dedup.
-    async fn reconcile_triggers(&mut self) {
-        let cx_state = match self.client.get_cx_state().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::debug!(err = %e, "cx state fetch failed during reconcile");
-                return;
-            }
-        };
-
-        // Snapshot the ready set first so we can mutate self inside the loop.
-        let ready_nodes: Vec<(String, String, Vec<String>)> = cx_state
-            .nodes
-            .values()
-            .filter(|n| n.state == "ready" && !n.shadowed)
-            .map(|n| (n.node_id.clone(), n.state.clone(), n.tags.clone()))
-            .collect();
-
-        for (node_id, state, tags) in ready_nodes {
-            self.evaluate_triggers_for_node_with_state(
-                &node_id,
-                "cx.task_ready",
-                &tags,
-                Some(state.as_str()),
-            )
-            .await;
-        }
-    }
-
     async fn evaluate_pending_triggers(&mut self) {
         // Re-fetch config from server if stale (>30s since last refresh).
         // This picks up hot-reloaded workflows, triggers, and personas.
@@ -948,33 +919,25 @@ impl<C: OxClientApi> Herder<C> {
         let triggers = std::mem::take(&mut self.pending_triggers);
 
         for trigger in triggers {
-            self.evaluate_triggers_for_node(&trigger.node_id, &trigger.event_type, &trigger.tags)
-                .await;
+            let state = if trigger.state.is_empty() {
+                None
+            } else {
+                Some(trigger.state.as_str())
+            };
+            self.evaluate_triggers_for_node_with_state(
+                &trigger.node_id,
+                &trigger.event_type,
+                &trigger.tags,
+                state,
+            )
+            .await;
         }
     }
 
-    async fn evaluate_triggers_for_node(
-        &mut self,
-        node_id: &str,
-        event_type: &str,
-        tags: &[String],
-    ) {
-        // Fetch the node's current state once and delegate. The bulk
-        // reconcile path passes pre-fetched state directly to skip this.
-        let current_state = get_cx_node_state(&self.server_url, node_id).await;
-        self.evaluate_triggers_for_node_with_state(
-            node_id,
-            event_type,
-            tags,
-            current_state.as_deref(),
-        )
-        .await;
-    }
-
-    /// Inner trigger evaluator that takes a pre-fetched cx state. This
-    /// is the form the bulk reconciliation path calls — it has the
-    /// state in hand from the single `/api/state/cx` fetch and avoids
-    /// an N+1 round-trip per ready node.
+    /// Trigger evaluator that takes a pre-fetched cx state. State is
+    /// carried on the cx.task_ready event payload (emitted by
+    /// ox-server's cx poll loop, which queried `cx show` for truth),
+    /// so no round-trip back to the server is needed here.
     async fn evaluate_triggers_for_node_with_state(
         &mut self,
         node_id: &str,
@@ -1139,44 +1102,24 @@ impl<C: OxClientApi> Herder<C> {
     }
 }
 
-/// Check the current state of a cx node via the server projection.
-async fn get_cx_node_state(server_url: &str, node_id: &str) -> Option<String> {
-    let url = format!("{server_url}/api/state/cx");
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .send()
-        .await
-        .ok()?;
-    let cx_state: serde_json::Value = resp.json().await.ok()?;
-    let nodes = cx_state.get("nodes")?.as_object()?;
-    let node = nodes.get(node_id)?;
-    node.get("state").and_then(|s| s.as_str()).map(String::from)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ox_core::client::{
-        CxNodeSnapshot, CxStateSnapshot, DispatchStepParams, OxClientApi, StatusResponse,
-        WorkflowEntry,
+        DispatchStepParams, OxClientApi, StatusResponse, WorkflowEntry,
     };
     use std::sync::Mutex;
 
-    /// Mock implementing only the methods reconciliation actually uses.
-    /// Unused trait methods panic — keeps tests honest about what they
-    /// actually exercise.
+    /// Mock implementing only the methods the SSE-driven trigger path
+    /// actually uses. Unused trait methods panic.
     #[derive(Default)]
     struct MockClient {
-        cx_state: Mutex<CxStateSnapshot>,
         created: Mutex<Vec<(String, String, ExecutionOrigin)>>,
     }
 
     impl MockClient {
         fn new() -> Self {
             Self::default()
-        }
-        fn set_cx_state(&self, state: CxStateSnapshot) {
-            *self.cx_state.lock().unwrap() = state;
         }
         fn create_calls(&self) -> Vec<(String, String, ExecutionOrigin)> {
             self.created.lock().unwrap().clone()
@@ -1185,13 +1128,10 @@ mod tests {
 
     impl OxClientApi for MockClient {
         async fn status(&self) -> Result<StatusResponse> {
-            unimplemented!("MockClient::status not used by reconcile tests")
+            unimplemented!("MockClient::status not used")
         }
         async fn list_workflows(&self) -> Result<Vec<WorkflowEntry>> {
-            unimplemented!("MockClient::list_workflows not used by reconcile tests")
-        }
-        async fn get_cx_state(&self) -> Result<CxStateSnapshot> {
-            Ok(self.cx_state.lock().unwrap().clone())
+            unimplemented!("MockClient::list_workflows not used")
         }
         async fn create_execution(
             &self,
@@ -1239,17 +1179,6 @@ mod tests {
         }
     }
 
-    fn ready_node(node_id: &str, tags: &[&str]) -> CxNodeSnapshot {
-        CxNodeSnapshot {
-            node_id: node_id.to_string(),
-            state: "ready".into(),
-            tags: tags.iter().map(|s| s.to_string()).collect(),
-            shadowed: false,
-            shadow_reason: None,
-            comment_count: 0,
-        }
-    }
-
     fn code_task_trigger() -> TriggerDef {
         TriggerDef {
             on: "cx.task_ready".into(),
@@ -1268,56 +1197,46 @@ mod tests {
         h
     }
 
-    /// Two reconcile passes in rapid succession (faster than the SSE
-    /// round-trip that would carry the execution.created event back to
-    /// the herder) must NOT both fire create_execution. The dedup gate
-    /// has to see the freshly-created execution immediately, before
-    /// SSE catches up.
-    ///
-    /// This is the bug observed live on ccstat: reconcile fired for
-    /// Ygdt twice in the same second because the local executions
-    /// view was empty during both passes.
+    /// Two cx.task_ready events in rapid succession for the same node
+    /// (faster than the SSE round-trip that would carry the
+    /// execution.created event back to the herder) must NOT both fire
+    /// create_execution. The optimistic local insert is what keeps the
+    /// second eval from firing again.
     #[tokio::test]
-    async fn reconcile_does_not_double_fire_before_sse_catches_up() {
-        let client = MockClient::new();
-        let mut snap = CxStateSnapshot::default();
-        snap.nodes
-            .insert("Ygdt".into(), ready_node("Ygdt", &["workflow:code-task"]));
-        client.set_cx_state(snap);
-
-        let mut h = herder_with_trigger(client);
-        // No SSE event simulation between passes — self.executions stays
-        // un-updated by the SSE handler. The optimistic local insert is
-        // what must keep the second reconcile from firing again.
-        h.reconcile_triggers().await;
-        h.reconcile_triggers().await;
-
-        let calls = h.client.create_calls();
-        assert_eq!(
-            calls.len(),
-            1,
-            "expected exactly one create_execution call, got {}",
-            calls.len()
-        );
+    async fn rapid_repeat_task_ready_does_not_double_fire() {
+        let mut h = herder_with_trigger(MockClient::new());
+        h.evaluate_triggers_for_node_with_state(
+            "Ygdt",
+            "cx.task_ready",
+            &["workflow:code-task".into()],
+            Some("ready"),
+        )
+        .await;
+        h.evaluate_triggers_for_node_with_state(
+            "Ygdt",
+            "cx.task_ready",
+            &["workflow:code-task".into()],
+            Some("ready"),
+        )
+        .await;
+        assert_eq!(h.client.create_calls().len(), 1);
     }
 
-    /// Reconcile must fire create_execution for a ready+tagged node that
-    /// has no active execution. This is the CcoT scenario: a node was
-    /// already in `state: ready` and the tag was added later, so the
-    /// event-driven path never saw a state transition.
+    /// A cx.task_ready event with state="ready" and the matching tag
+    /// fires create_execution. This is the CcoT path.
     #[tokio::test]
-    async fn reconcile_fires_for_ready_tagged_node() {
-        let client = MockClient::new();
-        let mut snap = CxStateSnapshot::default();
-        snap.nodes
-            .insert("CcoT".into(), ready_node("CcoT", &["workflow:code-task"]));
-        client.set_cx_state(snap);
-
-        let mut h = herder_with_trigger(client);
-        h.reconcile_triggers().await;
+    async fn task_ready_event_fires_for_matching_node() {
+        let mut h = herder_with_trigger(MockClient::new());
+        h.evaluate_triggers_for_node_with_state(
+            "CcoT",
+            "cx.task_ready",
+            &["workflow:code-task".into()],
+            Some("ready"),
+        )
+        .await;
 
         let calls = h.client.create_calls();
-        assert_eq!(calls.len(), 1, "expected one execution to be created");
+        assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "code-task");
         assert_eq!(
             calls[0].2,
@@ -1327,57 +1246,30 @@ mod tests {
         );
     }
 
-    /// Reconcile must NOT fire create_execution if an execution for the
-    /// same (origin, workflow) is already running. Idempotency under
-    /// repeated ticks is the whole point of state-driven reconciliation.
+    /// A cx.task_ready event carrying state="integrated" (which can
+    /// happen if the node transitions integrated between log and show
+    /// on the server side, or if the old projection lingered in the
+    /// event log) must NOT fire create_execution. The suppression
+    /// check on integrated/shadowed is what ripped out the Ygdt bug.
     #[tokio::test]
-    async fn reconcile_skips_when_origin_already_active() {
-        let client = MockClient::new();
-        let mut snap = CxStateSnapshot::default();
-        snap.nodes
-            .insert("CcoT".into(), ready_node("CcoT", &["workflow:code-task"]));
-        client.set_cx_state(snap);
-
-        let mut h = herder_with_trigger(client);
-        h.executions.insert(
-            "exec-existing".into(),
-            ExecutionView {
-                vars: HashMap::new(),
-                origin: ExecutionOrigin::CxNode {
-                    node_id: "CcoT".into(),
-                },
-                workflow: "code-task".into(),
-                status: "running".into(),
-                phase: ExecPhase::AwaitingStep,
-                visit_counts: HashMap::new(),
-                last_output: None,
-                retry_tracker: RetryTracker::new(),
-            },
-        );
-
-        h.reconcile_triggers().await;
-        h.reconcile_triggers().await;
-
-        assert_eq!(
-            h.client.create_calls().len(),
-            0,
-            "expected no executions when origin already active"
-        );
+    async fn task_ready_with_integrated_state_does_not_fire() {
+        let mut h = herder_with_trigger(MockClient::new());
+        h.evaluate_triggers_for_node_with_state(
+            "Ygdt",
+            "cx.task_ready",
+            &["workflow:code-task".into()],
+            Some("integrated"),
+        )
+        .await;
+        assert_eq!(h.client.create_calls().len(), 0);
     }
 
-    /// Two ready+tagged nodes, one with an active execution. Reconcile
-    /// must fire exactly one create_execution — for the unblocked node.
+    /// Skip when an execution for the same (origin, workflow) is
+    /// already running. Idempotency gate — otherwise a later
+    /// cx.task_ready for a node mid-execution would spawn a second.
     #[tokio::test]
-    async fn reconcile_fires_only_for_unblocked_nodes() {
-        let client = MockClient::new();
-        let mut snap = CxStateSnapshot::default();
-        snap.nodes
-            .insert("CcoT".into(), ready_node("CcoT", &["workflow:code-task"]));
-        snap.nodes
-            .insert("aBcD".into(), ready_node("aBcD", &["workflow:code-task"]));
-        client.set_cx_state(snap);
-
-        let mut h = herder_with_trigger(client);
+    async fn task_ready_skipped_when_origin_already_active() {
+        let mut h = herder_with_trigger(MockClient::new());
         h.executions.insert(
             "exec-existing".into(),
             ExecutionView {
@@ -1394,15 +1286,14 @@ mod tests {
             },
         );
 
-        h.reconcile_triggers().await;
+        h.evaluate_triggers_for_node_with_state(
+            "CcoT",
+            "cx.task_ready",
+            &["workflow:code-task".into()],
+            Some("ready"),
+        )
+        .await;
 
-        let calls = h.client.create_calls();
-        assert_eq!(calls.len(), 1, "expected exactly one new execution");
-        assert_eq!(
-            calls[0].2,
-            ExecutionOrigin::CxNode {
-                node_id: "aBcD".into()
-            }
-        );
+        assert_eq!(h.client.create_calls().len(), 0);
     }
 }
