@@ -71,8 +71,24 @@ prompt      = """Review the implementation plan proposed for this task.
    - **Testability** -- concrete test strategy that verifies acceptance criteria?
    - **Documentation** -- does the plan identify which docs need updating?
 
-   Scoring: 2 = meets expectations, 1 = marginal, 0 = does not meet.
-   Total >= 7 AND no zeros -> pass. Any zero -> fail regardless of total.
+   Scoring:
+     2 = meets expectations cleanly
+     1 = meets the requirement with concerns worth flagging (minor
+         incompleteness, stylistic issues) but acceptable as-is
+     0 = does NOT meet the requirement, OR introduces unrelated
+         regressions, deletions of unrelated content, or destructive
+         edits beyond the spec's scope
+
+   If you would write "this needs to be fixed before this can merge"
+   in a human PR review, the score is 0, not 1. A score of 1 means
+   "good enough to ship."
+
+   Pass requires ALL of:
+     - Total >= 7
+     - No zeros on any criterion
+     - Scope discipline = 2 (a non-2 on Scope = fail, regardless of total)
+
+   Any failed condition -> FAIL.
 
 4. Post your review as a cx comment:
    `cx comment {workflow.task_id} --tag review --file /tmp/review.md`
@@ -210,8 +226,24 @@ prompt      = """Review the implementation against the task spec and approved pr
    - **Build health** -- compiles, tests pass, clippy clean?
    - **Documentation** -- are docs updated to reflect changed behavior?
 
-   Scoring: 2 = meets expectations, 1 = marginal, 0 = does not meet.
-   Total >= 7 AND no zeros -> pass. Any zero -> fail regardless of total.
+   Scoring:
+     2 = meets expectations cleanly
+     1 = meets the requirement with concerns worth flagging (minor
+         incompleteness, stylistic issues) but acceptable as-is
+     0 = does NOT meet the requirement, OR introduces unrelated
+         regressions, deletions of unrelated content, or destructive
+         edits beyond the spec's scope
+
+   If you would write "this needs to be fixed before this can merge"
+   in a human PR review, the score is 0, not 1. A score of 1 means
+   "good enough to ship."
+
+   Pass requires ALL of:
+     - Total >= 7
+     - No zeros on any criterion
+     - Scope discipline = 2 (a non-2 on Scope = fail, regardless of total)
+
+   Any failed condition -> FAIL.
 
 5. Post your review as a cx comment:
    `cx comment {workflow.task_id} --tag code-review --file /tmp/review.md`
