@@ -227,12 +227,49 @@ pub enum TriggerError {
 impl TriggerDef {
     /// Resolve the trigger's `[trigger.vars]` block against an event context,
     /// returning the map of workflow vars to pass to `create_execution`.
+    ///
+    /// Each value is a template that may reference `{event.X}` fields from
+    /// the firing event. Unknown fields produce `TriggerError::MissingEventField`.
     pub fn build_vars(
         &self,
-        _ctx: &EventContext,
+        ctx: &EventContext,
     ) -> Result<HashMap<String, String>, TriggerError> {
-        todo!("slice A: interpolate self.vars templates against ctx")
+        let mut out = HashMap::with_capacity(self.vars.len());
+        for (name, template) in &self.vars {
+            out.insert(name.clone(), interpolate_event_template(template, ctx)?);
+        }
+        Ok(out)
     }
+}
+
+/// Interpolate `{event.X}` references in a template against the given context.
+/// Literal text and non-event braces are passed through unchanged.
+fn interpolate_event_template(
+    template: &str,
+    ctx: &EventContext,
+) -> Result<String, TriggerError> {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '{' {
+            let path: String = chars.by_ref().take_while(|&c| c != '}').collect();
+            if path.starts_with("event.") {
+                match ctx.resolve(&path) {
+                    Some(value) => out.push_str(&value),
+                    None => return Err(TriggerError::MissingEventField { path }),
+                }
+            } else {
+                // Non-event references are left intact — downstream interpolation
+                // (runtime, step prompt) resolves them later against workflow vars.
+                out.push('{');
+                out.push_str(&path);
+                out.push('}');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Ok(out)
 }
 
 /// TOML layout for a standalone triggers file: [[trigger]] arrays.

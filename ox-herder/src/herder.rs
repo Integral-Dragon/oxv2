@@ -940,9 +940,25 @@ impl Herder {
                 "trigger matched, creating execution"
             );
 
-            // For cx-triggered executions, pass node_id as task_id var
-            let mut trigger_vars = HashMap::new();
-            trigger_vars.insert("task_id".to_string(), node_id.to_string());
+            // Build workflow vars by interpolating the trigger's [trigger.vars]
+            // block against the firing event context. Workflow var names are
+            // declared by each workflow (e.g. `task_id`, `branch`); the trigger
+            // file maps event fields into whatever names the workflow expects.
+            let event_ctx = EventContext::CxTaskReady {
+                node_id: node_id.to_string(),
+            };
+            let trigger_vars = match trigger.build_vars(&event_ctx) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        node = %node_id,
+                        workflow = %trigger.workflow,
+                        err = %e,
+                        "trigger var interpolation failed — skipping"
+                    );
+                    continue;
+                }
+            };
 
             match self
                 .client

@@ -1,12 +1,15 @@
 {
   "id": "yrKk",
   "title": "Slice A: [trigger.vars] end-to-end for cx triggers",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "unknown",
   "created_at": "2026-04-12T14:18:43.368952072Z",
-  "updated_at": "2026-04-12T14:20:32.907029653Z",
+  "updated_at": "2026-04-12T14:26:12.573688965Z",
   "parent": "UWfw",
+  "meta": {
+    "_reason": "slice A green: [trigger.vars] works end-to-end"
+  },
   "edges": [
     {
       "to": "AUC1",

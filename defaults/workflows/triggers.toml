@@ -1,9 +1,22 @@
+# Triggers map cx events onto workflow executions. Each trigger declares:
+#   - `on`: the event type it matches
+#   - `tag`: an optional tag pattern the node must carry
+#   - `workflow`: the workflow to run
+#   - `[trigger.vars]`: how to populate the workflow's declared vars from
+#     event fields. Templates may reference `{event.X}` for fields the
+#     firing event exposes. For cx.task_ready the available field is
+#     `event.node_id`.
+
 [[trigger]]
 on       = "cx.task_ready"
 tag      = "workflow:code-task"
 workflow = "code-task"
+[trigger.vars]
+task_id = "{event.node_id}"
 
 [[trigger]]
 on       = "cx.task_ready"
 tag      = "workflow:consultation"
 workflow = "consultation"
+[trigger.vars]
+branch = "{event.node_id}"

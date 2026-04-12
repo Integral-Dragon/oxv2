@@ -1061,8 +1061,22 @@ async fn evaluate_triggers(
         let seq = state.bus.current_seq() + 1;
         let execution_id = ExecutionId(format!("e-{epoch}-{seq}"));
 
-        let mut input_vars = HashMap::new();
-        input_vars.insert("task_id".to_string(), req.node_id.clone());
+        // Build workflow vars by interpolating the trigger's [trigger.vars]
+        // block against the firing event context.
+        let event_ctx = ox_core::events::EventContext::CxTaskReady {
+            node_id: req.node_id.clone(),
+        };
+        let input_vars = match trigger.build_vars(&event_ctx) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    workflow = %workflow_name,
+                    err = %e,
+                    "trigger var interpolation failed — skipping"
+                );
+                continue;
+            }
+        };
 
         // Validate against the workflow's var declarations to fill in defaults.
         let vars = match hot.workflows.get(workflow_name) {

@@ -1,11 +1,11 @@
 {
   "id": "AUC1",
   "title": "Slice B: dedup works regardless of var name (ExecutionOrigin)",
-  "state": "latent",
+  "state": "ready",
   "shadowed": false,
   "part": null,
   "created_at": "2026-04-12T14:18:43.370076243Z",
-  "updated_at": "2026-04-12T14:18:43.370076243Z",
+  "updated_at": "2026-04-12T14:26:12.573690137Z",
   "parent": "UWfw",
   "edges": [
     {
