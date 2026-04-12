@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use ox_core::client::{CxNodeSnapshot, CxStateSnapshot};
 use ox_core::events::*;
 use std::path::Path;
 
@@ -274,6 +275,59 @@ struct CxLogEntry {
     subject: String,
 }
 
+// ── cx as source of truth ──────────────────────────────────────────
+//
+// Reconciliation reads node state from cx commands rather than from
+// the event-derived projection. The projection diverged from disk
+// truth whenever events were missed (e.g. an integrate that happened
+// outside the cx_log poll window). cx is authoritative; we always
+// query it for the current shape.
+//
+// All cx command shells live here. No other file should invoke
+// `Command::new("cx")`.
+
+/// Pure parser for `cx list --json` output. Maps the cx node shape
+/// onto the [`CxStateSnapshot`] format the herder consumes via
+/// `/api/state/cx`. Uses local `tags` (not `effective_tags`) to
+/// match current trigger-evaluation semantics.
+pub fn parse_cx_list(stdout: &[u8]) -> Result<CxStateSnapshot> {
+    unimplemented!("parse_cx_list — implemented in next commit");
+}
+
+/// Pure parser for `cx show <id> --json` output. Extracts only the
+/// fields downstream consumers care about (state, tags, shadowed).
+pub fn parse_cx_show(stdout: &[u8]) -> Option<CxNodeSnapshot> {
+    unimplemented!("parse_cx_show — implemented in next commit");
+}
+
+/// Run `cx list --json` in the given repo and parse it. This is the
+/// source-of-truth fetch for trigger reconciliation.
+pub fn fetch_cx_state(repo_path: &Path) -> Result<CxStateSnapshot> {
+    let out = std::process::Command::new("cx")
+        .args(["list", "--json"])
+        .current_dir(repo_path)
+        .output()
+        .context("running cx list")?;
+    if !out.status.success() {
+        anyhow::bail!("cx list failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    parse_cx_list(&out.stdout)
+}
+
+/// Run `cx show <id> --json` for a single node. Returns None if the
+/// node does not exist or cx exits non-zero.
+pub fn fetch_node(repo_path: &Path, node_id: &str) -> Option<CxNodeSnapshot> {
+    let out = std::process::Command::new("cx")
+        .args(["show", node_id, "--json"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_cx_show(&out.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +408,141 @@ mod tests {
         });
         let ev = derive_event_inner(&change, Some("ready")).expect("event derived");
         assert!(matches!(ev.event_type, EventType::CxTaskClaimed));
+    }
+
+    // ── parse_cx_list / parse_cx_show ──────────────────────────────
+    //
+    // These cover the source-of-truth path: cx commands return live
+    // state, parsers map them onto the snapshot shape the herder
+    // consumes via /api/state/cx. The bug being fixed is that the
+    // event-derived projection diverged from cx truth — Ygdt was
+    // reported as "ready" by the projection long after cx had it
+    // marked "integrated", causing reconcile to fire spurious
+    // executions.
+
+    #[test]
+    fn parse_cx_list_maps_state_and_tags_correctly() {
+        // Mirrors actual `cx list --json` output shape (verified
+        // against ccstat). Includes one ready+tagged node, one
+        // integrated+tagged node (the Ygdt scenario), one ready
+        // untagged node, and one shadowed node — exercises every
+        // field reconcile cares about.
+        let stdout = br#"[
+            {
+                "id": "CcoT",
+                "state": "ready",
+                "tags": ["workflow:code-task"],
+                "effective_tags": ["workflow:code-task"],
+                "shadowed": false,
+                "title": "ready and tagged"
+            },
+            {
+                "id": "Ygdt",
+                "state": "integrated",
+                "tags": ["workflow:code-task"],
+                "effective_tags": ["workflow:code-task"],
+                "shadowed": false,
+                "title": "integrated but still tagged"
+            },
+            {
+                "id": "fsih",
+                "state": "ready",
+                "tags": [],
+                "effective_tags": [],
+                "shadowed": false,
+                "title": "ready no tag"
+            },
+            {
+                "id": "stuk",
+                "state": "claimed",
+                "tags": ["workflow:code-task"],
+                "effective_tags": ["workflow:code-task"],
+                "shadowed": true,
+                "title": "claimed and shadowed"
+            }
+        ]"#;
+
+        let snap = parse_cx_list(stdout).expect("parses");
+        assert_eq!(snap.nodes.len(), 4);
+
+        let ccot = &snap.nodes["CcoT"];
+        assert_eq!(ccot.state, "ready");
+        assert_eq!(ccot.tags, vec!["workflow:code-task"]);
+        assert!(!ccot.shadowed);
+
+        let ygdt = &snap.nodes["Ygdt"];
+        assert_eq!(
+            ygdt.state, "integrated",
+            "Ygdt must report as integrated — this is the bug"
+        );
+        assert_eq!(ygdt.tags, vec!["workflow:code-task"]);
+
+        let fsih = &snap.nodes["fsih"];
+        assert_eq!(fsih.state, "ready");
+        assert!(fsih.tags.is_empty());
+
+        let stuk = &snap.nodes["stuk"];
+        assert_eq!(stuk.state, "claimed");
+        assert!(stuk.shadowed);
+    }
+
+    /// `tags` is the local tag list. `effective_tags` includes
+    /// inherited ones. Triggers match against `tags`. Pin this so a
+    /// later "let's just use effective_tags" change has to be deliberate.
+    #[test]
+    fn parse_cx_list_uses_local_tags_not_effective() {
+        let stdout = br#"[{
+            "id": "child",
+            "state": "ready",
+            "tags": [],
+            "effective_tags": ["workflow:from-parent"],
+            "shadowed": false,
+            "title": "inherits tag"
+        }]"#;
+        let snap = parse_cx_list(stdout).expect("parses");
+        assert!(
+            snap.nodes["child"].tags.is_empty(),
+            "expected local tags only, got {:?}",
+            snap.nodes["child"].tags
+        );
+    }
+
+    #[test]
+    fn parse_cx_list_handles_empty() {
+        let snap = parse_cx_list(b"[]").expect("parses");
+        assert!(snap.nodes.is_empty());
+    }
+
+    #[test]
+    fn parse_cx_show_extracts_state_tags_shadowed() {
+        // Mirrors actual `cx show <id> --json` shape — much richer
+        // than cx list, but the parser only pulls the fields the
+        // reconcile path cares about.
+        let stdout = br#"{
+            "id": "Ygdt",
+            "state": "integrated",
+            "tags": ["workflow:code-task"],
+            "effective_tags": ["workflow:code-task"],
+            "shadowed": false,
+            "title": "...",
+            "body": "long markdown body",
+            "blockers": ["scxJ"],
+            "blocking": [],
+            "children": [],
+            "created_at": "2026-04-09T16:04:18Z",
+            "updated_at": "2026-04-10T14:14:35Z",
+            "meta": {"_reason": "tiebreak"}
+        }"#;
+        let node = parse_cx_show(stdout).expect("parses");
+        assert_eq!(node.node_id, "Ygdt");
+        assert_eq!(node.state, "integrated");
+        assert_eq!(node.tags, vec!["workflow:code-task"]);
+        assert!(!node.shadowed);
+    }
+
+    #[test]
+    fn parse_cx_show_returns_none_for_garbage() {
+        assert!(parse_cx_show(b"not json").is_none());
+        assert!(parse_cx_show(b"{}").is_none());
     }
 }
