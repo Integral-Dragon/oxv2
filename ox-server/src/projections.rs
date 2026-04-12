@@ -211,24 +211,24 @@ impl Projections {
                             .and_then(|v| v.as_u64());
                     }
 
-                    // Update execution state
+                    // Update execution state. Re-dispatching the same
+                    // (step, attempt) — e.g. after a heartbeat-missed orphan
+                    // recovery — must update the existing attempt entry in
+                    // place rather than push a phantom row.
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
                         exec.current_step = Some(data.step.clone());
                         exec.current_attempt = data.attempt;
-                        exec.attempts.push(StepAttemptState {
-                            step: data.step,
-                            attempt: data.attempt,
-                            runner_id: Some(data.runner_id),
-                            status: StepStatus::Dispatched,
-                            output: None,
-                            signals: vec![],
-                            error: None,
-                            transition: None,
-                            connect_addr: None,
-                            started_at: event.ts,
-                            completed_at: None,
-                        });
+                        let attempt = exec.find_or_create_attempt(&data.step, data.attempt, event.ts);
+                        attempt.runner_id = Some(data.runner_id);
+                        attempt.status = StepStatus::Dispatched;
+                        attempt.started_at = event.ts;
+                        attempt.output = None;
+                        attempt.signals.clear();
+                        attempt.error = None;
+                        attempt.transition = None;
+                        attempt.connect_addr = None;
+                        attempt.completed_at = None;
                     }
                 }
             }
