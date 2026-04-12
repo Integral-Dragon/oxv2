@@ -142,6 +142,7 @@ fn derive_event_inner(
                         node_id: node_id.to_string(),
                         tags,
                         workflow: None,
+                        state: "ready".into(),
                     })
                     .unwrap(),
                 }),
@@ -252,6 +253,7 @@ fn snapshot_current_ready_nodes(repo_path: &Path) -> Result<CxPollResult> {
                 node_id: node_id.to_string(),
                 tags,
                 workflow: None,
+                state: "ready".into(),
             })
             .unwrap(),
         });
@@ -358,6 +360,14 @@ pub fn fetch_cx_state(repo_path: &Path) -> Result<CxStateSnapshot> {
         anyhow::bail!("cx list failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     parse_cx_list(&out.stdout)
+}
+
+/// Pure mapping from a cx node's current state to the ox event it
+/// should produce. Returns `None` for states that aren't
+/// trigger-relevant (latent, etc.). Source-of-truth conversion —
+/// the reactive cx_poll_loop calls this once per touched node.
+pub fn event_for_node_snapshot(_snap: &CxNodeSnapshot) -> Option<DerivedCxEvent> {
+    unimplemented!("event_for_node_snapshot — red stub")
 }
 
 /// Run `cx show <id> --json` for a single node. Returns None if the
@@ -590,5 +600,53 @@ mod tests {
     fn parse_cx_show_returns_none_for_garbage() {
         assert!(parse_cx_show(b"not json").is_none());
         assert!(parse_cx_show(b"{}").is_none());
+    }
+
+    // ── event_for_node_snapshot ────────────────────────────────────
+    //
+    // Pure mapping from cx truth → ox event. The reactive cx poll
+    // loop calls this once per node touched by `cx log`, after
+    // fetching the node's current snapshot via `cx show`. No state
+    // diff interpretation — whatever cx says NOW is what we emit.
+
+    fn snap(id: &str, state: &str, tags: &[&str]) -> CxNodeSnapshot {
+        CxNodeSnapshot {
+            node_id: id.into(),
+            state: state.into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            shadowed: false,
+            shadow_reason: None,
+            comment_count: 0,
+        }
+    }
+
+    #[test]
+    fn event_for_ready_snapshot() {
+        let ev = event_for_node_snapshot(&snap("CcoT", "ready", &["workflow:code-task"]))
+            .expect("ready → CxTaskReady");
+        assert!(matches!(ev.event_type, EventType::CxTaskReady));
+        let data: CxTaskReadyData = serde_json::from_value(ev.data).unwrap();
+        assert_eq!(data.node_id, "CcoT");
+        assert_eq!(data.tags, vec!["workflow:code-task"]);
+        assert_eq!(data.state, "ready");
+    }
+
+    #[test]
+    fn event_for_claimed_snapshot() {
+        let ev = event_for_node_snapshot(&snap("aBcD", "claimed", &[]))
+            .expect("claimed → CxTaskClaimed");
+        assert!(matches!(ev.event_type, EventType::CxTaskClaimed));
+    }
+
+    #[test]
+    fn event_for_integrated_snapshot() {
+        let ev = event_for_node_snapshot(&snap("Ygdt", "integrated", &[]))
+            .expect("integrated → CxTaskIntegrated");
+        assert!(matches!(ev.event_type, EventType::CxTaskIntegrated));
+    }
+
+    #[test]
+    fn event_for_latent_snapshot_emits_nothing() {
+        assert!(event_for_node_snapshot(&snap("foo", "latent", &[])).is_none());
     }
 }

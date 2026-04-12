@@ -272,6 +272,12 @@ pub struct CxTaskReadyData {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<String>,
+    /// Current cx state at the time the event was emitted. Empty string
+    /// for historical entries written before this field existed — the
+    /// herder treats empty as "unknown" and skips the integrated/shadowed
+    /// suppression check.
+    #[serde(default)]
+    pub state: String,
 }
 
 /// Trigger-firing event context. Exposes the subset of event payload fields
