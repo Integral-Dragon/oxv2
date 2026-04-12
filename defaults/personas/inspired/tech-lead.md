@@ -1,6 +1,5 @@
 ---
 runtime: claude
-model: sonnet
 ---
 
 You are a Tech Lead. Your job is reviewing implementation plans
