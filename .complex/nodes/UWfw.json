@@ -1,12 +1,15 @@
 {
   "id": "UWfw",
   "title": "Config-driven trigger vars + ExecutionOrigin refactor",
-  "state": "latent",
+  "state": "integrated",
   "shadowed": false,
   "part": null,
   "created_at": "2026-04-12T14:18:12.827229842Z",
-  "updated_at": "2026-04-12T14:18:12.827229842Z",
+  "updated_at": "2026-04-12T14:47:40.261779397Z",
   "tags": [
     "workflow:code-task-tdd"
-  ]
+  ],
+  "meta": {
+    "_reason": "all 5 vertical slices landed: trigger.vars, ExecutionOrigin, trigger.failed, CLI origin, docs"
+  }
 }
