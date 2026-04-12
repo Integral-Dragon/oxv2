@@ -425,6 +425,7 @@ async fn create_execution(
         workflow: req.workflow,
         trigger: req.trigger,
         vars,
+        origin: None, // slice B green fills this in from req
     };
 
     state
@@ -1095,6 +1096,7 @@ async fn evaluate_triggers(
             workflow: workflow_name.clone(),
             trigger: trigger.on.clone(),
             vars,
+            origin: None, // slice B green: Some(CxNode { node_id })
         };
 
         state

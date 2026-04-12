@@ -122,6 +122,11 @@ pub struct ExecutionCreatedData {
     pub trigger: String,
     #[serde(default)]
     pub vars: HashMap<String, String>,
+    /// Origin of this execution. Optional on the wire for backward compat
+    /// with pre-refactor event logs; resolved to a concrete value at
+    /// projection time via `fallback_origin` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ExecutionOrigin>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,6 +307,72 @@ impl EventContext {
     }
 }
 
+/// Identity of the event that caused an execution to be created.
+///
+/// Persisted on `execution.created`. The dedup key for trigger evaluation is
+/// `(workflow, origin)` — structural equality per variant. Every execution
+/// has exactly one origin; there is no propagation up an ancestor chain.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExecutionOrigin {
+    /// Fired from a cx event tied to a specific node. The canonical origin
+    /// for `cx.*` triggers.
+    CxNode { node_id: String },
+    /// Chained from a prior execution via a workflow or step event trigger.
+    /// v1 does not wire the workflow-chaining path; the variant exists so
+    /// the data model is stable.
+    Execution {
+        parent_execution_id: ExecutionId,
+        parent_step: Option<String>,
+        kind: ChildKind,
+    },
+    /// Direct API call or CLI trigger with no event context.
+    Manual {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+    },
+}
+
+/// What child-triggering workflow event produced an `Execution` origin.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildKind {
+    Escalated,
+    Completed,
+    StepCompleted,
+    StepFailed,
+}
+
+/// Best-effort synthesis of an origin for pre-refactor events that lack
+/// one on the wire. Old `execution.created` payloads that carried
+/// `vars["task_id"]` are treated as `CxNode`; everything else as `Manual`.
+///
+/// Live code paths should always pass an explicit origin to
+/// `ExecutionCreatedData`. This helper exists solely for event-log replay
+/// compatibility.
+pub fn fallback_origin(_vars: &HashMap<String, String>) -> ExecutionOrigin {
+    todo!("slice B: synthesize CxNode from task_id, else Manual")
+}
+
+/// Structural dedup predicate. Returns `true` if any element of `existing`
+/// has the same `(origin, workflow)` pair and its status is considered
+/// active for blocking purposes.
+///
+/// The `is_active` callback is supplied by the caller because the herder
+/// and the API handler use different status liveness rules (the API blocks
+/// on `running` only; the herder blocks on `running|escalated`).
+pub fn is_origin_active<'a, I>(
+    _existing: I,
+    _origin: &ExecutionOrigin,
+    _workflow: &str,
+    _is_active: impl Fn(&str) -> bool,
+) -> bool
+where
+    I: IntoIterator<Item = (&'a ExecutionOrigin, &'a str, &'a str)>,
+{
+    todo!("slice B: structural origin+workflow match with liveness filter")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CxTaskClaimedData {
     pub node_id: String,
@@ -431,5 +502,128 @@ mod tests {
             serde_json::to_string(&envelope.data).unwrap(),
             serde_json::to_string(&redacted.data).unwrap()
         );
+    }
+
+    // ── slice B: ExecutionOrigin ───────────────────────────────────────
+
+    #[test]
+    fn execution_origin_structural_equality() {
+        let a = ExecutionOrigin::CxNode {
+            node_id: "aJuO".into(),
+        };
+        let b = ExecutionOrigin::CxNode {
+            node_id: "aJuO".into(),
+        };
+        let c = ExecutionOrigin::CxNode {
+            node_id: "different".into(),
+        };
+        let m = ExecutionOrigin::Manual { user: None };
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, m);
+    }
+
+    #[test]
+    fn fallback_origin_synthesizes_cx_node_from_task_id() {
+        let mut vars = HashMap::new();
+        vars.insert("task_id".into(), "aJuO".into());
+        let o = fallback_origin(&vars);
+        assert_eq!(
+            o,
+            ExecutionOrigin::CxNode {
+                node_id: "aJuO".into()
+            }
+        );
+    }
+
+    #[test]
+    fn fallback_origin_without_task_id_is_manual() {
+        let vars = HashMap::new();
+        let o = fallback_origin(&vars);
+        assert_eq!(o, ExecutionOrigin::Manual { user: None });
+    }
+
+    #[test]
+    fn execution_created_data_round_trips_with_and_without_origin() {
+        // New-shape payload: round-trips with origin set.
+        let with_origin = ExecutionCreatedData {
+            execution_id: ExecutionId("e-1".into()),
+            workflow: "consultation".into(),
+            trigger: "cx.task_ready".into(),
+            vars: HashMap::from([("branch".into(), "aJuO".into())]),
+            origin: Some(ExecutionOrigin::CxNode {
+                node_id: "aJuO".into(),
+            }),
+        };
+        let json = serde_json::to_value(&with_origin).unwrap();
+        let back: ExecutionCreatedData = serde_json::from_value(json).unwrap();
+        assert_eq!(back.origin, with_origin.origin);
+        assert_eq!(back.vars, with_origin.vars);
+
+        // Legacy-shape payload: no origin field on the wire, deserializes as None.
+        let legacy_json = serde_json::json!({
+            "execution_id": "e-old",
+            "workflow": "code-task",
+            "trigger": "cx.task_ready",
+            "vars": { "task_id": "aJuO" }
+        });
+        let legacy: ExecutionCreatedData = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(legacy.origin, None);
+        // The projection's fallback step would synthesize an origin from vars:
+        assert_eq!(
+            fallback_origin(&legacy.vars),
+            ExecutionOrigin::CxNode {
+                node_id: "aJuO".into()
+            }
+        );
+    }
+
+    #[test]
+    fn is_origin_active_matches_on_origin_workflow_and_liveness() {
+        let origin_a = ExecutionOrigin::CxNode {
+            node_id: "aJuO".into(),
+        };
+        let origin_b = ExecutionOrigin::CxNode {
+            node_id: "other".into(),
+        };
+        let wf = "consultation";
+        let active = |s: &str| s == "running";
+
+        // Match on origin + workflow + active status
+        let existing = vec![(&origin_a, wf, "running")];
+        assert!(is_origin_active(
+            existing.iter().map(|(o, w, s)| (*o, *w, *s)),
+            &origin_a,
+            wf,
+            active
+        ));
+
+        // Different origin → no match
+        let existing = vec![(&origin_b, wf, "running")];
+        assert!(!is_origin_active(
+            existing.iter().map(|(o, w, s)| (*o, *w, *s)),
+            &origin_a,
+            wf,
+            active
+        ));
+
+        // Different workflow → no match
+        let existing = vec![(&origin_a, "other-wf", "running")];
+        assert!(!is_origin_active(
+            existing.iter().map(|(o, w, s)| (*o, *w, *s)),
+            &origin_a,
+            wf,
+            active
+        ));
+
+        // Completed status is not active under this rule
+        let existing = vec![(&origin_a, wf, "completed")];
+        assert!(!is_origin_active(
+            existing.iter().map(|(o, w, s)| (*o, *w, *s)),
+            &origin_a,
+            wf,
+            active
+        ));
     }
 }
