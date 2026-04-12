@@ -1242,6 +1242,39 @@ mod tests {
         h
     }
 
+    /// Two reconcile passes in rapid succession (faster than the SSE
+    /// round-trip that would carry the execution.created event back to
+    /// the herder) must NOT both fire create_execution. The dedup gate
+    /// has to see the freshly-created execution immediately, before
+    /// SSE catches up.
+    ///
+    /// This is the bug observed live on ccstat: reconcile fired for
+    /// Ygdt twice in the same second because the local executions
+    /// view was empty during both passes.
+    #[tokio::test]
+    async fn reconcile_does_not_double_fire_before_sse_catches_up() {
+        let client = MockClient::new();
+        let mut snap = CxStateSnapshot::default();
+        snap.nodes
+            .insert("Ygdt".into(), ready_node("Ygdt", &["workflow:code-task"]));
+        client.set_cx_state(snap);
+
+        let mut h = herder_with_trigger(client);
+        // No SSE event simulation between passes — self.executions stays
+        // un-updated by the SSE handler. The optimistic local insert is
+        // what must keep the second reconcile from firing again.
+        h.reconcile_triggers().await;
+        h.reconcile_triggers().await;
+
+        let calls = h.client.create_calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "expected exactly one create_execution call, got {}",
+            calls.len()
+        );
+    }
+
     /// Reconcile must fire create_execution for a ready+tagged node that
     /// has no active execution. This is the CcoT scenario: a node was
     /// already in `state: ready` and the tag was added later, so the
