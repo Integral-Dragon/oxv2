@@ -501,3 +501,90 @@ impl Projections {
         self.cx.read().unwrap().clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn envelope(seq: u64, event_type: EventType, data: serde_json::Value) -> EventEnvelope {
+        EventEnvelope {
+            seq: Seq(seq),
+            ts: Utc::now(),
+            event_type,
+            data,
+        }
+    }
+
+    fn exec_created(seq: u64, exec_id: &str, workflow: &str) -> EventEnvelope {
+        envelope(
+            seq,
+            EventType::ExecutionCreated,
+            serde_json::to_value(ExecutionCreatedData {
+                execution_id: ExecutionId(exec_id.into()),
+                workflow: workflow.into(),
+                trigger: "manual".into(),
+                vars: HashMap::new(),
+                origin: None,
+            })
+            .unwrap(),
+        )
+    }
+
+    fn step_dispatched(seq: u64, exec_id: &str, step: &str, attempt: u32, runner: &str) -> EventEnvelope {
+        envelope(
+            seq,
+            EventType::StepDispatched,
+            serde_json::to_value(StepDispatchedData {
+                execution_id: ExecutionId(exec_id.into()),
+                step: step.into(),
+                attempt,
+                runner_id: RunnerId(runner.into()),
+                secret_refs: vec![],
+                runtime: serde_json::json!({}),
+                workspace: serde_json::json!({}),
+                artifacts: vec![],
+            })
+            .unwrap(),
+        )
+    }
+
+    /// Re-dispatching the same (step, attempt) to a different runner
+    /// must update the existing attempt entry in place, not push a phantom row.
+    /// Reproduces the "two propose rows" bug observed via ox-ctl exec show.
+    #[test]
+    fn redispatch_same_attempt_updates_in_place() {
+        let proj = Projections::default();
+        proj.apply(&exec_created(1, "exec-1", "code-task"));
+        proj.apply(&step_dispatched(2, "exec-1", "propose", 1, "run-0000"));
+        proj.apply(&step_dispatched(3, "exec-1", "propose", 1, "run-0001"));
+
+        let execs = proj.executions();
+        let exec = execs.executions.get("exec-1").expect("execution exists");
+        assert_eq!(exec.attempts.len(), 1, "re-dispatch should not push a new attempt");
+        assert_eq!(exec.attempts[0].step, "propose");
+        assert_eq!(exec.attempts[0].attempt, 1);
+        assert_eq!(
+            exec.attempts[0].runner_id,
+            Some(RunnerId("run-0001".into())),
+            "runner_id should reflect the latest dispatch"
+        );
+        assert_eq!(exec.attempts[0].status, StepStatus::Dispatched);
+    }
+
+    /// A new attempt number (workflow retry / loop) must still create a new row.
+    /// This guards against over-collapsing when slice 1 is implemented.
+    #[test]
+    fn dispatch_new_attempt_pushes_new_row() {
+        let proj = Projections::default();
+        proj.apply(&exec_created(1, "exec-1", "code-task"));
+        proj.apply(&step_dispatched(2, "exec-1", "propose", 1, "run-0000"));
+        proj.apply(&step_dispatched(3, "exec-1", "propose", 2, "run-0001"));
+
+        let execs = proj.executions();
+        let exec = execs.executions.get("exec-1").expect("execution exists");
+        assert_eq!(exec.attempts.len(), 2);
+        assert_eq!(exec.attempts[0].attempt, 1);
+        assert_eq!(exec.attempts[1].attempt, 2);
+    }
+}
