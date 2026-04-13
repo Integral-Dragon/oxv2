@@ -60,7 +60,7 @@ cd ..
 ```
 
 For Debian/Ubuntu host packages and the full security-model rundown, see
-the [seguro README](https://github.com/dragon-panic/seguro). ox-up
+the [seguro README](https://github.com/dragon-panic/seguro). `ox-ctl up`
 launches runners with `--net dev-bridge --unsafe-dev-bridge` so they can
 reach `ox-server` on the host.
 
@@ -82,31 +82,41 @@ claude
 /login
 ```
 
-`/login` writes `~/.claude/.credentials.json`. `ox-up` reads that file on
-start and seeds it as the `claude_credentials` secret. Without it, any
-step using the `claude` runtime will fail.
+`/login` writes `~/.claude/.credentials.json`. `ox-ctl up` reads that
+file on start and seeds it as the `claude_credentials` secret. Without
+it, any step using the `claude` runtime will fail.
 
-### 4. build ox
+### 4. install ox
+
+```bash
+cargo install --git https://github.com/integral-dragon/oxv2
+```
+
+That installs all five binaries (`ox-server`, `ox-herder`, `ox-runner`,
+`ox-ctl`, `ox-rt`) into `~/.cargo/bin`. The shipped defaults for
+workflows, runtimes, and personas are baked into the binaries and
+extracted to `~/.ox/defaults/` (read-only) on first run.
+
+**For local development**, clone the repo and install from paths. Cargo
+won't install a whole workspace in one command, so loop:
 
 ```bash
 git clone https://github.com/integral-dragon/oxv2
 cd oxv2
-cargo build
+for c in ox-server ox-herder ox-runner ox-ctl ox-rt; do
+    cargo install --path "$c"
+done
 ```
 
-You get `ox-server`, `ox-herder`, `ox-runner`, and `ox-ctl` in
-`target/debug/`. There's nothing to install — `bin/ox-up` runs them out
-of the build tree. Add `oxv2/bin` to your `PATH` so `ox-up` is on hand.
+Re-run the loop to pick up local changes.
 
 ### 5. start ox in a project
 
-`bin/ox-up` is the project-runner script. From any project directory it
-boots the server and herder on the host, launches seguro VMs as runners,
-seeds your Claude credentials, and points everything at the current repo.
+From any project directory:
 
 ```bash
 cd ~/projects/my-project
-ox-up
+ox-ctl up
 ```
 
 You should see something like:
@@ -121,28 +131,33 @@ starting ox for my-project (repo=/home/you/projects/my-project, port=4840)
   runner-2  pid=12348  (seguro) workspace=.../.ox/run/runner-2
 ```
 
+`ox-ctl up` spawns `ox-server` and `ox-herder` on the host, launches
+seguro VMs as runners (`--runners N` to change the count, default 2),
+seeds `claude_credentials` from `~/.claude/.credentials.json`, and
+points everything at the current repo.
+
 Everything ox writes for the project lives under `.ox/run/` in the repo
-(`ox.db`, per-process logs, runner workspaces, pidfile). Other commands:
+(`ox.db`, per-process logs, runner workspaces, pidfile). Runners reach
+the server on the host via the QEMU user-mode gateway (`10.0.2.2`) —
+`ox-ctl up` wires that up automatically.
+
+Other commands:
 
 ```bash
-ox-up status        # show pids and call ox-ctl status
-ox-up ctl events    # tail the SSE event stream
-ox-up stop          # tear it all down
-ox-up reset         # wipe the SQLite db and logs
+ox-ctl status         # pidfile state + server pool/exec summary
+ox-ctl events         # tail the SSE event stream
+ox-ctl down           # stop the ensemble
+ox-ctl reset          # wipe the SQLite db and logs (must be down first)
 ```
 
-`ox-up` knobs (env vars):
+Flags on `ox-ctl up`:
 
-| Variable     | Default                | Purpose                            |
-|--------------|------------------------|------------------------------------|
-| `OX_DIR`     | parent of `ox-up`      | Where the ox source tree lives     |
-| `OX_BIN`     | `$OX_DIR/target/debug` | Where to find the compiled binaries|
-| `OX_HOME`    | `$OX_DIR/defaults`     | Config search path                 |
-| `OX_PORT`    | `4840`                 | Server port (host)                 |
-| `OX_RUNNERS` | `2`                    | Number of seguro runners to launch |
+| Flag            | Default  | Purpose                               |
+|-----------------|----------|---------------------------------------|
+| `--runners N`   | `2`      | Number of seguro runners to launch    |
+| `--port N`      | `4840`   | Host port for ox-server               |
 
-Runners reach the server on the host via the QEMU user-mode gateway
-(`10.0.2.2`); `ox-up` wires that up automatically.
+Both also read from `OX_RUNNERS` / `OX_PORT` env vars.
 
 ### 6. file a task and watch it run
 
@@ -179,10 +194,10 @@ matching trigger fires, and an execution lands on an idle runner. Watch
 it happen:
 
 ```bash
-ox-up ctl events            # stream events as they happen
-ox-up ctl exec list         # list executions
-ox-up ctl exec show <id>    # drill into one
-ox-up ctl exec logs <id> propose -f   # follow the agent's step log
+ox-ctl events                        # stream events as they happen
+ox-ctl exec list                     # list executions
+ox-ctl exec show <id>                # drill into one
+ox-ctl exec logs <id> propose -f     # follow the agent's step log
 ```
 
 That's the loop: file a task, surface it, commit, walk away.
@@ -210,38 +225,42 @@ Search order (first match wins):
 
 1. `{repo}/.ox/` — the repo the server is pointed at
 2. Each directory in `$OX_HOME` (colon-separated, left to right)
-3. Built-in defaults (`defaults/` in the ox source tree)
+3. `~/.ox/defaults/` — extracted from the binary on first run, locked
+   read-only. Re-extracts automatically on upgrade. You can read these
+   to learn the format, but override by copying into `{repo}/.ox/`.
 
-The shipped defaults give you three runtimes (`claude`, `codex`, `shell`)
-and one workflow (`code-task`), which is enough to start.
+The shipped defaults give you three runtimes (`claude`, `codex`,
+`shell`) and one workflow (`code-task`), which is enough to start.
 
 ## ox-ctl
 
-`ox-up ctl <args>` forwards to `ox-ctl --server http://localhost:4840`.
-Useful subcommands:
-
 ```bash
-ox-up ctl status                         # server health and pool summary
-ox-up ctl workflows                      # list loaded workflows
-ox-up ctl runners list                   # show registered runners
+ox-ctl up                             # start local ensemble (see above)
+ox-ctl down                           # stop it
+ox-ctl reset                          # wipe db and logs
+ox-ctl status                         # pidfile + server health + pool
 
-ox-up ctl exec list                      # list executions
-ox-up ctl exec show aJuO-e1              # execution detail
-ox-up ctl exec cancel aJuO-e1            # cancel an execution
-ox-up ctl exec logs aJuO-e1 propose -f   # follow step logs
+ox-ctl workflows                      # list loaded workflows
+ox-ctl runners list                   # show registered runners
 
-ox-up ctl events                         # stream all events (SSE)
-ox-up ctl events --type step.done        # filter by event type
-ox-up ctl events --since 42              # replay from sequence 42
+ox-ctl exec list                      # list executions
+ox-ctl exec show aJuO-e1              # execution detail
+ox-ctl exec cancel aJuO-e1            # cancel an execution
+ox-ctl exec logs aJuO-e1 propose -f   # follow step logs
 
-ox-up ctl trigger node-123               # evaluate triggers for a cx node
+ox-ctl events                         # stream all events (SSE)
+ox-ctl events --type step.done        # filter by event type
+ox-ctl events --since 42              # replay from sequence 42
 
-ox-up ctl secrets list
-ox-up ctl secrets set openai_api_key --value sk-...
-ox-up ctl secrets delete old_key
+ox-ctl trigger node-123               # evaluate triggers for a cx node
+
+ox-ctl secrets list
+ox-ctl secrets set openai_api_key --value sk-...
+ox-ctl secrets delete old_key
 ```
 
-Add `--json` for machine-readable output.
+Add `--json` for machine-readable output. `--server <URL>` targets a
+non-local server (default: `http://localhost:4840`).
 
 ## writing workflows
 
@@ -471,24 +490,24 @@ ox-rt artifact-done proposal     # close an artifact stream
 
 ## running the ensemble by hand
 
-`ox-up` is the recommended path. If you need to wire things up manually
-— for debugging, or running on something that isn't seguro — these are
-the moving parts:
+`ox-ctl up` is the recommended path. If you need to wire things up
+manually — for debugging, or running on something that isn't seguro —
+these are the moving parts:
 
 ```bash
-# server (host)
-OX_HOME=/path/to/oxv2/defaults \
-  ./target/debug/ox-server --port 4840 --repo /path/to/project
+# server (host) — first run extracts ~/.ox/defaults automatically
+ox-server --port 4840 --repo /path/to/project --db /path/to/project/ox.db
 
 # herder (host)
-OX_HOME=/path/to/oxv2/defaults \
-  ./target/debug/ox-herder --server http://localhost:4840
+ox-herder --server http://localhost:4840
 
-# runners — inside seguro VMs, reach the host via the QEMU gateway
-OX_SERVER=http://10.0.2.2:4840 ./bin/ox-pool start 2
+# runner(s) — run directly on the host or inside your own sandbox.
+# If you're using seguro, the runner reaches the host via 10.0.2.2.
+ox-runner --server http://10.0.2.2:4840 --environment seguro \
+          --workspace-dir /tmp/ox-work
 
 # seed Claude credentials
-./target/debug/ox-ctl secrets set claude_credentials \
+ox-ctl secrets set claude_credentials \
   --value "$(cat ~/.claude/.credentials.json)"
 ```
 

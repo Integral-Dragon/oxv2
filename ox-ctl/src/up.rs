@@ -173,12 +173,11 @@ pub fn seguro_runner_argv(
 
 // ── Cx staging ───────────────────────────────────────────────────────
 
-/// Locate the `cx` binary on the host PATH. Returns `None` if cx isn't
-/// installed — callers can warn and continue; cx-tagged workflows just
-/// won't be able to update node state from inside runners.
-pub fn find_cx_on_path() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
+/// Locate the `cx` binary on a PATH-style env value. Returns `None` if
+/// cx isn't in any of the listed directories. Tests pass a synthetic
+/// PATH so they don't have to mutate the process environment.
+pub fn find_cx_in_path(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path) {
         let candidate = dir.join("cx");
         if candidate.is_file() {
             return Some(candidate);
@@ -191,7 +190,19 @@ pub fn find_cx_on_path() -> Option<PathBuf> {
 /// carries it into every runner VM. Returns the destination path. Noop
 /// with warning if cx isn't on PATH.
 pub fn stage_cx_binary(scripts_dir: &Path) -> Result<Option<PathBuf>> {
-    let Some(src) = find_cx_on_path() else {
+    let Some(path) = std::env::var_os("PATH") else {
+        return Ok(None);
+    };
+    stage_cx_binary_from(scripts_dir, &path)
+}
+
+/// Test hook for [`stage_cx_binary`] — takes an explicit PATH to avoid
+/// racing on the process-wide environment.
+pub fn stage_cx_binary_from(
+    scripts_dir: &Path,
+    path: &std::ffi::OsStr,
+) -> Result<Option<PathBuf>> {
+    let Some(src) = find_cx_in_path(path) else {
         return Ok(None);
     };
     std::fs::create_dir_all(scripts_dir)
@@ -642,42 +653,18 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake_cx, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let prev_path = std::env::var_os("PATH");
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("PATH", &fake_bin);
-        }
 
         let scripts = tmp("cx-dst");
-        let staged = stage_cx_binary(&scripts).unwrap();
+        let staged = stage_cx_binary_from(&scripts, fake_bin.as_os_str()).unwrap();
         assert_eq!(staged, Some(scripts.join("cx")));
         assert!(scripts.join("cx").is_file());
-
-        unsafe {
-            match prev_path {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
     }
 
     #[test]
     fn stage_cx_binary_returns_none_when_cx_missing() {
         let empty = tmp("cx-empty");
-        let prev_path = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", &empty);
-        }
-
         let scripts = tmp("cx-dst2");
-        let staged = stage_cx_binary(&scripts).unwrap();
+        let staged = stage_cx_binary_from(&scripts, empty.as_os_str()).unwrap();
         assert_eq!(staged, None);
-
-        unsafe {
-            match prev_path {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
     }
 }

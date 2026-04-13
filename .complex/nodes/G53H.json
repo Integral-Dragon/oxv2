@@ -1,11 +1,11 @@
 {
   "id": "G53H",
   "title": "Slice 4: delete bin/, update README install to cargo install --git",
-  "state": "latent",
+  "state": "integrated",
   "shadowed": false,
   "part": null,
   "created_at": "2026-04-13T18:38:20.229795226Z",
-  "updated_at": "2026-04-13T18:38:20.229795226Z",
+  "updated_at": "2026-04-13T20:35:44.121106664Z",
   "parent": "tZIG",
   "edges": [
     {

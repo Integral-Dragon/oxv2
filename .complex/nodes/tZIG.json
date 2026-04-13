@@ -1,11 +1,11 @@
 {
   "id": "tZIG",
   "title": "Port ox-rt and ox-up to Rust; embed defaults",
-  "state": "latent",
+  "state": "integrated",
   "shadowed": false,
   "part": null,
   "created_at": "2026-04-13T18:37:58.379187605Z",
-  "updated_at": "2026-04-13T18:37:58.379187605Z",
+  "updated_at": "2026-04-13T20:35:44.122305835Z",
   "tags": [
     "workflow:code-task-tdd"
   ]
