@@ -5,6 +5,13 @@ it stores the work graph and answers queries. It has no knowledge of ox.
 
 ox depends on cx; cx does not depend on ox.
 
+> **Future direction:** the cx-specific poller that lives inside
+> ox-server today is planned to move out into a standalone
+> `ox-cx-watcher` process behind a generic ingest API, so ox can be
+> driven by other sources (Linear, GitHub, Jira) without changing
+> ox-server itself. See [event-sources.md](event-sources.md) for the
+> decoupling plan.
+
 ---
 
 ## What cx Provides
