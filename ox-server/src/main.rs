@@ -16,7 +16,12 @@ use axum::Router;
 use clap::Parser;
 use ox_core::events::*;
 use rusqlite::Connection;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
 use tower_http::trace::TraceLayer;
 
 use tracing_subscriber::EnvFilter;
@@ -51,6 +56,19 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // First-run: extract embedded defaults to ~/.ox/defaults (no-op on
+    // subsequent runs if the fingerprint matches). Must happen before
+    // ServerState::new, which resolves the config search path.
+    if let Some(home) = dirs_home() {
+        let ox_home = home.join(".ox");
+        match ox_core::config::ensure_defaults_extracted(&ox_home) {
+            Ok(path) => tracing::debug!(path = %path.display(), "defaults ready"),
+            Err(e) => {
+                tracing::warn!(err = %e, "failed to extract embedded defaults; using search path as-is");
+            }
+        }
+    }
 
     let conn = Connection::open(&args.db)?;
     let server_state = state::ServerState::new(conn, &args.repo)?;

@@ -17,12 +17,7 @@ static EMBEDDED_DEFAULTS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../default
 /// fingerprint differs, the directory is wiped and re-extracted. The fact
 /// that the files are read-only is a convention signal — `chmod +w` still
 /// works — but it's enough to stop casual edits and make upgrades safe.
-pub fn ensure_defaults_extracted(_base: &Path) -> std::io::Result<PathBuf> {
-    Err(std::io::Error::other("slice 2: not yet implemented"))
-}
-
-#[allow(dead_code)]
-fn _real_ensure_defaults_extracted(base: &Path) -> std::io::Result<PathBuf> {
+pub fn ensure_defaults_extracted(base: &Path) -> std::io::Result<PathBuf> {
     let defaults_dir = base.join("defaults");
     let version_file = defaults_dir.join(".version");
     let want = embedded_fingerprint();
@@ -44,11 +39,12 @@ fn _real_ensure_defaults_extracted(base: &Path) -> std::io::Result<PathBuf> {
     }
     std::fs::create_dir_all(&defaults_dir)?;
 
-    extract_dir(&EMBEDDED_DEFAULTS, &defaults_dir)?;
-    mark_readonly(&defaults_dir)?;
-
-    // .version is writable so the next run can re-stamp it.
+    extract_dir(EMBEDDED_DEFAULTS.path(), &EMBEDDED_DEFAULTS, &defaults_dir)?;
+    // Stamp the version before locking down permissions — once the parent
+    // dir is 0o555 we can't create new entries. Next-run upgrades call
+    // make_writable first, so the cycle repeats cleanly.
     std::fs::write(&version_file, &want)?;
+    mark_readonly(&defaults_dir)?;
 
     Ok(defaults_dir)
 }
@@ -71,20 +67,14 @@ fn hash_dir(dir: &Dir<'_>, h: &mut impl std::hash::Hasher) {
     }
 }
 
-fn extract_dir(dir: &Dir<'_>, target: &Path) -> std::io::Result<()> {
+fn extract_dir(root: &Path, dir: &Dir<'_>, target: &Path) -> std::io::Result<()> {
     for sub in dir.dirs() {
-        let rel = sub
-            .path()
-            .strip_prefix(dir.path())
-            .unwrap_or_else(|_| sub.path());
-        let out = target.join(rel);
-        std::fs::create_dir_all(&out)?;
-        extract_dir(sub, target)?;
+        extract_dir(root, sub, target)?;
     }
     for file in dir.files() {
         let rel = file
             .path()
-            .strip_prefix(dir.path())
+            .strip_prefix(root)
             .unwrap_or_else(|_| file.path());
         let out = target.join(rel);
         if let Some(parent) = out.parent() {
@@ -169,6 +159,12 @@ pub fn resolve_search_path(repo_root: &Path) -> Vec<PathBuf> {
             if p.is_dir() {
                 path.push(p);
             }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let defaults = PathBuf::from(home).join(".ox").join("defaults");
+        if defaults.is_dir() {
+            path.push(defaults);
         }
     }
     path
@@ -390,18 +386,21 @@ mod tests {
     fn ensure_defaults_extracted_refreshes_on_stale_version() {
         let base = tmp_base("extract-stale");
         let defaults = ensure_defaults_extracted(&base).unwrap();
-        // Write a junk file that shouldn't survive a refresh.
-        let junk = defaults.join("workflows/junk.toml");
-        // File is 0o444 inside a 0o555 dir — need to loosen to write junk.
-        let mut perms = fs::metadata(defaults.join("workflows")).unwrap().permissions();
+
+        // Everything under defaults/ is locked 0o444 / 0o555 — loosen so we
+        // can plant a junk file and overwrite .version.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(0o755);
+            for entry in walk(&defaults).unwrap() {
+                let meta = fs::metadata(&entry).unwrap();
+                let mode = if meta.is_dir() { 0o755 } else { 0o644 };
+                fs::set_permissions(&entry, fs::Permissions::from_mode(mode)).unwrap();
+            }
         }
-        fs::set_permissions(defaults.join("workflows"), perms).unwrap();
+
+        let junk = defaults.join("workflows/junk.toml");
         fs::write(&junk, "junk").unwrap();
-        // Stamp a bogus version.
         fs::write(defaults.join(".version"), "bogus").unwrap();
 
         ensure_defaults_extracted(&base).unwrap();

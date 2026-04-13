@@ -19,7 +19,9 @@ OX_DIR="${OX_DIR:-$(dirname "$SCRIPT_DIR")}"
 OX_BIN="${OX_BIN:-${OX_DIR}/target/debug}"
 OX_PORT="${OX_PORT:-4840}"
 OX_SERVER="http://localhost:${OX_PORT}"
-export OX_HOME="${OX_HOME:-${OX_DIR}/defaults}"
+# OX_HOME is no longer defaulted — ox-server extracts embedded defaults
+# into ~/.ox/defaults on first run. Set OX_HOME yourself if you want to
+# override with a directory tree of runtimes/workflows/personas.
 RUNNERS="${OX_RUNNERS:-2}"
 
 RUN_DIR="${REPO_DIR}/.ox/run"
