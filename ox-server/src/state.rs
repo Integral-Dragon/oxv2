@@ -41,16 +41,28 @@ impl HotConfig {
         // Load trigger definitions from files listed in config
         let triggers = config::load_triggers(&config);
 
-        // Load workflow definitions
+        // Load workflow definitions. Skip any .toml in workflows/ that
+        // isn't a workflow (triggers.toml is the common case) — it's
+        // loaded elsewhere as a trigger file and shouldn't be re-parsed
+        // as a workflow here. Real broken workflow files (invalid TOML,
+        // or a [workflow] block with bad fields) still surface as warns.
         let mut workflows = HashMap::new();
         for (name, path) in config::load_all_configs(&search_path, "workflows") {
+            match config::is_workflow_file(&path) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), err = ?e, "invalid TOML in workflows/");
+                    continue;
+                }
+            }
             match WorkflowDef::from_file(&path) {
                 Ok(def) => {
                     tracing::info!(workflow = %name, path = %path.display(), "loaded workflow");
                     workflows.insert(def.name.clone(), WorkflowEngine::from_def(def));
                 }
                 Err(e) => {
-                    tracing::warn!(workflow = %name, path = %path.display(), err = %e, "failed to load workflow");
+                    tracing::warn!(workflow = %name, path = %path.display(), err = ?e, "failed to load workflow");
                 }
             }
         }

@@ -221,8 +221,9 @@ pub fn load_all_configs(search_path: &[PathBuf], subdir: &str) -> Vec<(String, P
 /// means "intentionally not a workflow, don't warn"; an `Err` means
 /// "something is actually wrong, warn about it."
 pub fn is_workflow_file(path: &Path) -> anyhow::Result<bool> {
-    let _ = path;
-    todo!("is_workflow_file")
+    let content = std::fs::read_to_string(path)?;
+    let value: toml::Value = toml::from_str(&content)?;
+    Ok(value.get("workflow").is_some())
 }
 
 // ── OxConfig ────────────────────────────────────────────────────────
@@ -506,7 +507,7 @@ name = "one"
 "#,
         )
         .unwrap();
-        assert_eq!(is_workflow_file(&path).unwrap(), true);
+        assert!(is_workflow_file(&path).unwrap());
         fs::remove_dir_all(&tmp).ok();
     }
 
@@ -526,7 +527,7 @@ workflow = "code-task"
 "#,
         )
         .unwrap();
-        assert_eq!(is_workflow_file(&path).unwrap(), false);
+        assert!(!is_workflow_file(&path).unwrap());
         fs::remove_dir_all(&tmp).ok();
     }
 
