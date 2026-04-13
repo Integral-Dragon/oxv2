@@ -298,6 +298,13 @@ pub async fn cmd_up(runners: usize, port: u16) -> Result<()> {
         Err(e) => println!("  warning   failed to seed claude_credentials: {e}"),
     }
 
+    // ── Seed codex_auth ──────────────────────────────────────────
+    match seed_codex_credentials(&server_url).await {
+        Ok(true) => println!("  secrets   codex_auth seeded"),
+        Ok(false) => println!("  note      ~/.codex/auth.json not found — codex steps will fail (run `codex login`)"),
+        Err(e) => println!("  warning   failed to seed codex_auth: {e}"),
+    }
+
     // ── ox-herder ────────────────────────────────────────────────
     let herder_log = paths.log_dir.join("herder.log");
     let herder_pid = spawn_detached(
@@ -498,6 +505,25 @@ async fn seed_claude_credentials(server_url: &str) -> Result<bool> {
         .set_secret("claude_credentials", &value)
         .await
         .context("set_secret claude_credentials")?;
+    Ok(true)
+}
+
+async fn seed_codex_credentials(server_url: &str) -> Result<bool> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let Some(home) = home else {
+        return Ok(false);
+    };
+    let auth_path = home.join(".codex").join("auth.json");
+    if !auth_path.is_file() {
+        return Ok(false);
+    }
+    let value = std::fs::read_to_string(&auth_path)
+        .with_context(|| format!("read {}", auth_path.display()))?;
+    let client = OxClient::new(server_url);
+    client
+        .set_secret("codex_auth", &value)
+        .await
+        .context("set_secret codex_auth")?;
     Ok(true)
 }
 

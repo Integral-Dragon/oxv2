@@ -1,4 +1,12 @@
 # OpenAI Codex runtime.
+#
+# Codex authenticates via ~/.codex/auth.json (OAuth / ChatGPT login).
+# The auth JSON is injected via the `codex_auth` secret.
+#
+#   codex login                                     # on the host, once
+#   ox-ctl secrets set codex_auth --value "$(cat ~/.codex/auth.json)"
+#
+# `ox-ctl up` seeds this automatically from ~/.codex/auth.json if present.
 
 [runtime]
 name = "codex"
@@ -24,8 +32,10 @@ to      = "{tmp_dir}/ox-prompt"
 content = "{persona.instructions}"
 to      = "{workspace}/.codex/system-prompt.md"
 
-[runtime.env]
-OPENAI_API_KEY = "{secret.openai_api_key}"
+# Inject OAuth credentials from secrets into the runner's home directory.
+[[runtime.files]]
+content = "{secret.codex_auth}"
+to      = "{home}/.codex/auth.json"
 
 [[runtime.proxy]]
 env      = "OPENAI_BASE_URL"

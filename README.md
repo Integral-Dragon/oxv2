@@ -86,6 +86,19 @@ claude
 file on start and seeds it as the `claude_credentials` secret. Without
 it, any step using the `claude` runtime will fail.
 
+**Optional — OpenAI Codex.** If you want to use the `codex` runtime,
+install and log in to the Codex CLI the same way:
+
+```bash
+npm install -g @openai/codex
+codex login
+```
+
+`codex login` opens a browser for the ChatGPT OAuth flow and writes
+`~/.codex/auth.json`. `ox-ctl up` reads that file on start and seeds it
+as the `codex_auth` secret. Skip this if you only use the claude
+runtime.
+
 ### 4. install ox
 
 ```bash
