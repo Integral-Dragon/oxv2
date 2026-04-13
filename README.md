@@ -45,14 +45,18 @@ cargo install --git https://github.com/dragon-panic/complex
 ```
 
 seguro needs more setup — host packages, KVM access, and a base VM image
-that gets built once. The short version on Arch:
+that gets built once from a script in the repo. The short version on
+Arch:
 
 ```bash
 sudo pacman -S qemu-full virtiofsd dosfstools mtools openssh
 sudo usermod -aG kvm $USER     # log out / in for this to take effect
 
-cargo install --git https://github.com/dragon-panic/seguro
-seguro images build            # downloads Ubuntu 24.04, builds base.qcow2 (~500 MB)
+git clone https://github.com/dragon-panic/seguro
+cd seguro
+cargo install --path .                # installs `seguro` to ~/.cargo/bin
+./scripts/build-image.sh              # downloads Ubuntu 24.04, builds base.qcow2 (~500 MB)
+cd ..
 ```
 
 For Debian/Ubuntu host packages and the full security-model rundown, see
