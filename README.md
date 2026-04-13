@@ -97,18 +97,7 @@ That installs all five binaries (`ox-server`, `ox-herder`, `ox-runner`,
 workflows, runtimes, and personas are baked into the binaries and
 extracted to `~/.ox/defaults/` (read-only) on first run.
 
-**For local development**, clone the repo and install from paths. Cargo
-won't install a whole workspace in one command, so loop:
-
-```bash
-git clone https://github.com/integral-dragon/oxv2
-cd oxv2
-for c in ox-server ox-herder ox-runner ox-ctl ox-rt; do
-    cargo install --path "$c"
-done
-```
-
-Re-run the loop to pick up local changes.
+Building ox from source? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### 5. start ox in a project
 
