@@ -1,0 +1,16 @@
+{
+  "id": "I2iK",
+  "title": "Slice 3: ox-ctl up/down/reset (port ox-up); fold pidfile into ox-ctl status",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-13T18:38:20.221610745Z",
+  "updated_at": "2026-04-13T18:38:20.221610745Z",
+  "parent": "tZIG",
+  "edges": [
+    {
+      "to": "ykQQ",
+      "type": "blocks"
+    }
+  ]
+}

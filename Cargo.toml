@@ -6,6 +6,7 @@ members = [
     "ox-herder",
     "ox-runner",
     "ox-ctl",
+    "ox-rt",
 ]
 
 [workspace.package]
@@ -44,6 +45,7 @@ git2 = "0.20"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+base64 = "0.22"
 
 # Streaming
 async-stream = "0.3"
