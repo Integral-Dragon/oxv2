@@ -1,181 +1,218 @@
 # ox
 
-Ox is a distributed workflow engine for agentic code tasks. It orchestrates
-multi-step workflows where each step can be executed by an AI agent (Claude,
-Codex) or a shell command, with automatic retry, review loops, and merge.
+GitHub for agents. An event-sourced workflow engine that runs multi-agent
+teams in isolated sandboxes, coordinated by a human. You play the repo
+owner — setting direction, reviewing escalations, controlling budget —
+while agents handle contribution.
 
-## Architecture
+See [the site](https://integral-dragon.github.io/oxv2/) and
+[`docs/prd/`](docs/prd/README.md) for the full pitch.
 
-```
-ox-server          HTTP API + SQLite event log + SSE broadcast
-  |
-  +-- ox-herder    Subscribes to events, dispatches steps to idle runners
-  |
-  +-- ox-runner    Registers with server, executes steps, reports results
-  +-- ox-runner    (one or more)
-  +-- ox-runner
-  |
-  +-- ox-ctl       CLI for operators (status, exec, secrets, events)
-```
+## getting started
 
-All coordination happens through events. The server stores an append-only event
-log in SQLite. The herder and runners connect via SSE and replay from any
-sequence number on reconnect.
+ox is **Linux only**. Runners boot inside QEMU/KVM virtual machines
+through [seguro](https://github.com/dragon-panic/seguro), which assumes a
+Linux host with KVM available.
 
-## Building
+### 1. install rust
+
+If you don't already have a Rust toolchain:
 
 ```bash
-cargo build            # debug
-cargo build --release  # release
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
 ```
 
-Produces four binaries in `target/{debug,release}/`:
-`ox-server`, `ox-herder`, `ox-runner`, `ox-ctl`.
+Make sure `~/.cargo/bin` is on your `PATH`.
 
-## Project directory layout
+### 2. install seguro and cx
 
-Ox loads workflow and runtime definitions from a config search path. For a
-project, create a `.ox/` directory at the repo root:
+ox depends on two sister projects from
+[github.com/dragon-panic](https://github.com/dragon-panic):
+
+- **[seguro](https://github.com/dragon-panic/seguro)** — the VM sandbox
+  runners execute inside. Agents only see their cloned workspace and a
+  read-only mount of the ox binaries. Never the host filesystem.
+- **[complex](https://github.com/dragon-panic/complex)** (`cx`) — the task
+  tracker. ox watches `cx log` and triggers workflows when nodes tagged
+  `workflow:code-task` become `ready`. cx state lives in git, so the
+  event source is `git log`.
+
+```bash
+cargo install --git https://github.com/dragon-panic/seguro
+cargo install --git https://github.com/dragon-panic/complex
+```
+
+This drops `seguro` and `cx` into `~/.cargo/bin/`. seguro needs QEMU and
+a `dev-bridge` network configured on the host — see its README for the
+one-time setup.
+
+### 3. build ox
+
+```bash
+git clone https://github.com/integral-dragon/oxv2
+cd oxv2
+cargo build
+```
+
+You get `ox-server`, `ox-herder`, `ox-runner`, and `ox-ctl` in
+`target/debug/`. There's nothing to install — `bin/ox-up` runs them out
+of the build tree. Add `oxv2/bin` to your `PATH` so `ox-up` is on hand.
+
+### 4. start ox in a project
+
+`bin/ox-up` is the project-runner script. From any project directory it
+boots the server and herder on the host, launches seguro VMs as runners,
+seeds your Claude credentials, and points everything at the current repo.
+
+```bash
+cd ~/projects/my-project
+ox-up
+```
+
+You should see something like:
+
+```
+starting ox for my-project (repo=/home/you/projects/my-project, port=4840)
+
+  server    pid=12345  port=4840
+  secrets   claude_credentials seeded
+  herder    pid=12346
+  runner-1  pid=12347  (seguro) workspace=.../.ox/run/runner-1
+  runner-2  pid=12348  (seguro) workspace=.../.ox/run/runner-2
+```
+
+Everything ox writes for the project lives under `.ox/run/` in the repo
+(`ox.db`, per-process logs, runner workspaces, pidfile). Other commands:
+
+```bash
+ox-up status        # show pids and call ox-ctl status
+ox-up ctl events    # tail the SSE event stream
+ox-up stop          # tear it all down
+ox-up reset         # wipe the SQLite db and logs
+```
+
+`ox-up` knobs (env vars):
+
+| Variable     | Default                | Purpose                            |
+|--------------|------------------------|------------------------------------|
+| `OX_DIR`     | parent of `ox-up`      | Where the ox source tree lives     |
+| `OX_BIN`     | `$OX_DIR/target/debug` | Where to find the compiled binaries|
+| `OX_HOME`    | `$OX_DIR/defaults`     | Config search path                 |
+| `OX_PORT`    | `4840`                 | Server port (host)                 |
+| `OX_RUNNERS` | `2`                    | Number of seguro runners to launch |
+
+Runners reach the server on the host via the QEMU user-mode gateway
+(`10.0.2.2`); `ox-up` wires that up automatically.
+
+### 5. file a task and watch it run
+
+ox doesn't poll for new git commits — it watches the `cx` graph. To
+trigger a workflow, file a node in cx, tag it, surface it to `ready`,
+and commit. The server picks it up on the next 10-second tick.
+
+First, if your project doesn't have one yet, initialize cx and create a
+root node:
+
+```bash
+cx init
+cx add "my-project"
+```
+
+Then file an issue under that root, tagged for the built-in `code-task`
+workflow:
+
+```bash
+# replace <root-id> with the id from `cx add` (or `cx tree`)
+cx new <root-id> "build a website worthy of oxen" \
+    --tag workflow:code-task
+
+# promote it from latent to ready
+cx surface <new-node-id>
+
+# commit so it shows up in `cx log` (which ox is watching)
+git add .complex
+git commit -m "task: build a website worthy of oxen"
+```
+
+Within ten seconds the server's poller sees the new ready node, the
+matching trigger fires, and an execution lands on an idle runner. Watch
+it happen:
+
+```bash
+ox-up ctl events            # stream events as they happen
+ox-up ctl exec list         # list executions
+ox-up ctl exec show <id>    # drill into one
+ox-up ctl exec logs <id> propose -f   # follow the agent's step log
+```
+
+That's the loop: file a task, surface it, commit, walk away.
+
+## project layout
+
+ox loads workflows, runtimes, and personas from a config search path. For
+a project, drop a `.ox/` directory at the repo root:
 
 ```
 your-project/
   .ox/
-    workflows/        # Workflow definitions (TOML)
+    config.toml          # optional; lists trigger files
+    workflows/           # workflow definitions (TOML)
       code-task.toml
-      my-workflow.toml
-    runtimes/         # Runtime definitions (TOML)
+    runtimes/            # runtime definitions (TOML)
       claude.toml
-      shell.toml
-    personas/         # Persona files copied into step workspaces
+    personas/            # persona files copied into step workspaces
       software-engineer.md
-      reviewer.md
   src/
   ...
 ```
 
-Ox searches for config in this order (first match wins):
+Search order (first match wins):
 
-1. `{repo}/.ox/` -- the repo the server is pointed at
+1. `{repo}/.ox/` — the repo the server is pointed at
 2. Each directory in `$OX_HOME` (colon-separated, left to right)
 3. Built-in defaults (`defaults/` in the ox source tree)
 
-The built-in defaults ship with three runtimes (`claude`, `codex`, `shell`) and
-one workflow (`code-task`).
+The shipped defaults give you three runtimes (`claude`, `codex`, `shell`)
+and one workflow (`code-task`), which is enough to start.
 
-## Running the ensemble
+## ox-ctl
 
-You need three processes: the server, one herder, and one or more runners.
-
-### 1. Start the server
-
-```bash
-ox-server --port 4840 --repo /path/to/your-project
-```
-
-| Flag     | Default                | Description                        |
-|----------|------------------------|------------------------------------|
-| `--port` | `4840`                 | HTTP listen port                   |
-| `--db`   | `ox.db` (in repo dir)  | SQLite database path               |
-| `--repo` | current directory      | Path to the git repo being managed |
-
-### 2. Start the herder
+`ox-up ctl <args>` forwards to `ox-ctl --server http://localhost:4840`.
+Useful subcommands:
 
 ```bash
-ox-herder --server http://localhost:4840
+ox-up ctl status                         # server health and pool summary
+ox-up ctl workflows                      # list loaded workflows
+ox-up ctl runners list                   # show registered runners
+
+ox-up ctl exec list                      # list executions
+ox-up ctl exec show aJuO-e1              # execution detail
+ox-up ctl exec cancel aJuO-e1            # cancel an execution
+ox-up ctl exec logs aJuO-e1 propose -f   # follow step logs
+
+ox-up ctl events                         # stream all events (SSE)
+ox-up ctl events --type step.done        # filter by event type
+ox-up ctl events --since 42              # replay from sequence 42
+
+ox-up ctl trigger node-123               # evaluate triggers for a cx node
+
+ox-up ctl secrets list
+ox-up ctl secrets set openai_api_key --value sk-...
+ox-up ctl secrets delete old_key
 ```
 
-| Flag                | Default                    | Description                          |
-|---------------------|----------------------------|--------------------------------------|
-| `--server`          | `http://localhost:4840`    | Server URL                           |
-| `--pool-target`     | `2`                        | Desired number of idle runners       |
-| `--heartbeat-grace` | config or `60s`            | Time before a runner is marked dead  |
-| `--tick-interval`   | `5s`                       | Scheduling loop interval             |
+Add `--json` for machine-readable output.
 
-### 3. Start runners
+## writing workflows
 
-Runners execute inside seguro VMs for isolation. The agent process (e.g.
-Claude Code) cannot access the host filesystem — it only sees the cloned
-workspace and shared ox binaries.
-
-Use the pool manager to start several runners:
-
-```bash
-# Start 3 runners in seguro VMs
-# Note: use 10.0.2.2 (QEMU gateway) since VMs can't reach localhost
-OX_SERVER=http://10.0.2.2:4840 ox-pool start 3
-
-# Check status / stop
-ox-pool status
-ox-pool stop
-```
-
-Each runner:
-- Boots a seguro VM with ox binaries shared read-only
-- Connects to ox-server via QEMU gateway (`10.0.2.2`)
-- Clones workspaces from ox-server's git endpoint
-- Pushes completed work back via git
-
-| Flag              | Default                    | Description                     |
-|-------------------|----------------------------|---------------------------------|
-| `--server`        | `http://localhost:4840`    | Server URL                      |
-| `--environment`   | `seguro`                   | Environment label               |
-| `--workspace-dir` | `/tmp/ox-work`             | Base directory for step workspaces |
-
-### 4. Set secrets
-
-Runtimes that need credentials use secrets. For Claude Code, inject your
-OAuth credentials:
-
-```bash
-ox-ctl secrets set claude_credentials --value "$(cat ~/.claude/.credentials.json)"
-```
-
-For runtimes that use API keys directly:
-
-```bash
-ox-ctl secrets set openai_api_key --value sk-...
-```
-
-Secrets are referenced in runtime definitions as `{secret.name}` and injected
-into step environments or written to files (e.g. credentials).
-
-## Using ox-ctl
-
-```bash
-ox-ctl status                              # Server health and pool summary
-ox-ctl workflows                           # List loaded workflows
-ox-ctl runners list                        # Show registered runners
-
-ox-ctl exec list                           # List executions
-ox-ctl exec show aJuO-e1                   # Show execution detail
-ox-ctl exec cancel aJuO-e1                 # Cancel an execution
-ox-ctl exec logs aJuO-e1 propose           # Show step logs
-ox-ctl exec logs aJuO-e1 propose -f        # Follow logs (like tail -f)
-ox-ctl exec logs aJuO-e1 propose -n 50     # Last 50 lines
-ox-ctl exec logs aJuO-e1 propose --attempt 2  # Specific attempt
-
-ox-ctl events                              # Stream all events (SSE)
-ox-ctl events --type step.done             # Filter by event type
-ox-ctl events --since 42                   # Replay from sequence 42
-
-ox-ctl trigger node-123                    # Evaluate triggers for a cx node
-
-ox-ctl secrets list                        # List secret names
-ox-ctl secrets delete old_key              # Delete a secret
-```
-
-Add `--json` to any command for machine-readable output.
-Add `--server URL` to point at a non-default server.
-
-## Writing workflows
-
-Workflows are TOML files in `.ox/workflows/`. A workflow is a list of steps
-with transitions between them.
+Workflows are TOML files in `.ox/workflows/`. A workflow is a list of
+steps with transitions between them.
 
 ```toml
 [workflow]
 name        = "my-workflow"
-description = "A simple two-step workflow"
+description = "a simple two-step workflow"
 
 [[step]]
 name   = "generate"
@@ -225,48 +262,42 @@ action = "merge_to_main"
 branch = "{task_id}"
 ```
 
-### Step fields
+### step fields
 
 | Field             | Description                                            |
 |-------------------|--------------------------------------------------------|
 | `name`            | Unique step identifier                                 |
 | `output`          | What this step produces (`diff`, `verdict`, etc.)      |
 | `max_retries`     | Times to retry on failure (default: 3)                 |
-| `max_visits`      | Max times the workflow can enter this step              |
+| `max_visits`      | Max times the workflow can enter this step             |
 | `max_visits_goto` | Step to jump to when max_visits exceeded               |
 | `action`          | Built-in action instead of a runtime (`merge_to_main`) |
 | `on_fail`         | Step to jump to on failure                             |
 
-### Workspace provisioning
+### workspace provisioning
 
 ```toml
 [step.workspace]
-git_clone = true          # Full clone — origin/main always available for diff/rebase
-branch    = "{task_id}"   # Create or checkout this branch (interpolated from vars)
-push      = true          # Push changes after step completes
+git_clone = true          # full clone — origin/main always available
+branch    = "{task_id}"   # create or checkout this branch
+push      = true          # push changes after step completes
 read_only = false
 ```
 
-### Transitions
+### transitions
 
-Transitions match on the step's output string. Matches are checked in order;
-`*` is a catch-all. A prefix match uses `:` (e.g. `"fail:"` matches
-`"fail:lint"`).
+Transitions match on the step's output string. Matches are checked in
+order; `*` is a catch-all. A prefix match uses `:` (e.g. `"fail:"`
+matches `"fail:lint"`).
 
-```toml
-[[step.transition]]
-match = "pass"
-goto  = "next-step"
-```
+### triggers
 
-### Triggers
-
-Triggers live in separate files (not inside workflow definitions) and are
-loaded via `config.toml`. This lets you reuse template workflows while
-defining your own trigger routing.
+Triggers live in separate files (not inside workflow definitions) and
+are loaded via `config.toml`. This lets you reuse template workflows
+while defining your own routing.
 
 ```toml
-# .ox/config.toml (or $OX_HOME/config.toml)
+# .ox/config.toml
 triggers = [
     "workflows/triggers.toml",   # paths relative to this file's directory
 ]
@@ -274,20 +305,21 @@ heartbeat_grace = 60             # seconds
 ```
 
 ```toml
-# workflows/triggers.toml
+# .ox/workflows/triggers.toml
 [[trigger]]
-on       = "cx.task_ready"       # Event type to watch
-tag      = "workflow:code-task"  # Optional tag filter
-workflow = "code-task"           # Workflow to execute
+on       = "cx.task_ready"       # event type to watch
+tag      = "workflow:code-task"  # optional tag filter
+workflow = "code-task"           # workflow to execute
 ```
 
 Trigger files are additive across the search path. If no `config.toml`
 exists, ox looks for `workflows/triggers.toml` in each search-path
 directory as a default.
 
-## Writing runtimes
+## writing runtimes
 
-Runtimes define how a step process is spawned. They live in `.ox/runtimes/`.
+Runtimes define how a step process is spawned. They live in
+`.ox/runtimes/`.
 
 ```toml
 [runtime]
@@ -309,40 +341,37 @@ args = ["--model", "{var.model}"]
 MY_API_KEY = "{secret.my_api_key}"
 ```
 
-### Runtime features
-
-**Files** -- place files before execution using path placeholders:
+**Files** — place files before execution:
 
 ```toml
-# Write secret content to the runner's home directory
 [[runtime.files]]
 content = "{secret.claude_credentials}"
 to      = "{home}/.claude/.credentials.json"
 
-# Copy a file into the workspace
 [[runtime.files]]
 from = "{persona}"
 to   = "{workspace}/config.md"
 ```
 
-Path placeholders: `{workspace}` (git work dir), `{tmp_dir}` (outside git),
-`{home}` (runner HOME). Bare relative paths go to `{tmp_dir}`.
+Path placeholders: `{workspace}` (git work dir), `{tmp_dir}` (outside
+git), `{home}` (runner HOME). Bare relative paths go to `{tmp_dir}`.
 
-**Persona + prompt assembly** -- if a runtime declares a `persona` field
-(type `file`), the persona content is loaded from `personas/` on the search
-path and prepended to the step prompt. The combined content is written to
-`{tmp_dir}/ox-prompt` and referenced via `{prompt_file}` in the command.
+**Persona + prompt assembly** — if a runtime declares a `persona` field
+(type `file`), the persona content is loaded from `personas/` on the
+search path and prepended to the step prompt. The combined content is
+written to `{tmp_dir}/ox-prompt` and referenced via `{prompt_file}` in
+the command.
 
-**Proxy** -- ox-runner can proxy API calls for metrics and rate limiting:
+**Proxy** — ox-runner can proxy API calls for metrics and rate limiting:
 
 ```toml
 [[runtime.proxy]]
-env      = "ANTHROPIC_BASE_URL"  # Env var pointing the tool at the proxy
-provider = "anthropic"           # Provider type
+env      = "ANTHROPIC_BASE_URL"
+provider = "anthropic"
 target   = "https://api.anthropic.com"
 ```
 
-**Metrics** -- collected from proxied requests:
+**Metrics** — collected from proxied requests:
 
 ```toml
 [[runtime.metrics]]
@@ -351,10 +380,10 @@ type   = "counter"               # counter, histogram, or label
 source = "proxy"
 ```
 
-**Interactive (TTY) mode** -- when a step sets `tty = true`, ox-runner
-allocates a PTY and starts a TCP bridge. The bridge address is advertised
-in the `step.running` event's `connect_addr` field. Connect with any TCP
-client:
+**Interactive (TTY) mode** — when a step sets `tty = true`, ox-runner
+allocates a PTY and starts a TCP bridge. The bridge address is
+advertised in the `step.running` event's `connect_addr` field. Connect
+with any TCP client:
 
 ```
 socat - TCP:<runner-host>:<port>
@@ -364,20 +393,8 @@ The runtime's `interactive_cmd` is used instead of `cmd`. PTY output is
 teed to the step log. The unix socket (`$OX_SOCKET`) is available inside
 the session for `ox-rt done` / metrics / artifacts.
 
-```toml
-[[step]]
-name = "human-review"
-[step.runtime]
-type = "shell"
-tty = true
-[step.workspace]
-git_clone = true
-branch = "{branch}"
-push = true
-```
-
-A built-in `interactive` workflow provides a single-step interactive shell
-session. Launch it:
+A built-in `interactive` workflow provides a single-step interactive
+shell session:
 
 ```bash
 curl -s -X POST http://localhost:4840/api/executions \
@@ -389,62 +406,58 @@ Then connect to the `connect_addr` from the `step.running` event.
 
 ## ox-rt: step-to-runner communication
 
-Steps communicate back to the runner through `ox-rt`, a helper that talks over
-a Unix socket (`$OX_SOCKET`, set automatically by the runner). Uses Python for
-socket communication (no `socat` dependency).
+Steps communicate back to the runner through `ox-rt`, a helper that
+talks over a Unix socket (`$OX_SOCKET`, set automatically by the
+runner).
 
 ```bash
-ox-rt done pass                  # Complete the step with output "pass"
-ox-rt done "fail:lint errors"    # Complete with a failure output
-ox-rt metric input_tokens 14523  # Report a metric
-echo "content" | ox-rt artifact proposal   # Stream artifact data
-ox-rt artifact-done proposal     # Close an artifact stream
+ox-rt done pass                  # complete the step with output "pass"
+ox-rt done "fail:lint errors"    # complete with a failure output
+ox-rt metric input_tokens 14523  # report a metric
+echo "content" | ox-rt artifact proposal   # stream artifact data
+ox-rt artifact-done proposal     # close an artifact stream
 ```
 
-## Environment variables
+## environment variables
 
-| Variable          | Used by    | Description                              |
-|-------------------|------------|------------------------------------------|
-| `OX_SERVER`       | all        | Server URL (default: http://localhost:4840) |
-| `OX_HOME`         | server     | Colon-separated config search path       |
-| `OX_ENVIRONMENT`  | runner     | Environment label (default: local)       |
-| `OX_WORKSPACE_DIR`| runner     | Base dir for step workspaces             |
-| `OX_SOCKET`       | step procs | Unix socket for ox-rt (set by runner)    |
-| `OX_EXECUTION_ID` | step procs | Current execution ID (set by runner)     |
-| `RUST_LOG`        | all        | Log level (default: info)                |
+| Variable           | Used by    | Description                                 |
+|--------------------|------------|---------------------------------------------|
+| `OX_SERVER`        | all        | Server URL (default: http://localhost:4840) |
+| `OX_HOME`          | server     | Colon-separated config search path          |
+| `OX_ENVIRONMENT`   | runner     | Environment label (default: local)          |
+| `OX_WORKSPACE_DIR` | runner     | Base dir for step workspaces                |
+| `OX_SOCKET`        | step procs | Unix socket for ox-rt (set by runner)       |
+| `OX_EXECUTION_ID`  | step procs | Current execution ID (set by runner)        |
+| `RUST_LOG`         | all        | Log level (default: info)                   |
 
-## Quick start
+## running the ensemble by hand
+
+`ox-up` is the recommended path. If you need to wire things up manually
+— for debugging, or running on something that isn't seguro — these are
+the moving parts:
 
 ```bash
-# Build
-cargo build
+# server (host)
+OX_HOME=/path/to/oxv2/defaults \
+  ./target/debug/ox-server --port 4840 --repo /path/to/project
 
-# Terminal 1: server (set OX_HOME so it finds default runtimes/workflows)
-OX_HOME=/path/to/oxv2/defaults ./target/debug/ox-server --repo /path/to/project
+# herder (host)
+OX_HOME=/path/to/oxv2/defaults \
+  ./target/debug/ox-herder --server http://localhost:4840
 
-# Terminal 2: herder
-OX_HOME=/path/to/oxv2/defaults ./target/debug/ox-herder
-
-# Terminal 3: runners (seguro VMs — use 10.0.2.2, the QEMU gateway to host)
+# runners — inside seguro VMs, reach the host via the QEMU gateway
 OX_SERVER=http://10.0.2.2:4840 ./bin/ox-pool start 2
 
-# Terminal 4: set secrets and go
-./target/debug/ox-ctl secrets set claude_credentials --value "$(cat ~/.claude/.credentials.json)"
-./target/debug/ox-ctl status
+# seed Claude credentials
+./target/debug/ox-ctl secrets set claude_credentials \
+  --value "$(cat ~/.claude/.credentials.json)"
 ```
 
-The server polls `cx log` every 10 seconds. On first boot, it snapshots
-current cx state — only nodes that are currently `ready` trigger
-workflows (not historical transitions). When a cx node tagged
-`workflow:code-task` is surfaced to `ready`, the workflow starts
-automatically. Monitor with:
+Server flags: `--port` (default `4840`), `--db` (default `ox.db` in the
+repo), `--repo` (default cwd).
 
-```bash
-./target/debug/ox-ctl events                      # stream all events
-./target/debug/ox-ctl exec list                    # list executions
-./target/debug/ox-ctl exec logs <id> <step> -f     # follow step logs
-```
+Herder flags: `--server`, `--pool-target` (default `2`),
+`--heartbeat-grace`, `--tick-interval` (default `5s`).
 
-For project-specific setup, see the `ox-up` pattern used by ccstat: a
-single script that starts the server, herder, seeds credentials, and
-launches seguro runners pointed at the project repo.
+Runner flags: `--server`, `--environment` (default `seguro`),
+`--workspace-dir` (default `/tmp/ox-work`).
