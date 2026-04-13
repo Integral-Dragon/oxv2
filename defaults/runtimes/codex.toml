@@ -16,7 +16,23 @@ model  = { type = "string" }
 prompt = { type = "string", default = "" }
 
 [runtime.command]
-cmd = ["codex", "{tmp_dir}/ox-prompt"]
+# codex exec is the headless subcommand — the bare `codex <prompt>` form
+# launches the interactive TUI, which refuses to run without a stdin TTY
+# ("Error: stdin is not a terminal"). Flag rationale:
+#   --full-auto:  reduces approval prompts, grants workspace write (analogous
+#                 to claude's --dangerously-skip-permissions). Review steps
+#                 need write access for git commit / cx comment.
+#   --json:       newline-delimited JSON event stream, mirrors claude's
+#                 stream-json output for consistent log capture.
+#   --color never: no ANSI escapes in captured step logs.
+cmd = [
+    "codex", "exec",
+    "--full-auto",
+    "--json",
+    "--color", "never",
+    "{tmp_dir}/ox-prompt",
+]
+interactive_cmd = ["codex"]
 
 [[runtime.command.optional]]
 when = "model"
