@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::{Parser, Subcommand};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -41,9 +43,27 @@ fn main() -> Result<()> {
 fn run(cli: Cli, socket: &Path) -> Result<()> {
     match cli.cmd {
         Command::Metric { name, value } => send(socket, &format!("metric {name} {value}")),
-        Command::Done { .. } => todo!("slice 1b"),
-        Command::Artifact { .. } => todo!("slice 1c"),
-        Command::ArtifactDone { .. } => todo!("slice 1d"),
+        Command::Done { force: _, output } => {
+            // Preflight lives in slice 1c. For now all done calls go through.
+            let msg = if output.is_empty() {
+                "done".to_string()
+            } else {
+                format!("done {}", output.join(" "))
+            };
+            send(socket, &msg)
+        }
+        Command::Artifact { name, content } => {
+            let bytes = if content.is_empty() {
+                let mut buf = Vec::new();
+                std::io::stdin().read_to_end(&mut buf)?;
+                buf
+            } else {
+                content.join(" ").into_bytes()
+            };
+            let encoded = BASE64.encode(&bytes);
+            send(socket, &format!("artifact {name} {encoded}"))
+        }
+        Command::ArtifactDone { name } => send(socket, &format!("artifact-done {name}")),
     }
 }
 
@@ -104,17 +124,85 @@ mod tests {
         (path, rx)
     }
 
+    /// Listener that replies with a caller-chosen response.
+    fn start_listener_with_response(
+        response: &'static [u8],
+    ) -> (std::path::PathBuf, mpsc::Receiver<String>) {
+        let dir = std::env::temp_dir().join(format!("ox-rt-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!(
+            "sock-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind");
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() {
+                    let _ = tx.send(line);
+                }
+                let mut writer = stream;
+                let _ = writer.write_all(response);
+            }
+        });
+        (path, rx)
+    }
+
     #[test]
     fn metric_sends_newline_terminated_message() {
         let (path, rx) = start_listener();
-        let cli = Cli::parse_from([
-            "ox-rt",
-            "metric",
-            "input_tokens",
-            "14523",
-        ]);
+        let cli = Cli::parse_from(["ox-rt", "metric", "input_tokens", "14523"]);
         run(cli, &path).expect("run");
-        let line = rx.recv().expect("listener received line");
-        assert_eq!(line, "metric input_tokens 14523\n");
+        assert_eq!(rx.recv().unwrap(), "metric input_tokens 14523\n");
+    }
+
+    #[test]
+    fn done_with_force_sends_done_with_output() {
+        let (path, rx) = start_listener();
+        let cli = Cli::parse_from(["ox-rt", "done", "--force", "pass:7"]);
+        run(cli, &path).expect("run");
+        assert_eq!(rx.recv().unwrap(), "done pass:7\n");
+    }
+
+    #[test]
+    fn done_with_force_no_output_sends_bare_done() {
+        let (path, rx) = start_listener();
+        let cli = Cli::parse_from(["ox-rt", "done", "--force"]);
+        run(cli, &path).expect("run");
+        assert_eq!(rx.recv().unwrap(), "done\n");
+    }
+
+    #[test]
+    fn artifact_with_inline_content_is_base64_encoded() {
+        let (path, rx) = start_listener();
+        let cli = Cli::parse_from(["ox-rt", "artifact", "proposal", "Hello"]);
+        run(cli, &path).expect("run");
+        // "Hello" -> "SGVsbG8="
+        assert_eq!(rx.recv().unwrap(), "artifact proposal SGVsbG8=\n");
+    }
+
+    #[test]
+    fn artifact_done_sends_name() {
+        let (path, rx) = start_listener();
+        let cli = Cli::parse_from(["ox-rt", "artifact-done", "proposal"]);
+        run(cli, &path).expect("run");
+        assert_eq!(rx.recv().unwrap(), "artifact-done proposal\n");
+    }
+
+    #[test]
+    fn error_response_surfaces_as_failure() {
+        let (path, _rx) = start_listener_with_response(b"error: no such step\n");
+        let cli = Cli::parse_from(["ox-rt", "metric", "x", "1"]);
+        let err = run(cli, &path).expect_err("should fail");
+        assert!(
+            err.to_string().contains("no such step"),
+            "got: {err}"
+        );
     }
 }
