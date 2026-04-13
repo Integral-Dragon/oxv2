@@ -103,6 +103,10 @@ prompt      = """Review the implementation plan proposed for this task.
    - `ox-rt done "fail:<score>"` if verdict is fail
 """
 
+# EXPERIMENT: codex reviews claude's plan. Revert before merging to main.
+[step.runtime]
+runtime = "codex"
+
 [step.workspace]
 git_clone = true
 branch    = "{task_id}"
