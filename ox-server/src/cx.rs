@@ -109,6 +109,21 @@ pub fn derive_cx_events_for_merge(
     Ok(result.events)
 }
 
+/// Apply a cx poll result via the caller's `append` function, returning the
+/// cursor to advance to on full success. Short-circuits on the first append
+/// failure and returns that error — callers MUST NOT advance the cursor on
+/// error, because cx polling is cursor-based and skipped events are lost
+/// forever. On the next tick the caller retries from the same cursor, which
+/// may re-emit already-successful events; downstream handlers must tolerate
+/// that (at-least-once delivery).
+pub fn apply_poll_result<F>(result: CxPollResult, mut append: F) -> Result<Option<String>>
+where
+    F: FnMut(EventType, serde_json::Value) -> Result<()>,
+{
+    let _ = (&result, &mut append);
+    todo!("apply_poll_result")
+}
+
 /// On first boot, snapshot the current cx state instead of replaying history.
 /// Emits one event per non-latent node, via `event_for_node_snapshot`.
 fn snapshot_current_ready_nodes(repo_path: &Path) -> Result<CxPollResult> {
@@ -476,5 +491,68 @@ mod tests {
     #[test]
     fn event_for_latent_snapshot_emits_nothing() {
         assert!(event_for_node_snapshot(&snap("foo", "latent", &[])).is_none());
+    }
+
+    // ── apply_poll_result ──────────────────────────────────────────
+    //
+    // Regression: the cx poller previously advanced its cursor on every
+    // tick, even when appending a derived event to the event log failed.
+    // Because polling is a cursor-based diff, any skipped event was lost
+    // permanently — the next tick started past it. apply_poll_result
+    // returns the cursor hash ONLY if every event appended successfully;
+    // callers must not advance the cursor on Err.
+
+    fn ev(id: &str) -> DerivedCxEvent {
+        DerivedCxEvent {
+            event_type: EventType::CxTaskReady,
+            data: serde_json::json!({ "node_id": id }),
+        }
+    }
+
+    #[test]
+    fn apply_poll_result_returns_cursor_when_all_appends_succeed() {
+        let result = CxPollResult {
+            events: vec![ev("A"), ev("B")],
+            latest_hash: Some("deadbeef".into()),
+        };
+        let mut appended: Vec<String> = vec![];
+        let cursor = apply_poll_result(result, |_t, d| {
+            appended.push(d["node_id"].as_str().unwrap().into());
+            Ok(())
+        })
+        .expect("all appends succeed");
+        assert_eq!(cursor.as_deref(), Some("deadbeef"));
+        assert_eq!(appended, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn apply_poll_result_returns_err_and_does_not_return_cursor_on_failure() {
+        let result = CxPollResult {
+            events: vec![ev("A"), ev("B"), ev("C")],
+            latest_hash: Some("deadbeef".into()),
+        };
+        let mut appended: Vec<String> = vec![];
+        let outcome = apply_poll_result(result, |_t, d| {
+            let id: String = d["node_id"].as_str().unwrap().into();
+            if id == "B" {
+                anyhow::bail!("simulated db failure on B");
+            }
+            appended.push(id);
+            Ok(())
+        });
+        assert!(outcome.is_err(), "failure must propagate so caller skips cursor advance");
+        assert_eq!(appended, vec!["A"], "short-circuits on first failure");
+    }
+
+    #[test]
+    fn apply_poll_result_with_no_events_returns_none_cursor() {
+        // Empty-tick case: no events to append, no cursor to advance.
+        // (poll_cx_log emits latest_hash=None when the cx log diff is empty.)
+        let result = CxPollResult {
+            events: vec![],
+            latest_hash: None,
+        };
+        let cursor = apply_poll_result(result, |_, _| Ok(())).expect("no-op succeeds");
+        assert_eq!(cursor, None);
     }
 }
