@@ -209,6 +209,22 @@ pub fn load_all_configs(search_path: &[PathBuf], subdir: &str) -> Vec<(String, P
     results
 }
 
+/// Peek at a TOML file to see if it looks like a workflow definition.
+///
+/// Returns `Ok(true)` if the file parses as TOML and has a top-level
+/// `[workflow]` table, `Ok(false)` if it parses as TOML but has no such
+/// table (e.g. a trigger file that legitimately lives in `workflows/`),
+/// and `Err(_)` if the file can't be read or isn't valid TOML at all.
+///
+/// Callers use this to skip non-workflow files silently during workflow
+/// loading while still surfacing real breakage — an `Ok(false)` result
+/// means "intentionally not a workflow, don't warn"; an `Err` means
+/// "something is actually wrong, warn about it."
+pub fn is_workflow_file(path: &Path) -> anyhow::Result<bool> {
+    let _ = path;
+    todo!("is_workflow_file")
+}
+
 // ── OxConfig ────────────────────────────────────────────────────────
 
 const DEFAULT_HEARTBEAT_GRACE: u64 = 60;
@@ -463,6 +479,66 @@ mod tests {
         fs::remove_dir_all(&base).ok();
         fs::remove_dir_all(&fake_home).ok();
         fs::remove_dir_all(&repo).ok();
+    }
+
+    // ── is_workflow_file ─────────────────────────────────────────
+    //
+    // Regression: load_all_configs returns every *.toml in workflows/,
+    // so the workflow loader tries to parse triggers.toml as a workflow
+    // and emits a misleading "missing field `workflow`" warning on
+    // every server start. is_workflow_file lets the loader silently
+    // skip any file that doesn't declare a [workflow] block — but real
+    // broken workflow files (with a [workflow] block and other bugs)
+    // still fall through to the full parse path and warn loudly.
+
+    #[test]
+    fn is_workflow_file_true_for_file_with_workflow_table() {
+        let tmp = tmp_base("peek-yes");
+        let path = tmp.join("code-task.toml");
+        fs::write(
+            &path,
+            r#"
+[workflow]
+name = "code-task"
+
+[[step]]
+name = "one"
+"#,
+        )
+        .unwrap();
+        assert_eq!(is_workflow_file(&path).unwrap(), true);
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn is_workflow_file_false_for_triggers_toml() {
+        // A triggers file has no [workflow] table — it's a [[trigger]]
+        // array. Loader should skip silently without warning.
+        let tmp = tmp_base("peek-no");
+        let path = tmp.join("triggers.toml");
+        fs::write(
+            &path,
+            r#"
+[[trigger]]
+on       = "cx.task_ready"
+tag      = "workflow:code-task"
+workflow = "code-task"
+"#,
+        )
+        .unwrap();
+        assert_eq!(is_workflow_file(&path).unwrap(), false);
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn is_workflow_file_err_on_invalid_toml() {
+        // Broken TOML is a real problem — the loader should still warn
+        // loudly rather than silently skipping.
+        let tmp = tmp_base("peek-broken");
+        let path = tmp.join("broken.toml");
+        fs::write(&path, "[this is not = valid = toml").unwrap();
+        assert!(is_workflow_file(&path).is_err());
+        fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
