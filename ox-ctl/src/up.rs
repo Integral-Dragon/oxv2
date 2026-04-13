@@ -90,11 +90,11 @@ pub fn is_running(_pid: u32) -> bool {
 
 // ── Binary resolution ────────────────────────────────────────────────
 
-/// Sibling binaries that `ox-ctl up` needs to launch. `ox_runner` isn't
-/// spawned directly — it comes along for the ride in the `bin_dir`
-/// read-only mount that seguro shares into each runner VM — but we still
-/// verify its presence up front so the user gets a clean error instead
-/// of a cryptic runner-VM failure later.
+/// Sibling binaries that `ox-ctl up` needs to launch. `ox_runner` and
+/// `ox_rt` aren't spawned directly — they come along for the ride in the
+/// `bin_dir` read-only mount seguro shares into each runner VM — but we
+/// still verify their presence up front so the user gets a clean error
+/// instead of a cryptic runner-VM failure later.
 #[derive(Debug, Clone)]
 pub struct Binaries {
     pub ox_server: PathBuf,
@@ -109,10 +109,12 @@ pub fn resolve_binaries_in(bin_dir: &Path) -> Result<Binaries> {
     let ox_server = bin_dir.join("ox-server");
     let ox_herder = bin_dir.join("ox-herder");
     let ox_runner = bin_dir.join("ox-runner");
+    let ox_rt = bin_dir.join("ox-rt");
     for (name, path) in [
         ("ox-server", &ox_server),
         ("ox-herder", &ox_herder),
         ("ox-runner", &ox_runner),
+        ("ox-rt", &ox_rt),
     ] {
         if !path.is_file() {
             bail!(
@@ -572,7 +574,7 @@ mod tests {
     #[test]
     fn resolve_binaries_finds_siblings() {
         let dir = tmp("bins-ok");
-        for name in ["ox-server", "ox-herder", "ox-runner"] {
+        for name in ["ox-server", "ox-herder", "ox-runner", "ox-rt"] {
             std::fs::write(dir.join(name), b"#!/bin/sh\n").unwrap();
         }
         let bins = resolve_binaries_in(&dir).unwrap();
@@ -585,9 +587,20 @@ mod tests {
     fn resolve_binaries_errors_when_any_missing() {
         let dir = tmp("bins-missing");
         std::fs::write(dir.join("ox-server"), b"").unwrap();
-        // no herder, no runner
+        // no herder, runner, or rt
         let err = resolve_binaries_in(&dir).unwrap_err();
         assert!(err.to_string().contains("ox-herder"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_binaries_errors_when_ox_rt_missing() {
+        let dir = tmp("bins-no-rt");
+        for name in ["ox-server", "ox-herder", "ox-runner"] {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+        // ox-rt deliberately missing
+        let err = resolve_binaries_in(&dir).unwrap_err();
+        assert!(err.to_string().contains("ox-rt"), "got: {err}");
     }
 
     // ── Seguro argv ─────────────────────────────────────────────────
