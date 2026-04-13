@@ -81,10 +81,9 @@ fn run(cli: Cli, socket: &Path) -> Result<()> {
 /// repo at all, or when we're on `main`/detached HEAD, since those aren't
 /// agent work branches). Returns `Err(message)` with a multi-line diagnostic
 /// suitable for printing to stderr.
-#[allow(unused_variables, unreachable_code)]
 fn preflight_done(workdir: &Path) -> std::result::Result<(), String> {
-    return Err("preflight not yet implemented".into());
-    if !git(workdir, &["rev-parse", "--git-dir"]).is_ok_and(|o| !o.stdout.is_empty()) {
+    let rev_parse = git(workdir, &["rev-parse", "--git-dir"]);
+    if !rev_parse.is_ok_and(|o| o.status.success()) {
         return Ok(());
     }
 
