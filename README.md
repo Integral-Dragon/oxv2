@@ -38,16 +38,51 @@ ox depends on two sister projects from
   `workflow:code-task` become `ready`. cx state lives in git, so the
   event source is `git log`.
 
+cx is a simple cargo install:
+
 ```bash
-cargo install --git https://github.com/dragon-panic/seguro
 cargo install --git https://github.com/dragon-panic/complex
 ```
 
-This drops `seguro` and `cx` into `~/.cargo/bin/`. seguro needs QEMU and
-a `dev-bridge` network configured on the host — see its README for the
-one-time setup.
+seguro needs more setup — host packages, KVM access, and a base VM image
+that gets built once. The short version on Arch:
 
-### 3. build ox
+```bash
+sudo pacman -S qemu-full virtiofsd dosfstools mtools openssh
+sudo usermod -aG kvm $USER     # log out / in for this to take effect
+
+cargo install --git https://github.com/dragon-panic/seguro
+seguro images build            # downloads Ubuntu 24.04, builds base.qcow2 (~500 MB)
+```
+
+For Debian/Ubuntu host packages and the full security-model rundown, see
+the [seguro README](https://github.com/dragon-panic/seguro). ox-up
+launches runners with `--net dev-bridge --unsafe-dev-bridge` so they can
+reach `ox-server` on the host.
+
+### 3. install claude code and log in
+
+Runners execute Claude Code inside the VM, but the credentials come from
+the host. You need Node.js for `npm` first — on Arch:
+
+```bash
+sudo pacman -S nodejs npm
+```
+
+Then install Claude Code and log in once on the host:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+claude
+# inside the prompt:
+/login
+```
+
+`/login` writes `~/.claude/.credentials.json`. `ox-up` reads that file on
+start and seeds it as the `claude_credentials` secret. Without it, any
+step using the `claude` runtime will fail.
+
+### 4. build ox
 
 ```bash
 git clone https://github.com/integral-dragon/oxv2
@@ -59,7 +94,7 @@ You get `ox-server`, `ox-herder`, `ox-runner`, and `ox-ctl` in
 `target/debug/`. There's nothing to install — `bin/ox-up` runs them out
 of the build tree. Add `oxv2/bin` to your `PATH` so `ox-up` is on hand.
 
-### 4. start ox in a project
+### 5. start ox in a project
 
 `bin/ox-up` is the project-runner script. From any project directory it
 boots the server and herder on the host, launches seguro VMs as runners,
@@ -105,7 +140,7 @@ ox-up reset         # wipe the SQLite db and logs
 Runners reach the server on the host via the QEMU user-mode gateway
 (`10.0.2.2`); `ox-up` wires that up automatically.
 
-### 5. file a task and watch it run
+### 6. file a task and watch it run
 
 ox doesn't poll for new git commits — it watches the `cx` graph. To
 trigger a workflow, file a node in cx, tag it, surface it to `ready`,
