@@ -1,4 +1,5 @@
 mod output;
+mod up;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -74,6 +75,24 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+
+    /// Start the local ensemble (server + herder + seguro runners)
+    /// for the current directory.
+    Up {
+        /// Number of seguro runners to launch.
+        #[arg(long, env = "OX_RUNNERS", default_value = "2")]
+        runners: usize,
+        /// Server port (bound on localhost).
+        #[arg(long, env = "OX_PORT", default_value = "4840")]
+        port: u16,
+    },
+
+    /// Stop the local ensemble started with `ox-ctl up`.
+    Down,
+
+    /// Wipe the local ensemble's database and logs.
+    /// Requires that the ensemble is stopped.
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -202,12 +221,36 @@ async fn main() -> Result<()> {
         Commands::Config { command } => match command {
             ConfigCommands::Check => cmd_config_check(&client, json).await,
         },
+        Commands::Up { runners, port } => up::cmd_up(runners, port).await,
+        Commands::Down => up::cmd_down(),
+        Commands::Reset => up::cmd_reset(),
     }
 }
 
 // ── Status ──────────────────────────────────────────────────────────
 
 async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
+    // If the current directory looks like it was started with `ox-ctl up`,
+    // show the local pidfile state before talking to the server. This lets
+    // `ox-ctl status` work as a one-stop "is my ensemble alive" check.
+    if !json
+        && let Ok(cwd) = std::env::current_dir() {
+            let paths = up::RunPaths::for_repo(&cwd);
+            if paths.pidfile.is_file()
+                && let Ok(content) = std::fs::read_to_string(&paths.pidfile)
+            {
+                for entry in up::parse_pidfile(&content) {
+                    let state = if up::is_running(entry.pid) {
+                        "alive"
+                    } else {
+                        "dead "
+                    };
+                    println!("  {:<10} pid={}  {}", entry.name, entry.pid, state);
+                }
+                println!();
+            }
+        }
+
     let s = client.status().await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
