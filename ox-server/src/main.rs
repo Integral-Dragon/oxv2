@@ -181,23 +181,30 @@ async fn cx_poll_loop(state: AppState) {
         let result = match cx::poll_cx_log(&state.repo_path, cursor.as_deref()) {
             Ok(r) => r,
             Err(e) => {
-                tracing::debug!(err = %e, "cx poll failed (repo may not have .complex/)");
+                tracing::debug!(err = ?e, "cx poll failed (repo may not have .complex/)");
                 continue;
             }
         };
 
-        // Append derived events
-        for ev in result.events {
-            if let Err(e) = state.bus.append(ev.event_type, ev.data) {
-                tracing::warn!(err = %e, "failed to append cx event");
+        // Append derived events. apply_poll_result returns the cursor
+        // only if every append succeeded — on failure we skip the cursor
+        // advance so the next tick retries the same window. See
+        // apply_poll_result docs for at-least-once semantics.
+        let latest_hash = match cx::apply_poll_result(result, |t, d| {
+            state.bus.append(t, d).map(|_| ())
+        }) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(err = ?e, "cx poll tick failed — cursor not advanced, will retry");
+                continue;
             }
-        }
+        };
 
-        // Update cursor
-        if let Some(hash) = result.latest_hash
-            && let Err(e) = state.bus.with_conn(|conn| db::set_kv(conn, CX_CURSOR_KEY, &hash)) {
-                tracing::warn!(err = %e, "failed to update cx cursor");
-            }
+        if let Some(hash) = latest_hash
+            && let Err(e) = state.bus.with_conn(|conn| db::set_kv(conn, CX_CURSOR_KEY, &hash))
+        {
+            tracing::warn!(err = ?e, "failed to update cx cursor");
+        }
     }
 }
 

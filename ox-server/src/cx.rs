@@ -120,8 +120,10 @@ pub fn apply_poll_result<F>(result: CxPollResult, mut append: F) -> Result<Optio
 where
     F: FnMut(EventType, serde_json::Value) -> Result<()>,
 {
-    let _ = (&result, &mut append);
-    todo!("apply_poll_result")
+    for ev in result.events {
+        append(ev.event_type, ev.data)?;
+    }
+    Ok(result.latest_hash)
 }
 
 /// On first boot, snapshot the current cx state instead of replaying history.
