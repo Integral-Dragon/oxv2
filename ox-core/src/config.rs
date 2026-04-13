@@ -1,11 +1,153 @@
+use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use crate::workflow::{TriggerDef, TriggersFile};
 
+/// Defaults baked into the binary at compile time. The on-disk `defaults/`
+/// directory in the source tree is the source of truth; `cargo build` snapshots
+/// it into every binary so installed copies don't need the source repo on disk.
+static EMBEDDED_DEFAULTS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../defaults");
+
+/// Extract embedded defaults into `base/defaults/` if missing or stale.
+///
+/// `base` is typically `~/.ox`. On first run this writes every file from the
+/// binary's embedded copy, marks them read-only (`0o444`), and stamps
+/// `defaults/.version` with a fingerprint. On subsequent runs, if the
+/// fingerprint differs, the directory is wiped and re-extracted. The fact
+/// that the files are read-only is a convention signal — `chmod +w` still
+/// works — but it's enough to stop casual edits and make upgrades safe.
+pub fn ensure_defaults_extracted(_base: &Path) -> std::io::Result<PathBuf> {
+    Err(std::io::Error::other("slice 2: not yet implemented"))
+}
+
+#[allow(dead_code)]
+fn _real_ensure_defaults_extracted(base: &Path) -> std::io::Result<PathBuf> {
+    let defaults_dir = base.join("defaults");
+    let version_file = defaults_dir.join(".version");
+    let want = embedded_fingerprint();
+
+    let is_current = std::fs::read_to_string(&version_file)
+        .map(|s| s.trim() == want)
+        .unwrap_or(false);
+
+    if is_current {
+        return Ok(defaults_dir);
+    }
+
+    if defaults_dir.exists() {
+        // Files are 0o444 — remove_dir_all needs write perms on the parent
+        // dir entries. Unix remove_dir_all handles this, but flip perms back
+        // first to be safe on odd filesystems.
+        make_writable(&defaults_dir)?;
+        std::fs::remove_dir_all(&defaults_dir)?;
+    }
+    std::fs::create_dir_all(&defaults_dir)?;
+
+    extract_dir(&EMBEDDED_DEFAULTS, &defaults_dir)?;
+    mark_readonly(&defaults_dir)?;
+
+    // .version is writable so the next run can re-stamp it.
+    std::fs::write(&version_file, &want)?;
+
+    Ok(defaults_dir)
+}
+
+fn embedded_fingerprint() -> String {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut h = DefaultHasher::new();
+    hash_dir(&EMBEDDED_DEFAULTS, &mut h);
+    format!("{}-{:x}", env!("CARGO_PKG_VERSION"), h.finish())
+}
+
+fn hash_dir(dir: &Dir<'_>, h: &mut impl std::hash::Hasher) {
+    // include_dir walks in a deterministic order, so the hash is stable.
+    for file in dir.files() {
+        h.write(file.path().as_os_str().as_encoded_bytes());
+        h.write(file.contents());
+    }
+    for sub in dir.dirs() {
+        hash_dir(sub, h);
+    }
+}
+
+fn extract_dir(dir: &Dir<'_>, target: &Path) -> std::io::Result<()> {
+    for sub in dir.dirs() {
+        let rel = sub
+            .path()
+            .strip_prefix(dir.path())
+            .unwrap_or_else(|_| sub.path());
+        let out = target.join(rel);
+        std::fs::create_dir_all(&out)?;
+        extract_dir(sub, target)?;
+    }
+    for file in dir.files() {
+        let rel = file
+            .path()
+            .strip_prefix(dir.path())
+            .unwrap_or_else(|_| file.path());
+        let out = target.join(rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&out, file.contents())?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn mark_readonly(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for entry in walk(dir)? {
+        let meta = std::fs::metadata(&entry)?;
+        let mode = if meta.is_dir() { 0o555 } else { 0o444 };
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_writable(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for entry in walk(dir)? {
+        let meta = std::fs::metadata(&entry)?;
+        let mode = if meta.is_dir() { 0o755 } else { 0o644 };
+        // Ignore errors — best effort.
+        let _ = std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(mode));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn mark_readonly(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_writable(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn walk(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = vec![root.to_path_buf()];
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path.clone());
+            }
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
 /// Resolve the configuration search path.
 /// 1. {repo}/.ox/
 /// 2. Each directory in $OX_HOME (colon-separated, left to right)
+/// 3. ~/.ox/defaults/ (extracted from the binary on first run)
 pub fn resolve_search_path(repo_root: &Path) -> Vec<PathBuf> {
     let mut path = vec![];
     let repo_ox = repo_root.join(".ox");
@@ -202,6 +344,127 @@ pub fn load_triggers(config: &OxConfig) -> Vec<TriggerDef> {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn tmp_base(label: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "ox-core-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn ensure_defaults_extracted_writes_embedded_files() {
+        let base = tmp_base("extract-fresh");
+        let defaults = ensure_defaults_extracted(&base).expect("extract");
+        // A sentinel file we know is in defaults/: workflows/triggers.toml.
+        let triggers = defaults.join("workflows/triggers.toml");
+        assert!(triggers.is_file(), "missing {triggers:?}");
+        // runtime and persona files land too.
+        assert!(defaults.join("runtimes/claude.toml").is_file());
+        // .version exists.
+        assert!(defaults.join(".version").is_file());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn ensure_defaults_extracted_is_idempotent_when_fingerprint_matches() {
+        let base = tmp_base("extract-idem");
+        let defaults = ensure_defaults_extracted(&base).unwrap();
+        let marker = defaults.join("workflows/triggers.toml");
+        let mtime1 = fs::metadata(&marker).unwrap().modified().unwrap();
+        // Second call must not rewrite the files.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        ensure_defaults_extracted(&base).unwrap();
+        let mtime2 = fs::metadata(&marker).unwrap().modified().unwrap();
+        assert_eq!(mtime1, mtime2, "second call should not touch files");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn ensure_defaults_extracted_refreshes_on_stale_version() {
+        let base = tmp_base("extract-stale");
+        let defaults = ensure_defaults_extracted(&base).unwrap();
+        // Write a junk file that shouldn't survive a refresh.
+        let junk = defaults.join("workflows/junk.toml");
+        // File is 0o444 inside a 0o555 dir — need to loosen to write junk.
+        let mut perms = fs::metadata(defaults.join("workflows")).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        fs::set_permissions(defaults.join("workflows"), perms).unwrap();
+        fs::write(&junk, "junk").unwrap();
+        // Stamp a bogus version.
+        fs::write(defaults.join(".version"), "bogus").unwrap();
+
+        ensure_defaults_extracted(&base).unwrap();
+        assert!(!junk.exists(), "junk should have been wiped");
+        assert!(defaults.join("workflows/triggers.toml").is_file());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_defaults_extracted_marks_files_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tmp_base("extract-readonly");
+        let defaults = ensure_defaults_extracted(&base).unwrap();
+        let triggers = defaults.join("workflows/triggers.toml");
+        let mode = fs::metadata(&triggers).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o444, "expected 0o444, got {mode:o}");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn resolve_search_path_includes_extracted_defaults() {
+        let base = tmp_base("searchpath");
+        ensure_defaults_extracted(&base).unwrap();
+        // Point HOME at our temp base so ~/.ox/defaults resolves there.
+        let prev_home = std::env::var("HOME").ok();
+        let prev_ox_home = std::env::var("OX_HOME").ok();
+        // Need base itself to be $HOME/.ox/defaults layout: so set HOME such
+        // that $HOME/.ox/defaults == base/defaults. Easiest: construct a new
+        // temp HOME and extract there.
+        let fake_home = tmp_base("searchpath-home");
+        let ox_home_dir = fake_home.join(".ox");
+        fs::create_dir_all(&ox_home_dir).unwrap();
+        ensure_defaults_extracted(&ox_home_dir).unwrap();
+
+        // SAFETY: tests run single-threaded when they touch env; use serial
+        // via mutex if needed. For now, unsafe { set_var } once and restore.
+        unsafe {
+            std::env::set_var("HOME", &fake_home);
+            std::env::remove_var("OX_HOME");
+        }
+        let repo = tmp_base("searchpath-repo");
+        let path = resolve_search_path(&repo);
+        let expected = fake_home.join(".ox/defaults");
+        assert!(
+            path.iter().any(|p| p == &expected),
+            "search path {path:?} should include {expected:?}"
+        );
+
+        unsafe {
+            match prev_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_ox_home {
+                Some(h) => std::env::set_var("OX_HOME", h),
+                None => std::env::remove_var("OX_HOME"),
+            }
+        }
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&fake_home).ok();
+        fs::remove_dir_all(&repo).ok();
+    }
 
     #[test]
     fn find_config_first_match_wins() {
