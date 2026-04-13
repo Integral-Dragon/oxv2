@@ -1,5 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 #[derive(Parser, Debug)]
@@ -36,8 +38,33 @@ fn main() -> Result<()> {
     run(cli, Path::new(&socket))
 }
 
-fn run(_cli: Cli, _socket: &Path) -> Result<()> {
-    todo!("slice 1a")
+fn run(cli: Cli, socket: &Path) -> Result<()> {
+    match cli.cmd {
+        Command::Metric { name, value } => send(socket, &format!("metric {name} {value}")),
+        Command::Done { .. } => todo!("slice 1b"),
+        Command::Artifact { .. } => todo!("slice 1c"),
+        Command::ArtifactDone { .. } => todo!("slice 1d"),
+    }
+}
+
+fn send(socket: &Path, msg: &str) -> Result<()> {
+    let mut stream = UnixStream::connect(socket)
+        .with_context(|| format!("connect to {}", socket.display()))?;
+    stream.write_all(msg.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(&stream);
+    let mut resp = String::new();
+    reader.read_line(&mut resp)?;
+    let resp = resp.trim();
+    if let Some(err) = resp.strip_prefix("error:") {
+        bail!("ox-runner rejected command:{err}");
+    }
+    if resp != "ok" {
+        return Err(anyhow!("unexpected response from ox-runner: {resp}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
