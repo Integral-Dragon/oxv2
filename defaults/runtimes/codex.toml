@@ -19,15 +19,20 @@ prompt = { type = "string", default = "" }
 # codex exec is the headless subcommand — the bare `codex <prompt>` form
 # launches the interactive TUI, which refuses to run without a stdin TTY
 # ("Error: stdin is not a terminal"). Flag rationale:
-#   --full-auto:  reduces approval prompts, grants workspace write (analogous
-#                 to claude's --dangerously-skip-permissions). Review steps
-#                 need write access for git commit / cx comment.
+#   --dangerously-bypass-approvals-and-sandbox (alias --yolo):
+#                 disables codex's own bwrap-based sandbox entirely, which
+#                 is the documented correct usage "inside a dedicated
+#                 sandbox VM" — seguro is exactly that. Without this flag,
+#                 codex nests a second sandbox inside the VM and bwrap
+#                 fails on loopback RTM_NEWADDR because the VM strips
+#                 CAP_NET_ADMIN. Analogous to claude's
+#                 --dangerously-skip-permissions.
 #   --json:       newline-delimited JSON event stream, mirrors claude's
 #                 stream-json output for consistent log capture.
 #   --color never: no ANSI escapes in captured step logs.
 cmd = [
     "codex", "exec",
-    "--full-auto",
+    "--dangerously-bypass-approvals-and-sandbox",
     "--json",
     "--color", "never",
     "{tmp_dir}/ox-prompt",
