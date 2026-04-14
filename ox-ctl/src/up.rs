@@ -160,11 +160,14 @@ pub fn seguro_runner_argv(
     let scripts_s = scripts_dir
         .to_str()
         .ok_or_else(|| anyhow!("scripts_dir is not utf-8"))?;
-    let _ = sccache_dir;
-    // Single-quoted so $HOME / $PATH expand inside the guest, not out here.
+    let sccache_s = sccache_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("sccache_dir is not utf-8"))?;
     let guest_cmd = format!(
         "export HOME=/home/agent && \
          export PATH=/ox/bin:/ox/scripts:$HOME/.cargo/bin:$PATH && \
+         export SCCACHE_DIR=/cache/sccache && \
+         export RUSTC_WRAPPER=sccache && \
          /ox/bin/ox-runner --server {server_url} --environment seguro --workspace-dir /tmp/ox-work"
     );
     Ok(vec![
@@ -173,6 +176,8 @@ pub fn seguro_runner_argv(
         format!("{bin_s}:/ox/bin:ro"),
         "--share".into(),
         format!("{scripts_s}:/ox/scripts:ro"),
+        "--share".into(),
+        format!("{sccache_s}:/cache/sccache"),
         "--net".into(),
         "dev-bridge".into(),
         "--unsafe-dev-bridge".into(),
