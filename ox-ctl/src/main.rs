@@ -142,7 +142,7 @@ enum ExecCommands {
         /// Follow log output (like tail -f).
         #[arg(long, short = 'f')]
         follow: bool,
-        /// Pretty-print Claude Code stream-json logs.
+        /// Pretty-print Claude or Codex stream-json logs.
         #[arg(long, short = 'p')]
         pretty: bool,
     },
@@ -824,7 +824,7 @@ async fn cmd_logs(
     } else {
         let text = resp.error_for_status()?.text().await?;
         if pretty {
-            pretty_print_claude_log(&text);
+            pretty_print_log(&text);
         } else {
             print!("{text}");
         }
@@ -880,7 +880,7 @@ async fn cmd_logs(
             && text.len() > known_len {
                 let new_data = &text[known_len..];
                 if pretty {
-                    pretty_print_claude_log(new_data);
+                    pretty_print_log(new_data);
                 } else {
                     print!("{new_data}");
                 }
@@ -889,138 +889,244 @@ async fn cmd_logs(
     }
 }
 
-/// Pretty-print Claude Code stream-json log output.
-/// Renders assistant text, tool calls, and tool results in a readable format.
-fn pretty_print_claude_log(text: &str) {
-    const DIM: &str = "\x1b[2m";
-    const BOLD: &str = "\x1b[1m";
-    const CYAN: &str = "\x1b[36m";
-    const RED: &str = "\x1b[31m";
-    const RESET: &str = "\x1b[0m";
+const DIM: &str = "\x1b[2m";
+const BOLD: &str = "\x1b[1m";
+const CYAN: &str = "\x1b[36m";
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
 
+/// Pretty-print a stream-json log (Claude or Codex) to stdout.
+fn pretty_print_log(text: &str) {
+    let mut out = String::new();
     for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => {
-                println!("{line}");
-                continue;
-            }
-        };
+        render_log_line(&mut out, line);
+    }
+    print!("{out}");
+}
 
-        match v["type"].as_str().unwrap_or("") {
-            "system" => {
-                if v["subtype"].as_str() == Some("init") {
-                    let model = v["model"].as_str().unwrap_or("?");
-                    let cwd = v["cwd"].as_str().unwrap_or("?");
-                    println!("{DIM}── session: model={model} cwd={cwd} ──{RESET}");
-                }
-            }
-            "assistant" => {
-                let content = v["message"]["content"].as_array();
-                if let Some(blocks) = content {
-                    for block in blocks {
-                        match block["type"].as_str().unwrap_or("") {
-                            "text" => {
-                                let text = block["text"].as_str().unwrap_or("");
-                                if !text.is_empty() {
-                                    println!("{BOLD}{text}{RESET}");
-                                }
-                            }
-                            "tool_use" => {
-                                let name = block["name"].as_str().unwrap_or("?");
-                                let input = &block["input"];
-                                match name {
-                                    "Bash" => {
-                                        let cmd = input["command"].as_str().unwrap_or("");
-                                        let desc = input["description"].as_str().unwrap_or("");
-                                        if !desc.is_empty() {
-                                            println!("{CYAN}$ {cmd}{RESET}  {DIM}# {desc}{RESET}");
-                                        } else {
-                                            println!("{CYAN}$ {cmd}{RESET}");
-                                        }
-                                    }
-                                    "Read" => {
-                                        let path = input["file_path"].as_str().unwrap_or("?");
-                                        println!("{CYAN}  read {path}{RESET}");
-                                    }
-                                    "Write" => {
-                                        let path = input["file_path"].as_str().unwrap_or("?");
-                                        println!("{CYAN}  write {path}{RESET}");
-                                    }
-                                    "Edit" => {
-                                        let path = input["file_path"].as_str().unwrap_or("?");
-                                        println!("{CYAN}  edit {path}{RESET}");
-                                    }
-                                    "Glob" => {
-                                        let pattern = input["pattern"].as_str().unwrap_or("?");
-                                        println!("{CYAN}  glob {pattern}{RESET}");
-                                    }
-                                    "Grep" => {
-                                        let pattern = input["pattern"].as_str().unwrap_or("?");
-                                        println!("{CYAN}  grep {pattern}{RESET}");
-                                    }
-                                    _ => {
-                                        let short = serde_json::to_string(input).unwrap_or_default();
-                                        let short = if short.len() > 80 {
-                                            format!("{}...", &short[..80])
-                                        } else {
-                                            short
-                                        };
-                                        println!("{CYAN}  {name}({short}){RESET}");
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            "user" => {
-                let content = v["message"]["content"].as_array();
-                if let Some(blocks) = content {
-                    for block in blocks {
-                        if block["type"].as_str() == Some("tool_result") {
-                            let is_error = block["is_error"].as_bool().unwrap_or(false);
-                            let content_str = block["content"].as_str().unwrap_or("");
-                            if is_error {
-                                let short = if content_str.len() > 200 {
-                                    format!("{}...", &content_str[..200])
-                                } else {
-                                    content_str.to_string()
-                                };
-                                println!("{RED}  error: {short}{RESET}");
-                            } else if !content_str.is_empty() {
-                                // Show first line of output, dimmed
-                                let first_line = content_str.lines().next().unwrap_or("");
-                                let first_line = if first_line.len() > 120 {
-                                    format!("{}...", &first_line[..120])
-                                } else {
-                                    first_line.to_string()
-                                };
-                                println!("{DIM}  → {first_line}{RESET}");
-                            }
-                        }
-                    }
-                }
-            }
-            "result" => {
-                let cost = v["cost_usd"].as_f64();
-                let duration = v["duration_ms"].as_u64();
-                let tokens_in = v["usage"]["input_tokens"].as_u64().unwrap_or(0);
-                let tokens_out = v["usage"]["output_tokens"].as_u64().unwrap_or(0);
-                if let (Some(cost), Some(dur)) = (cost, duration) {
-                    println!(
-                        "{DIM}── done: {:.1}s, {tokens_in}in/{tokens_out}out, ${cost:.4} ──{RESET}",
-                        dur as f64 / 1000.0
-                    );
-                }
-            }
-            _ => {}
+/// Render a single ndjson log line, dispatching to the Claude or Codex
+/// renderer based on the event's top-level `type` field.
+fn render_log_line(out: &mut String, line: &str) {
+    use std::fmt::Write as _;
+
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = writeln!(out, "{line}");
+            return;
         }
+    };
+    let ty = v["type"].as_str().unwrap_or("");
+    if ty.starts_with("thread.") || ty.starts_with("turn.") || ty.starts_with("item.") {
+        render_codex_event(out, &v);
+    } else {
+        render_claude_event(out, &v);
+    }
+}
+
+/// Codex wraps shell tool calls as `/bin/bash -lc "…"`. Strip that wrapper
+/// so the rendered `$` line shows the inner command directly. If the input
+/// doesn't match the wrapper shape, return it unchanged.
+fn strip_bash_wrapper(cmd: &str) -> String {
+    let prefix = "/bin/bash -lc \"";
+    if let Some(rest) = cmd.strip_prefix(prefix)
+        && let Some(inner) = rest.strip_suffix('"')
+    {
+        return inner.replace("\\\"", "\"");
+    }
+    cmd.to_string()
+}
+
+fn render_codex_event(out: &mut String, v: &serde_json::Value) {
+    use std::fmt::Write as _;
+
+    match v["type"].as_str().unwrap_or("") {
+        "thread.started" => {
+            let thread = v["thread_id"].as_str().unwrap_or("?");
+            let _ = writeln!(out, "{DIM}── session: thread={thread} ──{RESET}");
+        }
+        "turn.started" => {}
+        "turn.completed" => {
+            let tokens_in = v["usage"]["input_tokens"].as_u64().unwrap_or(0);
+            let cached = v["usage"]["cached_input_tokens"].as_u64().unwrap_or(0);
+            let tokens_out = v["usage"]["output_tokens"].as_u64().unwrap_or(0);
+            let _ = writeln!(
+                out,
+                "{DIM}── done: {tokens_in}in ({cached} cached) / {tokens_out}out ──{RESET}"
+            );
+        }
+        "item.completed" => {
+            let item = &v["item"];
+            match item["type"].as_str().unwrap_or("") {
+                "agent_message" => {
+                    let text = item["text"].as_str().unwrap_or("");
+                    if !text.is_empty() {
+                        let _ = writeln!(out, "{BOLD}{text}{RESET}");
+                    }
+                }
+                "command_execution" => {
+                    let exit = item["exit_code"].as_i64().unwrap_or(0);
+                    let agg = item["aggregated_output"].as_str().unwrap_or("");
+                    if exit != 0 {
+                        let short = if agg.len() > 200 {
+                            format!("{}...", &agg[..200])
+                        } else {
+                            agg.to_string()
+                        };
+                        let _ = writeln!(out, "{RED}  error (exit {exit}): {short}{RESET}");
+                    } else if !agg.is_empty() {
+                        let first = agg.lines().next().unwrap_or("");
+                        let first = if first.len() > 120 {
+                            format!("{}...", &first[..120])
+                        } else {
+                            first.to_string()
+                        };
+                        let _ = writeln!(out, "{DIM}  → {first}{RESET}");
+                    }
+                }
+                _ => {}
+            }
+        }
+        "item.started" => {
+            let item = &v["item"];
+            match item["type"].as_str().unwrap_or("") {
+                "command_execution" => {
+                    let cmd = item["command"].as_str().unwrap_or("");
+                    let shown = strip_bash_wrapper(cmd);
+                    let _ = writeln!(out, "{CYAN}$ {shown}{RESET}");
+                }
+                "file_change" => {
+                    if let Some(changes) = item["changes"].as_array() {
+                        for change in changes {
+                            let kind = change["kind"].as_str().unwrap_or("?");
+                            let path = change["path"].as_str().unwrap_or("?");
+                            let _ = writeln!(out, "{CYAN}  {kind} {path}{RESET}");
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_claude_event(out: &mut String, v: &serde_json::Value) {
+    use std::fmt::Write as _;
+
+    match v["type"].as_str().unwrap_or("") {
+        "system" => {
+            if v["subtype"].as_str() == Some("init") {
+                let model = v["model"].as_str().unwrap_or("?");
+                let cwd = v["cwd"].as_str().unwrap_or("?");
+                let _ = writeln!(out, "{DIM}── session: model={model} cwd={cwd} ──{RESET}");
+            }
+        }
+        "assistant" => {
+            let content = v["message"]["content"].as_array();
+            if let Some(blocks) = content {
+                for block in blocks {
+                    match block["type"].as_str().unwrap_or("") {
+                        "text" => {
+                            let text = block["text"].as_str().unwrap_or("");
+                            if !text.is_empty() {
+                                let _ = writeln!(out, "{BOLD}{text}{RESET}");
+                            }
+                        }
+                        "tool_use" => {
+                            let name = block["name"].as_str().unwrap_or("?");
+                            let input = &block["input"];
+                            match name {
+                                "Bash" => {
+                                    let cmd = input["command"].as_str().unwrap_or("");
+                                    let desc = input["description"].as_str().unwrap_or("");
+                                    if !desc.is_empty() {
+                                        let _ = writeln!(out, "{CYAN}$ {cmd}{RESET}  {DIM}# {desc}{RESET}");
+                                    } else {
+                                        let _ = writeln!(out, "{CYAN}$ {cmd}{RESET}");
+                                    }
+                                }
+                                "Read" => {
+                                    let path = input["file_path"].as_str().unwrap_or("?");
+                                    let _ = writeln!(out, "{CYAN}  read {path}{RESET}");
+                                }
+                                "Write" => {
+                                    let path = input["file_path"].as_str().unwrap_or("?");
+                                    let _ = writeln!(out, "{CYAN}  write {path}{RESET}");
+                                }
+                                "Edit" => {
+                                    let path = input["file_path"].as_str().unwrap_or("?");
+                                    let _ = writeln!(out, "{CYAN}  edit {path}{RESET}");
+                                }
+                                "Glob" => {
+                                    let pattern = input["pattern"].as_str().unwrap_or("?");
+                                    let _ = writeln!(out, "{CYAN}  glob {pattern}{RESET}");
+                                }
+                                "Grep" => {
+                                    let pattern = input["pattern"].as_str().unwrap_or("?");
+                                    let _ = writeln!(out, "{CYAN}  grep {pattern}{RESET}");
+                                }
+                                _ => {
+                                    let short = serde_json::to_string(input).unwrap_or_default();
+                                    let short = if short.len() > 80 {
+                                        format!("{}...", &short[..80])
+                                    } else {
+                                        short
+                                    };
+                                    let _ = writeln!(out, "{CYAN}  {name}({short}){RESET}");
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        "user" => {
+            let content = v["message"]["content"].as_array();
+            if let Some(blocks) = content {
+                for block in blocks {
+                    if block["type"].as_str() == Some("tool_result") {
+                        let is_error = block["is_error"].as_bool().unwrap_or(false);
+                        let content_str = block["content"].as_str().unwrap_or("");
+                        if is_error {
+                            let short = if content_str.len() > 200 {
+                                format!("{}...", &content_str[..200])
+                            } else {
+                                content_str.to_string()
+                            };
+                            let _ = writeln!(out, "{RED}  error: {short}{RESET}");
+                        } else if !content_str.is_empty() {
+                            let first_line = content_str.lines().next().unwrap_or("");
+                            let first_line = if first_line.len() > 120 {
+                                format!("{}...", &first_line[..120])
+                            } else {
+                                first_line.to_string()
+                            };
+                            let _ = writeln!(out, "{DIM}  → {first_line}{RESET}");
+                        }
+                    }
+                }
+            }
+        }
+        "result" => {
+            let cost = v["cost_usd"].as_f64();
+            let duration = v["duration_ms"].as_u64();
+            let tokens_in = v["usage"]["input_tokens"].as_u64().unwrap_or(0);
+            let tokens_out = v["usage"]["output_tokens"].as_u64().unwrap_or(0);
+            if let (Some(cost), Some(dur)) = (cost, duration) {
+                let _ = writeln!(
+                    out,
+                    "{DIM}── done: {:.1}s, {tokens_in}in/{tokens_out}out, ${cost:.4} ──{RESET}",
+                    dur as f64 / 1000.0
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1150,6 +1256,181 @@ mod tests {
         // --task was removed in slice D. clap must surface it as unknown.
         let result = Cli::try_parse_from(["ox-ctl", "exec", "list", "--task", "aJuO"]);
         assert!(result.is_err(), "--task should be rejected");
+    }
+
+    // ── pretty_print_log: Claude regression ──────────────────────────
+
+    fn render(line: &str) -> String {
+        let mut out = String::new();
+        render_log_line(&mut out, line);
+        out
+    }
+
+    #[test]
+    fn claude_assistant_text_is_bold() {
+        let out = render(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#,
+        );
+        assert!(out.contains("hello world"), "got {out:?}");
+        assert!(out.contains(BOLD), "missing bold: {out:?}");
+    }
+
+    #[test]
+    fn claude_system_init_shows_session_header() {
+        let out = render(
+            r#"{"type":"system","subtype":"init","model":"sonnet-4-6","cwd":"/tmp/x"}"#,
+        );
+        assert!(out.contains("session:"));
+        assert!(out.contains("model=sonnet-4-6"));
+        assert!(out.contains("cwd=/tmp/x"));
+    }
+
+    #[test]
+    fn claude_bash_tool_use_renders_dollar_prompt() {
+        let out = render(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la","description":"list"}}]}}"#,
+        );
+        assert!(out.contains("$ ls -la"));
+        assert!(out.contains("# list"));
+    }
+
+    #[test]
+    fn claude_tool_result_error_is_red() {
+        let out = render(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"boom"}]}}"#,
+        );
+        assert!(out.contains("error: boom"));
+        assert!(out.contains(RED));
+    }
+
+    #[test]
+    fn claude_result_shows_done_footer() {
+        let out = render(
+            r#"{"type":"result","cost_usd":0.12,"duration_ms":3400,"usage":{"input_tokens":100,"output_tokens":42}}"#,
+        );
+        assert!(out.contains("done:"));
+        assert!(out.contains("100in/42out"));
+        assert!(out.contains("$0.1200"));
+    }
+
+    #[test]
+    fn invalid_json_falls_through_to_raw() {
+        let out = render("not json at all");
+        assert_eq!(out, "not json at all\n");
+    }
+
+    #[test]
+    fn empty_line_renders_nothing() {
+        let out = render("   ");
+        assert_eq!(out, "");
+    }
+
+    // ── pretty_print_log: Codex ───────────────────────────────────────
+
+    #[test]
+    fn codex_thread_started_shows_session_header() {
+        let out = render(
+            r#"{"type":"thread.started","thread_id":"019d8de2-fb51-7bb2-a40d-b02f4475724f"}"#,
+        );
+        assert!(out.contains("session:"), "got {out:?}");
+        assert!(out.contains("thread="), "got {out:?}");
+        // Full id should appear — short-form was considered but kept full for grep.
+        assert!(out.contains("019d8de2-fb51-7bb2-a40d-b02f4475724f"));
+        assert!(out.contains(DIM));
+    }
+
+    #[test]
+    fn codex_turn_started_is_silent() {
+        let out = render(r#"{"type":"turn.started"}"#);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn codex_agent_message_is_bold() {
+        let out = render(
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I'll read the file first."}}"#,
+        );
+        assert!(out.contains("I'll read the file first."));
+        assert!(out.contains(BOLD));
+    }
+
+    #[test]
+    fn codex_agent_message_on_item_started_is_silent() {
+        // agent_message is only rendered on completion to avoid double output.
+        let out = render(
+            r#"{"type":"item.started","item":{"id":"item_0","type":"agent_message","text":"partial"}}"#,
+        );
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn codex_command_execution_started_prints_dollar_prompt() {
+        let out = render(
+            r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc \"sed -n '1,5p' /tmp/x\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
+        );
+        // Bash wrapper stripped — inner command shown.
+        assert!(out.contains("$ sed -n '1,5p' /tmp/x"), "got {out:?}");
+        assert!(!out.contains("/bin/bash -lc"), "wrapper leaked: {out:?}");
+        assert!(out.contains(CYAN));
+    }
+
+    #[test]
+    fn codex_command_execution_without_bash_wrapper_prints_raw() {
+        let out = render(
+            r#"{"type":"item.started","item":{"id":"i","type":"command_execution","command":"ls /tmp","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
+        );
+        assert!(out.contains("$ ls /tmp"));
+    }
+
+    #[test]
+    fn codex_command_execution_completed_success_shows_dim_output_line() {
+        let out = render(
+            r#"{"type":"item.completed","item":{"id":"i","type":"command_execution","command":"ls","aggregated_output":"file1.txt\nfile2.txt\n","exit_code":0,"status":"completed"}}"#,
+        );
+        assert!(out.contains("→ file1.txt"), "got {out:?}");
+        assert!(out.contains(DIM));
+        assert!(!out.contains("file2.txt"), "only first line should render: {out:?}");
+    }
+
+    #[test]
+    fn codex_command_execution_completed_error_shows_red() {
+        let out = render(
+            r#"{"type":"item.completed","item":{"id":"i","type":"command_execution","command":"false","aggregated_output":"permission denied","exit_code":1,"status":"completed"}}"#,
+        );
+        assert!(out.contains("error"));
+        assert!(out.contains("permission denied"));
+        assert!(out.contains(RED));
+    }
+
+    #[test]
+    fn codex_file_change_started_lists_each_path() {
+        let out = render(
+            r#"{"type":"item.started","item":{"id":"i","type":"file_change","changes":[{"path":"/tmp/a.md","kind":"add"},{"path":"/tmp/b.md","kind":"update"}],"status":"in_progress"}}"#,
+        );
+        assert!(out.contains("add /tmp/a.md"), "got {out:?}");
+        assert!(out.contains("update /tmp/b.md"), "got {out:?}");
+        assert!(out.contains(CYAN));
+    }
+
+    #[test]
+    fn codex_file_change_completed_is_silent() {
+        // Already announced on start — completion is noise.
+        let out = render(
+            r#"{"type":"item.completed","item":{"id":"i","type":"file_change","changes":[{"path":"/tmp/a.md","kind":"add"}],"status":"completed"}}"#,
+        );
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn codex_turn_completed_shows_done_footer() {
+        let out = render(
+            r#"{"type":"turn.completed","usage":{"input_tokens":289532,"cached_input_tokens":268672,"output_tokens":2213}}"#,
+        );
+        assert!(out.contains("done:"), "got {out:?}");
+        assert!(out.contains("289532in"));
+        assert!(out.contains("2213out"));
+        assert!(out.contains("268672 cached"));
+        assert!(out.contains(DIM));
     }
 
     #[test]
