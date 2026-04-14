@@ -137,9 +137,21 @@ pub fn resolve_binaries_in(bin_dir: &Path) -> Result<Binaries> {
 /// The runner is invoked inside a guest bash so we can set HOME and PATH
 /// before exec'ing `/ox/bin/ox-runner`. Matches the layout in the old
 /// bin/ox-up script: ox binaries at /ox/bin, cx at /ox/scripts.
+/// Per-user shared sccache cache directory: `$HOME/.cache/ox/sccache`.
+/// Created if missing. Shared across every project the user runs ox in so
+/// dependency builds (tokio, hyper, etc.) cache-hit across repositories.
+pub fn sccache_cache_dir() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME not set"))?;
+    let dir = PathBuf::from(home).join(".cache/ox/sccache");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create sccache cache dir {}", dir.display()))?;
+    Ok(dir)
+}
+
 pub fn seguro_runner_argv(
     bin_dir: &Path,
     scripts_dir: &Path,
+    sccache_dir: &Path,
     server_url: &str,
 ) -> Result<Vec<String>> {
     let bin_s = bin_dir
@@ -148,6 +160,7 @@ pub fn seguro_runner_argv(
     let scripts_s = scripts_dir
         .to_str()
         .ok_or_else(|| anyhow!("scripts_dir is not utf-8"))?;
+    let _ = sccache_dir;
     // Single-quoted so $HOME / $PATH expand inside the guest, not out here.
     let guest_cmd = format!(
         "export HOME=/home/agent && \
@@ -337,7 +350,12 @@ pub async fn cmd_up(runners: usize, port: u16) -> Result<()> {
             let _ = std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o777));
         }
         let log = paths.log_dir.join(format!("runner-{i}.log"));
-        let args = seguro_runner_argv(&bins.bin_dir, &paths.scripts_dir, &guest_server)?;
+        let args = seguro_runner_argv(
+            &bins.bin_dir,
+            &paths.scripts_dir,
+            &sccache_cache_dir()?,
+            &guest_server,
+        )?;
         let pid = spawn_detached(Path::new("seguro"), &args, &log)?;
         append_pid(
             &paths.pidfile,
@@ -646,12 +664,24 @@ mod tests {
     fn seguro_runner_argv_builds_expected_shape() {
         let bin = PathBuf::from("/ox-bin");
         let scripts = PathBuf::from("/ox-scripts");
-        let args = seguro_runner_argv(&bin, &scripts, "http://10.0.2.2:4840").unwrap();
+        let sccache = PathBuf::from("/sccache-host");
+        let args =
+            seguro_runner_argv(&bin, &scripts, &sccache, "http://10.0.2.2:4840").unwrap();
         assert_eq!(args[0], "run");
         // Shares in the correct order and format.
         let joined = args.join(" ");
         assert!(joined.contains("--share /ox-bin:/ox/bin:ro"));
         assert!(joined.contains("--share /ox-scripts:/ox/scripts:ro"));
+        // sccache share is writable (no :ro suffix). Guest path /cache/sccache
+        // matches v1's convention so SCCACHE_DIR stays the same.
+        assert!(
+            joined.contains("--share /sccache-host:/cache/sccache"),
+            "missing sccache share in: {joined}"
+        );
+        assert!(
+            !joined.contains("/sccache-host:/cache/sccache:ro"),
+            "sccache share must not be read-only"
+        );
         // Dev bridge + unsafe flags present.
         assert!(joined.contains("--net dev-bridge"));
         assert!(joined.contains("--unsafe-dev-bridge"));
@@ -665,6 +695,15 @@ mod tests {
         assert!(guest.contains("--server http://10.0.2.2:4840"));
         assert!(guest.contains("--environment seguro"));
         assert!(guest.contains("HOME=/home/agent"));
+        // sccache env vars for rustc wrapping inside the guest.
+        assert!(
+            guest.contains("SCCACHE_DIR=/cache/sccache"),
+            "missing SCCACHE_DIR export in guest cmd: {guest}"
+        );
+        assert!(
+            guest.contains("RUSTC_WRAPPER=sccache"),
+            "missing RUSTC_WRAPPER export in guest cmd: {guest}"
+        );
     }
 
     // ── Cx staging ──────────────────────────────────────────────────
