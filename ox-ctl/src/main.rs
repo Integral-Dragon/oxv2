@@ -703,6 +703,23 @@ fn event_summary(data: &str) -> String {
     };
     let d = v.get("data").unwrap_or(&v);
 
+    // Source events carry source/kind/subject_id rather than the
+    // execution-centric fields below.
+    if let Some(src) = d.get("source").and_then(|v| v.as_str()) {
+        let kind = d.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let subj = d.get("subject_id").and_then(|v| v.as_str()).unwrap_or("");
+        let mut s = if kind.is_empty() {
+            src.to_string()
+        } else {
+            format!("{src}/{kind}")
+        };
+        if !subj.is_empty() {
+            s.push(' ');
+            s.push_str(subj);
+        }
+        return s;
+    }
+
     // Build a brief summary from common fields
     let mut parts = vec![];
     if let Some(eid) = d.get("execution_id").and_then(|v| v.as_str()) {
@@ -1271,6 +1288,18 @@ mod tests {
     use clap::Parser;
     use ox_core::events::{ChildKind, ExecutionOrigin};
     use ox_core::types::ExecutionId;
+
+    #[test]
+    fn event_summary_source_event() {
+        let data = r#"{"data":{"source":"cx","kind":"node.ready","subject_id":"aJuO","idempotency_key":"k1"}}"#;
+        assert_eq!(event_summary(data), "cx/node.ready aJuO");
+    }
+
+    #[test]
+    fn event_summary_step_done() {
+        let data = r#"{"data":{"execution_id":"e-1","step":"propose","output":"proposed"}}"#;
+        assert_eq!(event_summary(data), "e-1 propose output=proposed");
+    }
 
     #[test]
     fn format_origin_source_cx_node() {
