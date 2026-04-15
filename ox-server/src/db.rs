@@ -66,6 +66,22 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             data         BLOB    NOT NULL,
             PRIMARY KEY (execution_id, step, attempt, name, offset)
         );
+
+        CREATE TABLE IF NOT EXISTS watcher_cursors (
+            source      TEXT PRIMARY KEY,
+            cursor      TEXT,
+            updated_at  TEXT NOT NULL,
+            updated_seq INTEGER,
+            last_error  TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS ingest_idempotency (
+            source          TEXT    NOT NULL,
+            idempotency_key TEXT    NOT NULL,
+            first_seen_seq  INTEGER NOT NULL,
+            first_seen_ts   TEXT    NOT NULL,
+            PRIMARY KEY (source, idempotency_key)
+        );
         ",
     )
     .context("running migrations")?;

@@ -67,6 +67,9 @@ pub enum EventType {
     SecretSet,
     #[serde(rename = "secret.deleted")]
     SecretDeleted,
+    // Source events from watcher plugins.
+    #[serde(rename = "source")]
+    Source,
     // cx
     #[serde(rename = "cx.task_ready")]
     CxTaskReady,
@@ -264,6 +267,28 @@ pub struct SecretSetData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretDeletedData {
     pub name: String,
+}
+
+/// Payload for `EventType::Source` — a fact observed by a watcher
+/// plugin. The server stores the envelope verbatim; triggers match on
+/// `source`, `kind`, and `tags`, and can template `data.*` into vars.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceEventData {
+    /// Watcher identifier — `cx`, `linear`, `github`, `schedule`, etc.
+    pub source: String,
+    /// Source-native event kind — `node.ready`, `issue.labeled`, ...
+    pub kind: String,
+    /// Source-native correlation key for what the event is about.
+    pub subject_id: String,
+    /// Dedup key. `(source, idempotency_key)` is the dedup boundary on
+    /// ingest; duplicates are dropped silently.
+    pub idempotency_key: String,
+    /// Routing labels used by triggers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Free-form source payload available to trigger var templates.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,13 +1,58 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
-use ox_core::events::{EventEnvelope, EventType};
+use chrono::{DateTime, Utc};
+use ox_core::events::{EventEnvelope, EventType, SourceEventData};
 use ox_core::types::Seq;
 use rusqlite::Connection;
 use std::sync::Mutex;
+use thiserror::Error;
 use tokio::sync::broadcast;
 
 use crate::db;
 use crate::projections::Projections;
+
+/// Server-side row for a watcher's cursor. One row per source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatcherCursor {
+    pub source: String,
+    /// Opaque string the watcher last committed. `None` before first write.
+    pub cursor: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    pub updated_seq: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+/// A watcher's batch ingest request. `cursor_before` is the CAS guard;
+/// `cursor_after` is the new value to persist on commit.
+#[derive(Debug, Clone)]
+pub struct IngestBatch {
+    pub source: String,
+    pub cursor_before: Option<String>,
+    pub cursor_after: String,
+    pub events: Vec<SourceEventData>,
+}
+
+/// Result of a successful `ingest_batch` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestResult {
+    /// Number of events actually appended to the bus, after dedup.
+    pub appended: u32,
+    /// Number of events dropped as duplicates (same `idempotency_key`).
+    pub deduped: u32,
+}
+
+/// Errors returned by `ingest_batch`. Mapped to HTTP status codes by
+/// the API handler.
+#[derive(Debug, Error)]
+pub enum IngestError {
+    /// `cursor_before` did not match the stored cursor. 409 Conflict.
+    #[error("cursor CAS mismatch: expected {expected:?}, stored {actual:?}")]
+    CursorConflict {
+        expected: Option<String>,
+        actual: Option<String>,
+    },
+    #[error("storage error: {0}")]
+    Storage(#[from] anyhow::Error),
+}
 
 /// The event bus. Serializes event appends, updates projections, broadcasts to SSE.
 pub struct EventBus {
@@ -154,6 +199,25 @@ impl EventBus {
         let next = self.next_seq.lock().unwrap();
         if *next == 0 { 0 } else { *next - 1 }
     }
+
+    /// Read a single watcher's cursor row. Returns `None` if the
+    /// watcher has never posted a batch — the first-boot cold start.
+    pub fn get_watcher_cursor(&self, _source: &str) -> Result<Option<WatcherCursor>> {
+        unimplemented!("slice 1: get_watcher_cursor")
+    }
+
+    /// List all known watcher cursors. Used by `GET /api/watchers`.
+    pub fn list_watcher_cursors(&self) -> Result<Vec<WatcherCursor>> {
+        unimplemented!("slice 1: list_watcher_cursors")
+    }
+
+    /// Ingest a batch of source events from a watcher. One SQLite
+    /// transaction: CAS the cursor, dedup via `ingest_idempotency`,
+    /// append `EventType::Source` rows, update `watcher_cursors`.
+    /// Projections and SSE broadcast happen after commit.
+    pub fn ingest_batch(&self, _batch: IngestBatch) -> Result<IngestResult, IngestError> {
+        unimplemented!("slice 1: ingest_batch")
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +341,127 @@ mod tests {
         let replayed = bus.replay_after(0).unwrap();
         let obj = replayed[0].data.as_object().unwrap();
         assert!(!obj.contains_key("value"));
+    }
+
+    // ── Slice 1: watcher ingest ────────────────────────────────────────
+
+    fn sample_event(key: &str) -> SourceEventData {
+        SourceEventData {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: "Q6cY".into(),
+            idempotency_key: key.into(),
+            tags: vec!["workflow:code-task".into()],
+            data: serde_json::json!({ "title": "test", "state": "ready" }),
+        }
+    }
+
+    #[test]
+    fn get_watcher_cursor_missing_returns_none() {
+        let bus = test_bus();
+        let got = bus.get_watcher_cursor("cx").unwrap();
+        assert!(got.is_none(), "empty db should return None for cursor");
+    }
+
+    #[test]
+    fn ingest_batch_appends_events_and_advances_cursor() {
+        let bus = test_bus();
+        let start_seq = bus.current_seq();
+
+        let batch = IngestBatch {
+            source: "cx".into(),
+            cursor_before: None,
+            cursor_after: "sha-abc".into(),
+            events: vec![sample_event("Q6cY:node.ready:sha-abc")],
+        };
+
+        let result = bus.ingest_batch(batch).expect("ingest should succeed");
+        assert_eq!(result.appended, 1, "one new event should be appended");
+        assert_eq!(result.deduped, 0, "no dupes on first call");
+
+        let cursor = bus
+            .get_watcher_cursor("cx")
+            .unwrap()
+            .expect("cursor row should exist after first ingest");
+        assert_eq!(cursor.source, "cx");
+        assert_eq!(cursor.cursor.as_deref(), Some("sha-abc"));
+        assert_eq!(cursor.last_error, None);
+
+        // The event log grew by exactly one Source event.
+        let tail = bus.replay_after(start_seq).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].event_type, EventType::Source);
+    }
+
+    #[test]
+    fn ingest_batch_is_idempotent_on_replay() {
+        let bus = test_bus();
+
+        let batch = |cursor_before: Option<&str>, cursor_after: &str| IngestBatch {
+            source: "cx".into(),
+            cursor_before: cursor_before.map(str::to_string),
+            cursor_after: cursor_after.into(),
+            events: vec![sample_event("Q6cY:node.ready:sha-abc")],
+        };
+
+        let r1 = bus.ingest_batch(batch(None, "sha-abc")).unwrap();
+        assert_eq!(r1.appended, 1);
+
+        let seq_after_first = bus.current_seq();
+
+        // Replaying the exact same batch should dedupe the event.
+        // The watcher would send cursor_before = current cursor on retry.
+        let r2 = bus.ingest_batch(batch(Some("sha-abc"), "sha-abc")).unwrap();
+        assert_eq!(r2.appended, 0, "replayed event should be deduped");
+        assert_eq!(r2.deduped, 1);
+
+        assert_eq!(
+            bus.current_seq(),
+            seq_after_first,
+            "no new events appended on replay"
+        );
+
+        let cursor = bus.get_watcher_cursor("cx").unwrap().unwrap();
+        assert_eq!(cursor.cursor.as_deref(), Some("sha-abc"));
+    }
+
+    #[test]
+    fn ingest_batch_rejects_wrong_cursor_before() {
+        let bus = test_bus();
+
+        // Seed the cursor at "sha-abc".
+        bus.ingest_batch(IngestBatch {
+            source: "cx".into(),
+            cursor_before: None,
+            cursor_after: "sha-abc".into(),
+            events: vec![],
+        })
+        .unwrap();
+
+        let seq_before = bus.current_seq();
+
+        // Now post with a stale cursor_before.
+        let bad = IngestBatch {
+            source: "cx".into(),
+            cursor_before: Some("sha-WRONG".into()),
+            cursor_after: "sha-xyz".into(),
+            events: vec![sample_event("should-not-land")],
+        };
+
+        match bus.ingest_batch(bad) {
+            Err(IngestError::CursorConflict { expected, actual }) => {
+                assert_eq!(expected.as_deref(), Some("sha-WRONG"));
+                assert_eq!(actual.as_deref(), Some("sha-abc"));
+            }
+            other => panic!("expected CursorConflict, got {other:?}"),
+        }
+
+        // No new events committed.
+        assert_eq!(bus.current_seq(), seq_before);
+
+        // Cursor unchanged.
+        let cursor = bus.get_watcher_cursor("cx").unwrap().unwrap();
+        assert_eq!(cursor.cursor.as_deref(), Some("sha-abc"));
     }
 
     #[test]
