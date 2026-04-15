@@ -415,7 +415,7 @@ mod tests {
         )
         .unwrap();
 
-        let cfg = load_config(&[dir.clone()]);
+        let cfg = load_config(std::slice::from_ref(&dir));
         assert_eq!(cfg.watchers, vec!["cx".to_string()]);
         fs::remove_dir_all(&dir).ok();
     }
@@ -485,7 +485,7 @@ mod tests {
     fn load_config_watchers_defaults_to_empty() {
         let dir = tmp_base("watchers-empty");
         fs::write(dir.join("config.toml"), "triggers = []\n").unwrap();
-        let cfg = load_config(&[dir.clone()]);
+        let cfg = load_config(std::slice::from_ref(&dir));
         assert!(cfg.watchers.is_empty());
         fs::remove_dir_all(&dir).ok();
     }

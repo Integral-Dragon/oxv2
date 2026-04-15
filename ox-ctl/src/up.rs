@@ -1,4 +1,4 @@
-//! Local ensemble orchestration: server + herder + seguro runners.
+//! Local ensemble orchestration: server + herder + watchers + seguro runners.
 //!
 //! This is the Rust port of the old `bin/ox-up` bash script. The pure
 //! pieces (path derivation, pidfile parsing, binary resolution, seguro
@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use ox_core::client::OxClient;
+use ox_core::config;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -113,8 +114,16 @@ impl Binaries {
     /// as `ox-server`. Returns an error if the binary is missing so
     /// `ox-ctl up` fails loudly at startup instead of later at spawn
     /// time.
-    pub fn watcher(&self, _name: &str) -> Result<PathBuf> {
-        unimplemented!("slice 4: Binaries::watcher")
+    pub fn watcher(&self, name: &str) -> Result<PathBuf> {
+        let file = format!("ox-{name}-watcher");
+        let path = self.bin_dir.join(&file);
+        if !path.is_file() {
+            bail!(
+                "{file} not found at {}; install the watcher binary or remove \"{name}\" from .ox/config.toml's watchers list",
+                path.display()
+            );
+        }
+        Ok(path)
     }
 }
 
@@ -351,6 +360,40 @@ pub async fn cmd_up(runners: usize, port: u16) -> Result<()> {
         &PidEntry { pid: herder_pid, name: "herder".into() },
     )?;
     println!("  herder    pid={herder_pid}");
+
+    // ── Watchers ─────────────────────────────────────────────────
+    // Each entry in .ox/config.toml's `watchers = [...]` list
+    // resolves to a sibling `ox-<name>-watcher` binary and spawns a
+    // dedicated process. The watcher connects to the server URL and
+    // the repo path; everything else (cursor, idempotency) lives on
+    // the server.
+    let search_path = config::resolve_search_path(&repo);
+    let ox_config = config::load_config(&search_path);
+    for watcher_name in &ox_config.watchers {
+        let binary = match bins.watcher(watcher_name) {
+            Ok(p) => p,
+            Err(e) => {
+                println!("  warning   watcher {watcher_name}: {e}");
+                continue;
+            }
+        };
+        let log = paths.log_dir.join(format!("{watcher_name}-watcher.log"));
+        let args = vec![
+            "--server".into(),
+            server_url.clone(),
+            "--repo".into(),
+            repo.to_string_lossy().to_string(),
+        ];
+        let pid = spawn_detached(&binary, &args, &log)?;
+        append_pid(
+            &paths.pidfile,
+            &PidEntry {
+                pid,
+                name: format!("{watcher_name}-watcher"),
+            },
+        )?;
+        println!("  {watcher_name}-watcher  pid={pid}");
+    }
 
     // ── Stage cx into scripts dir ────────────────────────────────
     match stage_cx_binary(&paths.scripts_dir) {

@@ -5,4 +5,10 @@ triggers = [
     "workflows/triggers.toml",
 ]
 
+# Watchers run as sibling processes alongside ox-server. Each entry
+# resolves to an `ox-<name>-watcher` binary. `cx` is the reference
+# event source for local development; remove it (and install the
+# relevant watcher) for projects driven by Linear, GitHub, etc.
+watchers = ["cx"]
+
 heartbeat_grace = 60

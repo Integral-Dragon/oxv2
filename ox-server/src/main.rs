@@ -1,5 +1,8 @@
 mod api;
 mod artifacts;
+// Dormant — kept to let existing tests and signatures compile until
+// slice 5 of the event-sources migration deletes the module entirely.
+#[allow(dead_code)]
 mod cx;
 mod db;
 mod events;
@@ -93,13 +96,12 @@ async fn main() -> Result<()> {
         .append(EventType::ServerReady, serde_json::json!({}))
         .expect("failed to emit server.ready");
 
-    // Background cx poll loop
-    {
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            cx_poll_loop(state).await;
-        });
-    }
+    // Event ingestion is out-of-process now — see
+    // docs/prd/event-sources.md. ox-cx-watcher (and any other
+    // configured watcher) runs as a sibling process launched by
+    // ox-ctl up, and posts source events to /api/events/ingest. The
+    // legacy in-server cx_poll_loop is dormant; slice 5 of the
+    // migration deletes the code entirely.
 
     // SIGHUP config reload
     #[cfg(unix)]
@@ -160,8 +162,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 const CX_CURSOR_KEY: &str = "cx_log_cursor";
 
+#[allow(dead_code)]
 async fn cx_poll_loop(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

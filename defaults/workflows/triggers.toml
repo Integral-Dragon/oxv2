@@ -1,22 +1,29 @@
-# Triggers map cx events onto workflow executions. Each trigger declares:
-#   - `on`: the event type it matches
-#   - `tag`: an optional tag pattern the node must carry
+# Triggers map source events (from watcher plugins) onto workflow
+# executions. Each trigger declares:
+#   - `on`: the source-native event kind it matches (e.g. `node.ready`)
+#   - `source`: the watcher namespace it filters on (e.g. `cx`)
+#   - `tag`: an optional tag that must appear on the event's tags list
 #   - `workflow`: the workflow to run
-#   - `[trigger.vars]`: how to populate the workflow's declared vars from
-#     event fields. Templates may reference `{event.X}` for fields the
-#     firing event exposes. For cx.task_ready the available field is
-#     `event.node_id`.
+#   - `[trigger.vars]`: how to populate the workflow's declared vars
+#     from event fields. Templates may reference `{event.source}`,
+#     `{event.kind}`, `{event.subject_id}`, `{event.tags}`, or
+#     `{event.data.<path>}` for dotted walks into the source payload.
+#
+# ox-cx-watcher emits source events with `source = "cx"` and kinds
+# `node.ready` / `node.claimed` / `node.done` / `comment.added`.
 
 [[trigger]]
-on       = "cx.task_ready"
+on       = "node.ready"
+source   = "cx"
 tag      = "workflow:code-task"
 workflow = "code-task"
 [trigger.vars]
-task_id = "{event.node_id}"
+task_id = "{event.subject_id}"
 
 [[trigger]]
-on       = "cx.task_ready"
+on       = "node.ready"
+source   = "cx"
 tag      = "workflow:consultation"
 workflow = "consultation"
 [trigger.vars]
-branch = "{event.node_id}"
+branch = "{event.subject_id}"

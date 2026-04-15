@@ -164,6 +164,7 @@ pub fn upsert_runner_heartbeat(
 }
 
 /// Get a value from the kv table.
+#[allow(dead_code)]
 pub fn get_kv(conn: &Connection, key: &str) -> Result<Option<String>> {
     let mut stmt = conn
         .prepare("SELECT value FROM kv WHERE key = ?1")
@@ -178,6 +179,7 @@ pub fn get_kv(conn: &Connection, key: &str) -> Result<Option<String>> {
 }
 
 /// Set a value in the kv table.
+#[allow(dead_code)]
 pub fn set_kv(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO kv (key, value) VALUES (?1, ?2)

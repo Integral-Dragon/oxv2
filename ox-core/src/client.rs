@@ -273,6 +273,22 @@ impl OxClient {
         format!("{}{}", self.base_url, path)
     }
 
+    // ── Watchers ───────────────────────────────────────────────────
+
+    /// `GET /api/watchers` — list watcher cursor rows. Each entry is
+    /// one row from the server's `watcher_cursors` table, suitable
+    /// for rendering in `ox-ctl status` or a dashboard. Returns an
+    /// empty vec when no watcher has posted yet (cold start).
+    pub async fn list_watchers(&self) -> Result<serde_json::Value> {
+        let resp = self.http.get(self.url("/api/watchers")).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("GET /api/watchers → {status}: {text}");
+        }
+        Ok(resp.json().await?)
+    }
+
     // ── Status ──────────────────────────────────────────────────────
 
     pub async fn status(&self) -> Result<StatusResponse> {

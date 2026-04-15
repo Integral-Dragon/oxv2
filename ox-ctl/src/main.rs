@@ -246,8 +246,38 @@ struct WatcherRow {
 /// rows as input and returns the string to print (with a trailing
 /// newline per line). Empty input renders an empty string so the
 /// caller can decide whether to print a header.
-fn format_watchers_section(_rows: &[WatcherRow]) -> String {
-    unimplemented!("slice 4: format_watchers_section")
+fn format_watchers_section(rows: &[WatcherRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "  {:<10} {:<22} {:<16} {}\n",
+        "SOURCE", "LAST INGEST", "CURSOR", "STATUS"
+    ));
+    for row in rows {
+        let cursor_display = match row.cursor.as_deref() {
+            Some(s) if !s.is_empty() => {
+                let head: String = s.chars().take(12).collect();
+                if s.chars().count() > 12 {
+                    format!("{head}…")
+                } else {
+                    head
+                }
+            }
+            _ => "-".to_string(),
+        };
+        let status = row
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "alive".to_string());
+        out.push_str(&format!(
+            "  {:<10} {:<22} {:<16} {}\n",
+            row.source, row.updated_at, cursor_display, status
+        ));
+    }
+    out
 }
 
 // ── Status ──────────────────────────────────────────────────────────
@@ -275,16 +305,29 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
         }
 
     let s = client.status().await?;
+    // Best-effort fetch — a server that hasn't been restarted yet
+    // won't know the route. Treat any failure as "no watchers to
+    // render" rather than aborting the whole status command.
+    let watchers_raw = client.list_watchers().await.ok();
+    let watchers: Vec<WatcherRow> = watchers_raw
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "status": s.status,
-            "pool_size": s.pool_size,
-            "pool_executing": s.pool_executing,
-            "pool_idle": s.pool_idle,
-            "executions_running": s.executions_running,
-            "workflows_loaded": s.workflows_loaded,
-            "event_seq": s.event_seq,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": s.status,
+                "pool_size": s.pool_size,
+                "pool_executing": s.pool_executing,
+                "pool_idle": s.pool_idle,
+                "executions_running": s.executions_running,
+                "workflows_loaded": s.workflows_loaded,
+                "event_seq": s.event_seq,
+                "watchers": watchers_raw.unwrap_or(serde_json::json!([])),
+            }))?
+        );
     } else {
         println!("ox-server   {}   seq {}", s.status, s.event_seq);
         println!(
@@ -293,6 +336,12 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
         );
         println!("executions  {} running", s.executions_running);
         println!("workflows   {} loaded", s.workflows_loaded);
+        let section = format_watchers_section(&watchers);
+        if !section.is_empty() {
+            println!();
+            println!("watchers");
+            print!("{section}");
+        }
     }
     Ok(())
 }
