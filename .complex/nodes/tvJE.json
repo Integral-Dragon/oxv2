@@ -1,13 +1,13 @@
 {
   "id": "tvJE",
   "title": "Slice 5: delete the legacy path and scrub remaining stale docs",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "claude",
   "created_at": "2026-04-15T17:09:49.283665102Z",
-  "updated_at": "2026-04-15T20:33:20.592820045Z",
+  "updated_at": "2026-04-15T20:50:56.235219072Z",
   "parent": "5H3N",
   "meta": {
-    "_reason": "slice 5: delete legacy cx path from ox-server, events, herder"
+    "_reason": "slice 5 done: ox-server/src/cx.rs deleted, EventType::Cx* / ExecutionOrigin::CxNode / EventContext::Cx* / fallback_origin gone, /api/state/cx + /api/triggers/evaluate routes deleted, all PRD + design docs scrubbed. 185 workspace tests green, clippy clean, 1599 lines removed."
   }
 }
