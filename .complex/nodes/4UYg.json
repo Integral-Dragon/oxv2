@@ -1,11 +1,11 @@
 {
   "id": "4UYg",
   "title": "Slice 3: ox-cx-watcher crate (parallel path)",
-  "state": "latent",
+  "state": "ready",
   "shadowed": false,
   "part": null,
   "created_at": "2026-04-15T17:09:09.303795973Z",
-  "updated_at": "2026-04-15T17:09:09.303795973Z",
+  "updated_at": "2026-04-15T17:27:35.798499662Z",
   "parent": "5H3N",
   "edges": [
     {

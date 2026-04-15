@@ -1,14 +1,14 @@
 {
   "id": "UQQ3",
   "title": "Slice 2: generic trigger matching on source events",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "claude",
   "created_at": "2026-04-15T17:08:49.938850704Z",
-  "updated_at": "2026-04-15T17:17:00.081031212Z",
+  "updated_at": "2026-04-15T17:27:35.798497328Z",
   "parent": "5H3N",
   "meta": {
-    "_reason": "starting slice 2: generic trigger matching on source events"
+    "_reason": "slice 2 done: generic source-event trigger matching; triggers.toml flip deferred to slice 4 to avoid breaking live cx path"
   },
   "edges": [
     {
