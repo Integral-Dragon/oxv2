@@ -329,23 +329,23 @@ pub async fn cmd_up(runners: usize, port: u16) -> Result<()> {
     append_pid(&paths.pidfile, &PidEntry { pid: server_pid, name: "server".into() })?;
     println!("  server    pid={server_pid}  port={port}");
 
-    // Give the server a moment to bind its port before the herder and
-    // secret-seeding hit it.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Wait for the server to accept requests before the herder and
+    // secret-seeding hit it. Fails fast if the server exits during startup.
+    let server_url = format!("http://localhost:{port}");
+    wait_for_server(&server_url, server_pid, &server_log).await?;
 
     // ── Seed claude_credentials ──────────────────────────────────
-    let server_url = format!("http://localhost:{port}");
     match seed_claude_credentials(&server_url).await {
         Ok(true) => println!("  secrets   claude_credentials seeded"),
         Ok(false) => println!("  warning   ~/.claude/.credentials.json not found — claude steps will fail"),
-        Err(e) => println!("  warning   failed to seed claude_credentials: {e}"),
+        Err(e) => println!("  warning   failed to seed claude_credentials: {e:#}"),
     }
 
     // ── Seed codex_auth ──────────────────────────────────────────
     match seed_codex_credentials(&server_url).await {
         Ok(true) => println!("  secrets   codex_auth seeded"),
         Ok(false) => println!("  note      ~/.codex/auth.json not found — codex steps will fail (run `codex login`)"),
-        Err(e) => println!("  warning   failed to seed codex_auth: {e}"),
+        Err(e) => println!("  warning   failed to seed codex_auth: {e:#}"),
     }
 
     // ── ox-herder ────────────────────────────────────────────────
@@ -569,6 +569,44 @@ fn which(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Poll the server's status endpoint until it responds, or the server
+/// process exits, or the deadline elapses. On failure, bails with a
+/// pointer to `server.log` and the last few lines of tail context.
+async fn wait_for_server(server_url: &str, server_pid: u32, server_log: &Path) -> Result<()> {
+    let client = OxClient::new(server_url);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if client.status().await.is_ok() {
+            return Ok(());
+        }
+        if !is_running(server_pid) {
+            let tail = tail_log(server_log, 10).unwrap_or_default();
+            bail!(
+                "ox-server exited during startup — see {}\n{}",
+                server_log.display(),
+                tail,
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            let tail = tail_log(server_log, 10).unwrap_or_default();
+            bail!(
+                "ox-server did not become ready within 3s — see {}\n{}",
+                server_log.display(),
+                tail,
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Read the last `n` lines of a file. Best-effort; returns None on any error.
+fn tail_log(path: &Path, n: usize) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    Some(lines[start..].join("\n"))
 }
 
 async fn seed_claude_credentials(server_url: &str) -> Result<bool> {
