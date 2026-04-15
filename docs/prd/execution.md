@@ -28,7 +28,7 @@ The runner receives `step.dispatched` via the SSE stream.
 The runner provisions the workspace according to the step's workspace spec:
 
 - Clones the repo from ox-server's git endpoint (if `git_clone = true`)
-- Checks out the task branch, creating it from main if it does not exist
+- Checks out the execution branch, creating it from main if it does not exist
 - For read-only steps, checks out in detached HEAD mode
 
 Each step gets a fresh clone. No filesystem state carries over from
@@ -191,11 +191,13 @@ configurable per step with `max_retries`.
 
 When retries are exhausted:
 
-1. The herder shadows the cx task (`cx shadow`)
-2. `execution.escalated` is emitted
-3. The workflow's escalation step runs — this may be a triage agent, an
+1. `execution.escalated` is emitted
+2. The workflow's escalation step runs — this may be a triage agent, an
    interactive human step, or any other step. What happens is defined by
    the workflow, not by the infrastructure.
+3. Source-specific workflows may mark source objects shadowed as a
+   side effect (for cx, that's a `cx shadow` call from a step). The
+   herder itself has no source-specific knowledge.
 
 ### max_visits
 
@@ -268,9 +270,9 @@ through direct writes to main.
 
 ## Execution State
 
-An execution is the full run of a workflow for a task. It tracks the
-current position in the step graph and the history of every step
-attempt.
+An execution is the full run of a workflow created from a trigger. It
+tracks the current position in the step graph and the history of every
+step attempt.
 
 ### Structure
 
@@ -304,7 +306,7 @@ Each visit is a separate **attempt**. An attempt is a complete,
 independent unit with its own:
 
 - Runner assignment
-- Artifacts (log, commits, cx-diff, declared)
+- Artifacts (log, commits, declared)
 - Metrics (runner-collected, proxy-collected, runtime-reported, derived)
 - Signals
 - Output value
@@ -353,14 +355,16 @@ execution.escalated { execution_id, step, reason }
 execution.cancelled { execution_id, reason }
 ```
 
-`execution.created` — a workflow has been triggered for a task. `trigger`
-describes what caused it (e.g. `cx.task_ready`, `workflow.step_completed`,
-`manual`).
+`execution.created` — a workflow execution has been created from a
+trigger. `trigger` describes what caused it (e.g. a source event kind
+like `node.ready`, `workflow.step_completed`, or `manual`).
 
-`execution.escalated` — the execution has exhausted its retry budget. The
-herder shadows the cx task. The escalation step defined in the workflow
-runs next — it may be a triage agent, an interactive human step, or any
-other step type.
+`execution.escalated` — the execution has exhausted its retry budget.
+The escalation step defined in the workflow runs next — it may be a
+triage agent, an interactive human step, or any other step type.
+Source-specific workflows may mark source objects shadowed as a side
+effect of that step; the herder itself has no source-specific
+knowledge.
 
 ### Step events
 

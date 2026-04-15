@@ -12,50 +12,62 @@ For the workflow model (what workflows are), see
 
 ## Trigger Evaluation
 
-Triggers create executions. The herder evaluates triggers when cx events
-arrive on the SSE stream.
+Triggers create executions. The herder evaluates triggers when source
+events (or, later, Ox-internal lifecycle events) arrive on the SSE
+stream.
 
 ### Flow
 
 ```
-cx.task_ready event arrives
+EventType::Source arrives (SourceEventData { source, kind, subject_id, tags, data })
   │
   ▼
 herder: for each trigger in loaded trigger files:
   │
-  ├─ does trigger.on match the event type?
-  ├─ does trigger.tag match any tag on the node?
+  ├─ does trigger.on match the event's `kind`?
+  ├─ if trigger.source is set, does it match the event's `source`?
+  ├─ if trigger.tag is set, is it in the event's `tags` list?
   │
-  ├─ build EventContext from the event payload
-  │  (CxTaskReady { node_id }, etc.)
+  ├─ build EventContext::Source from the envelope
+  │  (source, kind, subject_id, tags, data — all available as
+  │   {event.source}, {event.kind}, {event.subject_id},
+  │   {event.tags}, {event.data.*})
   │
   ├─ call trigger.build_vars(&ctx):
   │  ├─ interpolate each [trigger.vars] template
-  │  │  against {event.X} fields
+  │  │  against {event.X} / {event.data.X} fields
   │  ├─ on MissingEventField → post trigger.failed, continue
   │  └─ return the workflow vars map
   │
   ├─ dedup check: is_origin_active(
   │     existing executions,
-  │     origin = CxNode { node_id },
+  │     origin = Source { source, kind, subject_id },
   │     workflow = trigger.workflow,
   │     is_active = |s| running or escalated
   │  )?
   │
   ├─ if all pass:
   │    POST /api/executions
-  │    { workflow, vars, origin: CxNode{..}, trigger: "cx.task_ready" }
+  │    { workflow, vars, origin: Source{..}, trigger: <kind> }
   │
   └─ if dedup blocks or build_vars fails: skip (event emitted on failure)
 ```
+
+Source-side state suppression (e.g. skip-if-`integrated` for cx nodes)
+is **not** performed by the herder. Under the event-sources plan, each
+watcher filters its own source: a cx watcher does not POST a
+`node.ready` event for a node that is already `integrated` or
+`shadowed`. The server-side matcher has no special-cased knowledge of
+any source's lifecycle — it matches what the watcher chose to ingest.
 
 ### Dedup Rules
 
 A trigger is suppressed if there is already an active execution with
 the same `(origin, workflow)` pair, where `origin` is typed
-(`ExecutionOrigin::CxNode | Execution | Manual`) and compared
-structurally. This lets dedup work correctly for every workflow
-regardless of what var name it uses for the cx node id.
+(`ExecutionOrigin::Source | CxNode | Execution | Manual`) and compared
+structurally. For source events the dedup key is
+`(source, kind, subject_id)` — the same subject firing the same kind
+of event will not double-start a workflow while one is already live.
 
 Two liveness rules share a predicate (`is_origin_active`) with
 different `is_active` callbacks:

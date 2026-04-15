@@ -32,7 +32,7 @@ persona     = "inspired/software-engineer"    # default persona for steps
 
 [[step]]
 name      = "propose"
-workspace = { git_clone = true, branch = "{task_id}", push = true }
+workspace = { git_clone = true, branch = "{branch}", push = true }
 output    = "diff"
 prompt    = "Read the task spec, explore the codebase, write a proposal."
 max_visits      = 3
@@ -41,7 +41,7 @@ max_visits_goto = "plan-tiebreak"
 [[step]]
 name      = "review-plan"
 persona   = "inspired/tech-lead"              # override workflow default
-workspace = { git_clone = true, branch = "{task_id}", push = true }
+workspace = { git_clone = true, branch = "{branch}", push = true }
 output    = "verdict"
 max_retries = 1
 
@@ -59,7 +59,7 @@ goto  = "escalate"
 
 [[step]]
 name      = "implement"
-workspace = { git_clone = true, branch = "{task_id}", push = true }
+workspace = { git_clone = true, branch = "{branch}", push = true }
 output    = "diff"
 prompt    = "Implement the task following the approved proposal."
 max_visits      = 3
@@ -68,7 +68,7 @@ max_visits_goto = "code-tiebreak"
 [[step]]
 name      = "review-code"
 persona   = "inspired/reviewer"
-workspace = { git_clone = true, branch = "{task_id}", push = true }
+workspace = { git_clone = true, branch = "{branch}", push = true }
 output      = "verdict"
 max_retries = 2
 
@@ -87,7 +87,7 @@ goto  = "escalate"
 [[step]]
 name   = "merge"
 action = "merge_to_main"
-workspace = { branch = "{task_id}" }
+workspace = { branch = "{branch}" }
 on_fail     = "implement"
 max_retries = 2
 ```
@@ -159,7 +159,7 @@ environment before running the agent.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `git_clone` | `false` | Clone the repo from ox-server's git endpoint |
-| `branch` | — | Branch to check out. Execution vars are interpolated (e.g. `{task_id}`). Created from main if it does not exist |
+| `branch` | — | Branch to check out. Execution vars are interpolated (e.g. `{branch}`, `{event.subject_id}`). Created from main if it does not exist |
 | `push` | `false` | Whether the step is expected to push commits. Enables `no_commits` signal detection |
 | `read_only` | `false` | Check out in detached HEAD mode. No commits allowed |
 
@@ -325,9 +325,10 @@ main.
 - Branch must have at least one commit ahead of the merge base. An empty
   branch is an error — the step produced nothing.
 
-**Post-merge:** the worktree is updated to the new main HEAD. ox-server
-then diffs `.complex/` against the previous HEAD and emits any resulting
-cx events.
+**Post-merge:** the worktree is updated to the new main HEAD. Any
+source-specific side effects of the merge (cx state transitions,
+GitHub issue updates, ...) are observed by the corresponding watcher
+and arrive back as source events through the normal ingest path.
 
 ---
 
@@ -394,9 +395,11 @@ Each step defines its failure behaviour via `on_fail`:
 | `"escalate"` | Escalate immediately without retrying |
 
 When `max_retries` is exhausted, the step always escalates regardless of
-`on_fail`. The herder shadows the cx task and emits `execution.escalated`.
-The escalation step is defined in the workflow — it may be a triage agent,
-an interactive human step, or any other step type.
+`on_fail`. The herder emits `execution.escalated`; source-specific
+workflows may then mark source objects shadowed as a side effect (for
+cx, that's a `cx shadow` call from a step). The escalation step is
+defined in the workflow — it may be a triage agent, an interactive
+human step, or any other step type.
 
 ---
 
@@ -422,57 +425,79 @@ Trigger files across the search path are additive — repo-local and
 default triggers all load. If no `config.toml` exists, ox falls back
 to loading `workflows/triggers.toml` from each search-path directory.
 
-### cx triggers
+### Source event triggers
 
-Fired when a commit lands on main that changes `.complex/` in a way that
-matches a condition. ox-server derives these from `git log` diffs — no
-separate event files in cx.
+Source event triggers fire when a watcher plugin ingests an event that
+matches the trigger's filters. Ox has no built-in knowledge of any
+particular source system — cx, Linear, GitHub, a timer — a watcher
+observes each source, maps native facts into `SourceEvent` envelopes,
+and posts them to `POST /api/events/ingest`. Triggers select which
+events start workflows.
 
 ```toml
 # workflows/triggers.toml
 [[trigger]]
-on       = "cx.task_ready"
-tag      = "workflow:code-task"
+on       = "node.ready"                # the source-native event kind
+source   = "cx"                        # watcher identifier (optional filter)
+tag      = "workflow:code-task"        # must appear in the event's tag list
 workflow = "code-task"
 [trigger.vars]
-task_id = "{event.node_id}"
+branch  = "cx-{event.subject_id}"
+task_id = "{event.subject_id}"
+title   = "{event.data.title}"
 ```
 
-Each trigger declares a `[trigger.vars]` block that maps event fields
-onto the workflow's declared variables. Templates may reference
-`{event.X}` for fields the firing event exposes. The mapping is what
-lets different workflows use different var names for the same event —
-`code-task` declares `task_id`, `consultation` declares `branch`, and
-the triggers map `event.node_id` into whichever name the workflow
-wants:
+Fields:
+
+- `on` — matches the event's `kind` field verbatim. Kinds are
+  source-authored strings like `node.ready`, `issue.labeled`, or
+  `schedule.tick`; Ox does not interpret them.
+- `source` — optional. When set, only events whose `source` equals
+  this value match. Omit it to accept any watcher.
+- `tag` — optional. When set, the event's `tags` list must contain
+  this string.
+- `workflow` — the workflow to start.
+- `[trigger.vars]` — templates resolved against the firing event's
+  `EventContext::Source`. The resulting map is validated against the
+  workflow's `[workflow.vars]` declarations.
+
+The mapping is what lets different workflows use different var names
+for the same event — `code-task` declares `task_id`, `consultation`
+declares `branch`, and the triggers template whichever name the
+workflow wants:
 
 ```toml
 [[trigger]]
-on       = "cx.task_ready"
+on       = "node.ready"
+source   = "cx"
 tag      = "workflow:consultation"
 workflow = "consultation"
 [trigger.vars]
-branch = "{event.node_id}"
+branch = "cx-{event.subject_id}"
 ```
 
 A trigger with no `[trigger.vars]` block produces no workflow vars —
 the workflow must declare only optional vars with defaults, or the
 execution will fail `validate_vars` and emit a `trigger.failed` event.
 
-#### Event field namespace (v1)
+#### Event field namespace
 
-| Event | Available `event.*` fields |
-|-------|----------------------------|
-| `cx.task_ready` | `event.node_id` |
-| `cx.task_claimed` | `event.node_id` |
-| `cx.task_integrated` | `event.node_id` |
-| `cx.task_shadowed` | `event.node_id`, `event.reason` |
-| `cx.comment_added` | `event.node_id`, `event.tag`, `event.author` |
+Source events expose a small fixed envelope plus a free-form `data`
+blob. Any field on either side is reachable from a `{event.*}`
+template.
 
-v1 supports cx events only. The workflow-chaining variants of
-`EventContext` (for `execution.*` and `step.*` events) exist in the
-data model but are not wired through the herder's trigger evaluation
-path yet.
+| Template path | Value |
+|---------------|-------|
+| `event.source` | Watcher identifier (`cx`, `linear`, `github`, ...) |
+| `event.kind` | Source-native event kind (e.g. `node.ready`) |
+| `event.subject_id` | Source-native correlation key |
+| `event.tags` | Comma-joined tag list |
+| `event.data.<path>` | Dotted walk into the JSON payload |
+
+A cx watcher might populate `event.data.title`, `event.data.state`,
+and `event.data.node_id`; a GitHub watcher might populate
+`event.data.issue.number` and `event.data.labels`. The trigger picks
+which fields to template into workflow vars.
 
 #### Trigger failures
 
@@ -491,22 +516,13 @@ Trigger failures are deterministic and fire-once: the herder guards
 emission behind `!replaying`, so a stale failure is not re-logged on
 every restart. An operator fixes the TOML and re-fires manually.
 
-Common cx trigger conditions:
-
-| Condition | Description |
-|-----------|-------------|
-| `cx.task_ready` | Node transitions to ready with a matching tag |
-| `cx.task_integrated` | Node becomes integrated |
-| `cx.phase_complete` | All children of a `#phase` node are integrated |
-| `cx.comment_added` | A comment with a matching tag is added to a node |
-| `cx.node_created` | A node with a matching tag is created |
-
-cx triggers can specify a `poll_interval` to fire repeatedly while the
-condition holds:
+Source event triggers can specify a `poll_interval` to fire
+repeatedly while the condition holds:
 
 ```toml
 [[trigger]]
-on            = "cx.task_ready"
+on            = "node.ready"
+source        = "cx"
 tag           = "phase"
 state         = "claimed"
 workflow      = "checkpoint"
@@ -552,11 +568,15 @@ Fired by infrastructure events. Built-in — not configurable.
 4. **Complete** → `step.done` → signals → `step.confirmed`
 5. **Advance** → herder evaluates transitions, dispatches next step
 6. **Merge** → `merge_to_main` action step lands the branch on main
-7. **cx events** → ox-server diffs `.complex/`, emits `cx.task_integrated`
+7. **Source side effects** → watchers observe downstream state changes
+   (cx node state transitions, GitHub issue updates, ...) and emit new
+   source events that may trigger follow-up workflows
 8. **Done** → `execution.completed`
 
-Execution IDs are server-generated (`e-{epoch}-{seq}`). A cx task can
-have multiple executions (retries, re-runs).
+Execution IDs are server-generated (`e-{epoch}-{seq}`). The same
+source subject (a cx node, a GitHub issue, ...) can have multiple
+executions over time through retries, re-runs, or different workflows
+matching different events.
 
 ### Two-phase event processing
 
