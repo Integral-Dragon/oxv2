@@ -1,4 +1,4 @@
-CRATES := ox-server ox-herder ox-runner ox-ctl ox-rt
+CRATES := ox-server ox-herder ox-runner ox-ctl ox-rt ox-cx-watcher
 
 .PHONY: install uninstall build test fmt fmt-check clippy check clean
 
