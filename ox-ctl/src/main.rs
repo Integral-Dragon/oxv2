@@ -350,6 +350,11 @@ const ORIGIN_DISPLAY_WIDTH: usize = 24;
 fn format_origin(origin: &ox_core::events::ExecutionOrigin) -> String {
     use ox_core::events::ExecutionOrigin::*;
     let raw = match origin {
+        Source {
+            source,
+            subject_id,
+            ..
+        } => format!("{source}:{subject_id}"),
         CxNode { node_id } => format!("cx:{node_id}"),
         Execution {
             parent_execution_id,

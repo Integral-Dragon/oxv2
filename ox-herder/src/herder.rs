@@ -1076,6 +1076,21 @@ impl<C: OxClientApi> Herder<C> {
         }
     }
 
+    /// Match source events (from watcher plugins) against configured
+    /// triggers. A trigger matches when its `on` equals the event kind
+    /// and — if set — its `source` equals the event source and its
+    /// `tag` appears in the event's tag list. Dedup is by
+    /// `ExecutionOrigin::Source { source, kind, subject_id }`; vars
+    /// template against an `EventContext::Source` context.
+    ///
+    /// Source-side state suppression (skip-if-integrated for cx, etc.)
+    /// is the watcher's responsibility under the event-sources plan —
+    /// the server-side matcher has no special-cased knowledge of any
+    /// source's lifecycle.
+    async fn evaluate_triggers_for_source_event(&mut self, _event: &SourceEventData) {
+        unimplemented!("slice 2: evaluate_triggers_for_source_event")
+    }
+
     // ── Tick ────────────────────────────────────────────────────────
 
     async fn on_tick(&self) {
@@ -1115,6 +1130,7 @@ mod tests {
     #[derive(Default)]
     struct MockClient {
         created: Mutex<Vec<(String, String, ExecutionOrigin)>>,
+        created_vars: Mutex<Vec<HashMap<String, String>>>,
     }
 
     impl MockClient {
@@ -1123,6 +1139,9 @@ mod tests {
         }
         fn create_calls(&self) -> Vec<(String, String, ExecutionOrigin)> {
             self.created.lock().unwrap().clone()
+        }
+        fn create_call_vars(&self) -> Vec<HashMap<String, String>> {
+            self.created_vars.lock().unwrap().clone()
         }
     }
 
@@ -1137,7 +1156,7 @@ mod tests {
             &self,
             workflow: &str,
             trigger: &str,
-            _vars: HashMap<String, String>,
+            vars: HashMap<String, String>,
             origin: Option<ExecutionOrigin>,
         ) -> Result<ExecutionId> {
             self.created.lock().unwrap().push((
@@ -1145,6 +1164,7 @@ mod tests {
                 trigger.to_string(),
                 origin.unwrap_or(ExecutionOrigin::Manual { user: None }),
             ));
+            self.created_vars.lock().unwrap().push(vars);
             Ok(ExecutionId(format!("exec-mock-{}", self.created.lock().unwrap().len())))
         }
         async fn complete_execution(&self, _id: &str) -> Result<()> {
@@ -1182,11 +1202,45 @@ mod tests {
     fn code_task_trigger() -> TriggerDef {
         TriggerDef {
             on: "cx.task_ready".into(),
+            source: None,
             tag: Some("workflow:code-task".into()),
             state: None,
             workflow: "code-task".into(),
             poll_interval: None,
             vars: HashMap::new(),
+        }
+    }
+
+    /// Slice 2: source-event trigger. Matches `EventType::Source` with
+    /// `source = "cx"` and `kind = "node.ready"`.
+    fn cx_source_trigger() -> TriggerDef {
+        let mut vars = HashMap::new();
+        vars.insert("branch".into(), "cx-{event.subject_id}".into());
+        vars.insert("task_id".into(), "{event.subject_id}".into());
+        vars.insert("title".into(), "{event.data.title}".into());
+        TriggerDef {
+            on: "node.ready".into(),
+            source: Some("cx".into()),
+            tag: Some("workflow:code-task".into()),
+            state: None,
+            workflow: "code-task".into(),
+            poll_interval: None,
+            vars,
+        }
+    }
+
+    fn sample_cx_source_event() -> SourceEventData {
+        SourceEventData {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: "Q6cY".into(),
+            idempotency_key: "Q6cY:node.ready:sha-abc".into(),
+            tags: vec!["workflow:code-task".into()],
+            data: serde_json::json!({
+                "title": "ccstat models — model-mix breakdown over time",
+                "node_id": "Q6cY",
+                "state": "ready"
+            }),
         }
     }
 
@@ -1293,6 +1347,123 @@ mod tests {
             Some("ready"),
         )
         .await;
+
+        assert_eq!(h.client.create_calls().len(), 0);
+    }
+
+    // ── Slice 2: source event triggers ─────────────────────────────
+
+    fn herder_with_source_trigger(client: MockClient) -> Herder<MockClient> {
+        let mut h = Herder::with_client(client, "http://test", 0, 60, 1);
+        h.triggers = vec![cx_source_trigger()];
+        h.replaying = false;
+        h
+    }
+
+    /// A `source = "cx", on = "node.ready"` trigger fires when a
+    /// matching source event arrives. The execution is created with
+    /// `ExecutionOrigin::Source { source, kind, subject_id }` and the
+    /// vars template resolves against `event.source`, `event.kind`,
+    /// `event.subject_id`, and `event.data.*`.
+    #[tokio::test]
+    async fn source_event_fires_for_matching_source_and_kind() {
+        let mut h = herder_with_source_trigger(MockClient::new());
+
+        let event = sample_cx_source_event();
+        h.evaluate_triggers_for_source_event(&event).await;
+
+        let calls = h.client.create_calls();
+        assert_eq!(calls.len(), 1, "one execution should be created");
+        assert_eq!(calls[0].0, "code-task");
+        assert_eq!(
+            calls[0].2,
+            ExecutionOrigin::Source {
+                source: "cx".into(),
+                kind: "node.ready".into(),
+                subject_id: "Q6cY".into(),
+            }
+        );
+
+        let vars = h.client.create_call_vars();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].get("branch").map(String::as_str), Some("cx-Q6cY"));
+        assert_eq!(vars[0].get("task_id").map(String::as_str), Some("Q6cY"));
+        assert_eq!(
+            vars[0].get("title").map(String::as_str),
+            Some("ccstat models — model-mix breakdown over time")
+        );
+    }
+
+    /// A trigger with `source = "cx"` must NOT fire on an event from a
+    /// different watcher. Source is a hard filter.
+    #[tokio::test]
+    async fn source_event_does_not_fire_for_different_source() {
+        let mut h = herder_with_source_trigger(MockClient::new());
+
+        let mut event = sample_cx_source_event();
+        event.source = "linear".into();
+
+        h.evaluate_triggers_for_source_event(&event).await;
+
+        assert_eq!(h.client.create_calls().len(), 0);
+    }
+
+    /// A trigger with `on = "node.ready"` must NOT fire on a source
+    /// event with a different kind — even when the source matches.
+    #[tokio::test]
+    async fn source_event_does_not_fire_for_different_kind() {
+        let mut h = herder_with_source_trigger(MockClient::new());
+
+        let mut event = sample_cx_source_event();
+        event.kind = "node.claimed".into();
+
+        h.evaluate_triggers_for_source_event(&event).await;
+
+        assert_eq!(h.client.create_calls().len(), 0);
+    }
+
+    /// A trigger with a `tag` filter must NOT fire when the event's
+    /// tag list does not include it.
+    #[tokio::test]
+    async fn source_event_does_not_fire_when_tag_missing() {
+        let mut h = herder_with_source_trigger(MockClient::new());
+
+        let mut event = sample_cx_source_event();
+        event.tags = vec!["workflow:other".into()];
+
+        h.evaluate_triggers_for_source_event(&event).await;
+
+        assert_eq!(h.client.create_calls().len(), 0);
+    }
+
+    /// Dedup: a second source event with the same
+    /// `(source, kind, subject_id)` tuple while the first execution is
+    /// still live must NOT fire a second execution. Mirrors the
+    /// existing CxNode origin dedup rule.
+    #[tokio::test]
+    async fn source_event_skipped_when_origin_already_active() {
+        let mut h = herder_with_source_trigger(MockClient::new());
+
+        let event = sample_cx_source_event();
+        h.executions.insert(
+            "exec-existing".into(),
+            ExecutionView {
+                vars: HashMap::new(),
+                origin: ExecutionOrigin::Source {
+                    source: "cx".into(),
+                    kind: "node.ready".into(),
+                    subject_id: "Q6cY".into(),
+                },
+                workflow: "code-task".into(),
+                status: "running".into(),
+                phase: ExecPhase::AwaitingStep,
+                visit_counts: HashMap::new(),
+                last_output: None,
+                retry_tracker: RetryTracker::new(),
+            },
+        );
+
+        h.evaluate_triggers_for_source_event(&event).await;
 
         assert_eq!(h.client.create_calls().len(), 0);
     }

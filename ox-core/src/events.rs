@@ -308,9 +308,20 @@ pub struct CxTaskReadyData {
 /// Trigger-firing event context. Exposes the subset of event payload fields
 /// that can be referenced as `{event.X}` inside a `[trigger.vars]` block.
 ///
-/// v1 supports cx events only; workflow-chaining variants are deferred.
+/// Under the event-sources migration, `Source` is the new canonical
+/// variant used by watcher-produced events. The `Cx*` variants are
+/// deprecated and removed in slice 5 of that migration.
 #[derive(Debug, Clone)]
 pub enum EventContext {
+    /// A source event emitted by a watcher. `data` is the free-form
+    /// payload; `event.data.<key>` paths resolve into it.
+    Source {
+        source: String,
+        kind: String,
+        subject_id: String,
+        tags: Vec<String>,
+        data: serde_json::Value,
+    },
     CxTaskReady { node_id: String },
     CxTaskClaimed { node_id: String },
     CxTaskIntegrated { node_id: String },
@@ -325,19 +336,59 @@ pub enum EventContext {
 impl EventContext {
     /// Resolve a dotted path like `event.node_id` to its string value.
     /// Returns `None` if the path is not defined for this variant.
+    ///
+    /// For `Source` contexts, the resolvable fields are:
+    /// - `event.source` / `event.kind` / `event.subject_id`
+    /// - `event.tags` (comma-joined when referenced directly)
+    /// - `event.data.<key>...` — dotted walk into the JSON payload
     pub fn resolve(&self, path: &str) -> Option<String> {
         let field = path.strip_prefix("event.")?;
-        match (self, field) {
-            (Self::CxTaskReady { node_id }, "node_id") => Some(node_id.clone()),
-            (Self::CxTaskClaimed { node_id }, "node_id") => Some(node_id.clone()),
-            (Self::CxTaskIntegrated { node_id }, "node_id") => Some(node_id.clone()),
-            (Self::CxTaskShadowed { node_id, .. }, "node_id") => Some(node_id.clone()),
-            (Self::CxTaskShadowed { reason, .. }, "reason") => Some(reason.clone()),
-            (Self::CxCommentAdded { node_id, .. }, "node_id") => Some(node_id.clone()),
-            (Self::CxCommentAdded { tag, .. }, "tag") => tag.clone(),
-            (Self::CxCommentAdded { author, .. }, "author") => author.clone(),
+        match self {
+            Self::Source {
+                source,
+                kind,
+                subject_id,
+                tags,
+                data,
+            } => match field {
+                "source" => Some(source.clone()),
+                "kind" => Some(kind.clone()),
+                "subject_id" => Some(subject_id.clone()),
+                "tags" => Some(tags.join(",")),
+                rest => rest.strip_prefix("data.").and_then(|p| resolve_json_path(data, p)),
+            },
+            Self::CxTaskReady { node_id } if field == "node_id" => Some(node_id.clone()),
+            Self::CxTaskClaimed { node_id } if field == "node_id" => Some(node_id.clone()),
+            Self::CxTaskIntegrated { node_id } if field == "node_id" => Some(node_id.clone()),
+            Self::CxTaskShadowed { node_id, reason } => match field {
+                "node_id" => Some(node_id.clone()),
+                "reason" => Some(reason.clone()),
+                _ => None,
+            },
+            Self::CxCommentAdded { node_id, tag, author } => match field {
+                "node_id" => Some(node_id.clone()),
+                "tag" => tag.clone(),
+                "author" => author.clone(),
+                _ => None,
+            },
             _ => None,
         }
+    }
+}
+
+/// Walk a dotted path into a JSON value, coercing leaf scalars to
+/// strings. Returns `None` if any segment is missing or the leaf is an
+/// object/array/null.
+fn resolve_json_path(root: &serde_json::Value, path: &str) -> Option<String> {
+    let mut cur = root;
+    for seg in path.split('.') {
+        cur = cur.get(seg)?;
+    }
+    match cur {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
     }
 }
 
@@ -349,8 +400,16 @@ impl EventContext {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionOrigin {
-    /// Fired from a cx event tied to a specific node. The canonical origin
-    /// for `cx.*` triggers.
+    /// Fired from a watcher-authored source event. The dedup tuple is
+    /// `(source, kind, subject_id)` — a second event with the same
+    /// tuple while the first execution is live is suppressed.
+    Source {
+        source: String,
+        kind: String,
+        subject_id: String,
+    },
+    /// Fired from a cx event tied to a specific node. Deprecated;
+    /// removed in slice 5 of the event-sources migration.
     CxNode { node_id: String },
     /// Chained from a prior execution via a workflow or step event trigger.
     /// v1 does not wire the workflow-chaining path; the variant exists so

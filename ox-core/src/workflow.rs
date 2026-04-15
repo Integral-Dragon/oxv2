@@ -203,7 +203,15 @@ pub struct TransitionDef {
 /// Trigger definition — creates executions in response to conditions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerDef {
+    /// Event kind to match. For source events this is the watcher-native
+    /// `kind` (`node.ready`, `issue.labeled`, ...); for legacy cx events
+    /// this is the dotted event type (`cx.task_ready`).
     pub on: String,
+    /// Watcher identifier to filter on. Only source events from this
+    /// watcher match. `None` means any source. Legacy cx-flavored
+    /// triggers leave this unset.
+    #[serde(default)]
+    pub source: Option<String>,
     #[serde(default)]
     pub tag: Option<String>,
     #[serde(default)]
