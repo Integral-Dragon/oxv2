@@ -1,0 +1,19 @@
+{
+  "id": "YfVz",
+  "title": "Slice 1: ingest endpoint + SourceEvent type",
+  "state": "claimed",
+  "shadowed": false,
+  "part": "claude",
+  "created_at": "2026-04-15T17:08:27.802907346Z",
+  "updated_at": "2026-04-15T17:10:17.021072602Z",
+  "parent": "5H3N",
+  "meta": {
+    "_reason": "starting red tests for ingest endpoint"
+  },
+  "edges": [
+    {
+      "to": "UQQ3",
+      "type": "blocks"
+    }
+  ]
+}

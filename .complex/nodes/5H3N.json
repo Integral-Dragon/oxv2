@@ -1,0 +1,12 @@
+{
+  "id": "5H3N",
+  "title": "Event sources migration: watchers replace in-server cx poller",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-15T17:08:11.955778191Z",
+  "updated_at": "2026-04-15T17:08:11.955778191Z",
+  "tags": [
+    "workflow:code-task-tdd"
+  ]
+}

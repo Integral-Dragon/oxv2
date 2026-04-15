@@ -324,9 +324,12 @@ feedback, adjusting plans) happen through interactive workflow steps that
 work on a branch and merge when done. No direct writes to main from any
 actor.
 
-**git log as event source.** cx state changes are derived from `git log`
-filtered to `.complex/`. No separate event files, no merge conflicts from
-append-only logs across branches.
+**External events arrive via watcher plugins.** ox-server does not poll
+any external system itself. Watcher processes (one per source) observe
+source systems and push source events to `POST /api/events/ingest`. The
+server stores events, matches triggers, and fires workflows — it has no
+built-in knowledge of cx, GitHub, Linear, or any other tracker. cx is
+the reference watcher. See [event-sources.md](event-sources.md).
 
 **Deterministic orchestration.** Ox never asks an agent which step should
 run next. Agents produce outputs and artifacts; workflow definitions decide

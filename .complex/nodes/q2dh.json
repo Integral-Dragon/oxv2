@@ -1,0 +1,16 @@
+{
+  "id": "q2dh",
+  "title": "Slice 4: switchover — ox-ctl launches watcher, cx poller disabled",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-15T17:09:26.962140613Z",
+  "updated_at": "2026-04-15T17:09:26.962140613Z",
+  "parent": "5H3N",
+  "edges": [
+    {
+      "to": "tvJE",
+      "type": "blocks"
+    }
+  ]
+}

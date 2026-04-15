@@ -132,6 +132,46 @@ include the orphaned step. ox-server's background heartbeat checker checks
 Rows are inserted on `runner.registered` and deleted on `runner.drained`
 or heartbeat expiry.
 
+### watcher_cursors
+
+Per-watcher cursor storage. Replaces the old `cx_log_cursor` KV row.
+Cursors are opaque blobs — the server stores and returns the string a
+watcher last wrote without interpreting it. One row per source.
+
+```sql
+CREATE TABLE watcher_cursors (
+    source      TEXT PRIMARY KEY,    -- "cx", "linear", "github"
+    cursor      TEXT,                -- opaque; NULL before first write
+    updated_at  TEXT NOT NULL,       -- wall clock of last successful ingest
+    updated_seq INTEGER,             -- bus seq of the last event appended
+    last_error  TEXT                 -- last CAS/parse failure, for status UX
+);
+```
+
+Written only inside the `POST /api/events/ingest` transaction — never
+updated in place outside it. Read by `GET /api/watchers/{source}/cursor`
+on watcher startup and by `GET /api/watchers` for operator status.
+
+### ingest_idempotency
+
+Per-event dedup for the ingest endpoint. A `(source, idempotency_key)`
+primary key implements silent dedup — duplicates in a batch become
+no-op inserts and the batch still commits normally.
+
+```sql
+CREATE TABLE ingest_idempotency (
+    source          TEXT    NOT NULL,
+    idempotency_key TEXT    NOT NULL,
+    first_seen_seq  INTEGER NOT NULL,
+    first_seen_ts   TEXT    NOT NULL,
+    PRIMARY KEY (source, idempotency_key)
+);
+```
+
+Written in the same transaction as the `events` append and the
+`watcher_cursors` update. A crash mid-batch leaves none of them visible.
+The table grows slowly; a periodic prune (age > 30 days) is deferred.
+
 ---
 
 ## Write Path
@@ -232,7 +272,7 @@ resolve `{secret.NAME}` references at step dispatch time.
 
 Applied events: `secret.set`, `secret.deleted`.
 
-### CxState
+### CxState *(deprecated — removed in the event-sources migration)*
 
 Mirrors the current state of `.complex/` on main. A map of node IDs
 to their current state, tags, and recent comments.
@@ -240,6 +280,11 @@ to their current state, tags, and recent comments.
 Applied events: `cx.task_ready`, `cx.task_claimed`,
 `cx.task_integrated`, `cx.task_shadowed`, `cx.comment_added`,
 `cx.phase_complete`.
+
+This projection is cx-specific and moves out of the server as part of
+the watcher refactor — see [event-sources-design.md](event-sources-design.md).
+Under the new model, source-specific state lives in the watcher or is
+derived from `EventType::Source` events on demand.
 
 ### Rebuild on Startup
 

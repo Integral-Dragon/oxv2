@@ -8,6 +8,7 @@ concerns. Subsystem details are in companion documents:
 - [api.md](api.md) — HTTP API, SSE, git smart HTTP, artifact endpoints
 - [protocols.md](protocols.md) — runtime interface, runner↔server protocol, prompt assembly
 - [workflows-design.md](workflows-design.md) — workflow engine, triggers, transitions, merge
+- [event-sources-design.md](event-sources-design.md) — watcher plugins, ingest endpoint, `SourceEvent`
 
 For what ox does (as opposed to how), see [prd/README.md](prd/README.md).
 
@@ -67,7 +68,8 @@ Modules:
 | `artifacts` | Artifact storage, chunk writes, fetch, streaming reads |
 | `pty_relay` | WebSocket relay for interactive PTY sessions (bridges runner ↔ client) |
 | `merge` | `merge_to_main` implementation, cx diff extraction |
-| `cx` | cx state projection, diff parsing, cx event derivation |
+| `ingest` | Watcher batch ingest handler, cursor CAS, idempotency dedup |
+| `cx` | cx state projection, diff parsing, cx event derivation *(removed in the event-sources migration — relocates to `ox-cx-watcher`)* |
 
 ### ox-herder
 
@@ -218,7 +220,9 @@ pub enum EventType {
     // Artifact
     ArtifactDeclared,
     ArtifactClosed,
-    // cx
+    // Source event (from watcher ingest)
+    Source,
+    // cx (deprecated — removed in the event-sources migration)
     CxTaskReady,
     CxTaskClaimed,
     CxTaskIntegrated,
@@ -411,6 +415,41 @@ names must be unique across the merged search path. Triggers are loaded
 separately from files listed in `config.toml`, decoupled from workflow
 definitions. Runtime definitions are loaded by ox-runner when a step is
 dispatched — the runner resolves the definition by name at that point.
+
+---
+
+## Event Ingestion
+
+External events enter the system through one endpoint:
+`POST /api/events/ingest`. The handler accepts a batch authored by a
+watcher process, runs a single SQLite transaction that:
+
+1. Compares `cursor_before` against the current `watcher_cursors[source]`
+   row (CAS guard) — on mismatch, returns 409 with no side effects.
+2. For each event, attempts `INSERT OR IGNORE INTO ingest_idempotency`.
+   Duplicate keys silently drop the event.
+3. Appends non-duplicate events as `EventType::Source` rows with a
+   `SourceEventData` payload (`source`, `kind`, `subject_id`, `tags`,
+   `data`).
+4. Updates `watcher_cursors[source] = cursor_after` with fresh
+   `updated_at` / `updated_seq` / cleared `last_error`.
+
+On commit the handler applies projections and broadcasts the new events
+to SSE subscribers. Subscribers never observe events that later roll
+back. Batch append is a new primitive on `EventBus` — the existing
+single-event `append()` is not reused inside the ingest transaction.
+
+Two companion routes support watcher liveness and operator status:
+
+- `GET /api/watchers/{source}/cursor` — returns the opaque cursor
+  string (or `null` on first boot) for a watcher to resume from.
+- `GET /api/watchers` — returns one row per known source for
+  `ox-ctl status` and future UIs.
+
+ox-server treats cursors as opaque blobs throughout. A cx watcher writes
+a git sha; a github watcher writes a delivery id; the server never
+parses either. See [event-sources-design.md](event-sources-design.md)
+for the full module layout, HTTP shapes, and migration slices.
 
 ---
 

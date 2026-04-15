@@ -494,6 +494,129 @@ Response: 204. Appends `step.advanced`.
 
 ---
 
+### Watchers
+
+Watcher processes push source events to ox-server via the ingest
+endpoint. The server stores an opaque cursor per source and
+deduplicates by `(source, idempotency_key)`. See
+[prd/event-sources.md](prd/event-sources.md) and
+[event-sources-design.md](event-sources-design.md) for the full design.
+
+#### `GET /api/watchers`
+
+List all known watcher cursors for operator status. Returns one row
+per source that has posted (or attempted to post) at least once.
+
+Response:
+
+```json
+[
+  {
+    "source": "cx",
+    "cursor": "d59b010abc...",
+    "updated_at": "2026-04-14T12:00:00Z",
+    "updated_seq": 42,
+    "last_error": null
+  }
+]
+```
+
+The `cursor` field is returned verbatim for operator inspection. The
+server does not interpret it.
+
+#### `GET /api/watchers/{source}/cursor`
+
+Read the current cursor for a single source. Called by a watcher on
+startup to resume from its last committed position.
+
+Response:
+
+```json
+{ "cursor": "d59b010abc...", "updated_at": "2026-04-14T12:00:00Z" }
+```
+
+First-boot (no row yet) returns 200 with `null` fields:
+
+```json
+{ "cursor": null, "updated_at": null }
+```
+
+The watcher treats a `null` cursor as "cold start" and seeds current
+actionable state from the source before advancing.
+
+#### `POST /api/events/ingest`
+
+Accept a batch of source events from a watcher. Commits cursor
+advancement, event appends, and idempotency records in one transaction.
+
+Request:
+
+```json
+{
+  "source": "cx",
+  "cursor_before": "d59b010abc...",
+  "cursor_after":  "a1b2c3d4e5...",
+  "events": [
+    {
+      "kind": "node.ready",
+      "subject_id": "Q6cY",
+      "idempotency_key": "Q6cY:node.ready:a1b2c3d",
+      "tags": ["workflow:code-task"],
+      "data": {
+        "title": "ccstat models — model-mix breakdown over time",
+        "node_id": "Q6cY",
+        "state": "ready"
+      }
+    }
+  ]
+}
+```
+
+| Field                      | Required | Purpose                                                                |
+|----------------------------|----------|------------------------------------------------------------------------|
+| `source`                   | yes      | Watcher identifier; names the `watcher_cursors` row                    |
+| `cursor_before`            | yes\*    | CAS guard — must match stored cursor; `null` on first call             |
+| `cursor_after`             | yes      | New cursor value to persist on success                                 |
+| `events`                   | yes      | Array of events observed (may be empty)                                |
+| `events[].kind`            | yes      | Source-native event kind (e.g. `node.ready`, `issue.labeled`)          |
+| `events[].subject_id`      | yes      | Source-native correlation key                                          |
+| `events[].idempotency_key` | yes      | Dedup key; duplicates are dropped silently                             |
+| `events[].tags`            | no       | Routing labels for trigger matching                                    |
+| `events[].data`            | no       | Free-form payload, available to trigger var templates                  |
+
+\* `cursor_before` is `null` on the very first call for a new source.
+
+Each event is appended as a single `EventType::Source` row with a
+`SourceEventData` payload.
+
+Transaction:
+
+1. `SELECT cursor FROM watcher_cursors WHERE source = ?`. On mismatch
+   against `cursor_before` → 409, no other writes; `last_error` is
+   stashed on the row.
+2. For each event: `INSERT OR IGNORE INTO ingest_idempotency`. No-op
+   inserts skip the event (silent dedup).
+3. Append non-duplicate events as `EventType::Source`.
+4. `INSERT OR REPLACE INTO watcher_cursors` with the new cursor,
+   `updated_at`, `updated_seq`, and `last_error = NULL`.
+5. Commit. Apply projections and broadcast SSE.
+
+Response codes:
+
+| Code | Meaning                                                                  |
+|------|--------------------------------------------------------------------------|
+| 200  | Batch committed (cursor advanced; 0+ events appended)                    |
+| 400  | Malformed JSON, missing required fields, invalid `cursor_after`          |
+| 409  | `cursor_before` CAS mismatch — caller must re-`GET` and retry            |
+| 500  | Disk failure, etc.                                                       |
+
+An empty `events` array with an advancing `cursor_after` is a valid
+"I looked, found nothing, here's how far I got." An empty array with
+`cursor_after == cursor_before` is a liveness ping — updates only
+`updated_at`.
+
+---
+
 ### State Projections
 
 #### `GET /api/state/pool`
@@ -954,6 +1077,10 @@ let app = Router::new()
     .route("/api/executions/{id}/steps/{step}/artifacts/{name}/close", post(close_artifact))
     // Metrics
     .route("/api/executions/{id}/steps/{step}/metrics", get(get_metrics))
+    // Watchers
+    .route("/api/watchers", get(list_watchers))
+    .route("/api/watchers/{source}/cursor", get(get_watcher_cursor))
+    .route("/api/events/ingest", post(ingest_batch))
     // Triggers
     .route("/api/triggers/evaluate", post(evaluate_triggers))
     // Secrets
