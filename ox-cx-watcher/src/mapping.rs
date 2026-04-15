@@ -42,17 +42,76 @@ pub mod kinds {
 /// `node.done` are observational facts that downstream workflows may
 /// care about regardless of shadowing.
 pub fn snapshot_to_event(
-    _snap: &CxNodeSnapshot,
-    _cursor_hash: &str,
+    snap: &CxNodeSnapshot,
+    cursor_hash: &str,
 ) -> Option<SourceEventData> {
-    unimplemented!("slice 3: snapshot_to_event")
+    let kind = match snap.state.as_str() {
+        "ready" => {
+            if snap.shadowed {
+                return None;
+            }
+            kinds::NODE_READY
+        }
+        "claimed" => kinds::NODE_CLAIMED,
+        "integrated" => kinds::NODE_DONE,
+        _ => return None,
+    };
+
+    let short = short_sha(cursor_hash);
+    let idempotency_key = format!("{}:{}:{}", snap.node_id, kind, short);
+
+    let data = serde_json::json!({
+        "node_id": snap.node_id,
+        "state": snap.state,
+        "tags": snap.tags,
+        "shadowed": snap.shadowed,
+    });
+
+    Some(SourceEventData {
+        source: SOURCE.to_string(),
+        kind: kind.to_string(),
+        subject_id: snap.node_id.clone(),
+        idempotency_key,
+        tags: snap.tags.clone(),
+        data,
+    })
 }
 
 /// Build a source event from a comment-added log entry. The
 /// idempotency key folds in author, tag, and the commit hash so two
 /// ticks observing the same commit produce identical keys.
-pub fn comment_to_event(_comment: &CxCommentEntry) -> SourceEventData {
-    unimplemented!("slice 3: comment_to_event")
+pub fn comment_to_event(comment: &CxCommentEntry) -> SourceEventData {
+    let short = short_sha(&comment.hash);
+    let tag_slot = comment.tag.as_deref().unwrap_or("-");
+    let author_slot = comment.author.as_deref().unwrap_or("-");
+    let idempotency_key = format!(
+        "{}:{}:{}:{}:{}",
+        comment.node_id, kinds::COMMENT_ADDED, author_slot, tag_slot, short
+    );
+
+    let data = serde_json::json!({
+        "node_id": comment.node_id,
+        "tag": comment.tag,
+        "author": comment.author,
+        "hash": comment.hash,
+    });
+
+    // Comments carry the tag as the event-level tag so triggers can
+    // match `workflow:review` etc. without reaching into `data`.
+    let tags = comment.tag.clone().into_iter().collect();
+
+    SourceEventData {
+        source: SOURCE.to_string(),
+        kind: kinds::COMMENT_ADDED.to_string(),
+        subject_id: comment.node_id.clone(),
+        idempotency_key,
+        tags,
+        data,
+    }
+}
+
+fn short_sha(sha: &str) -> &str {
+    if sha.len() >= 12 { &sha[..12] } else { sha }
 }
 
 #[cfg(test)]

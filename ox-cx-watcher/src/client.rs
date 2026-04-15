@@ -79,20 +79,67 @@ impl WatcherClient {
 
     /// `GET /api/watchers/{source}/cursor`.
     pub async fn fetch_cursor(&self) -> Result<Option<String>> {
-        let _ = &self.http;
-        let _ = &self.base_url;
-        let _ = &self.source;
-        unimplemented!("slice 3: fetch_cursor")
+        let url = format!("{}/api/watchers/{}/cursor", self.base_url, self.source);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url} returned error status"))?;
+        let row: CursorResponse = resp
+            .json()
+            .await
+            .context("parsing /api/watchers cursor response")?;
+        Ok(row.cursor)
     }
 
-    /// `POST /api/events/ingest` with a single retry on 409. Returns
-    /// the outcome from the final attempt. Network/5xx errors bubble
-    /// up as `Err` — callers are expected to back off and retry with
-    /// the same batch.
-    pub async fn post_batch(&self, _body: &IngestBody) -> Result<IngestOutcome> {
-        unimplemented!("slice 3: post_batch")
+    /// `POST /api/events/ingest`. Returns the server's decision:
+    /// committed or CAS conflict. Network/5xx errors bubble up as
+    /// `Err` — callers back off and retry with the same batch.
+    /// 409 is non-retryable at this level; the caller must re-GET
+    /// the cursor and rebuild the batch before trying again.
+    pub async fn post_batch(&self, body: &IngestBody) -> Result<IngestOutcome> {
+        let url = format!("{}/api/events/ingest", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let body: IngestResponseBody = resp
+                .json()
+                .await
+                .context("parsing /api/events/ingest success response")?;
+            return Ok(IngestOutcome::Committed(body));
+        }
+        if status == reqwest::StatusCode::CONFLICT {
+            let payload: serde_json::Value = resp
+                .json()
+                .await
+                .context("parsing /api/events/ingest 409 response")?;
+            let expected = payload
+                .get("expected")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let actual = payload
+                .get("actual")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            return Ok(IngestOutcome::Conflict { expected, actual });
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("POST {url} returned {status}: {text}")
     }
 }
+
+use anyhow::Context;
 
 #[cfg(test)]
 mod tests {
