@@ -871,6 +871,7 @@ branch = "{event.node_id}"
         // A cx.task_ready trigger must map event.node_id → branch.
         let trigger = TriggerDef {
             on: "cx.task_ready".into(),
+            source: None,
             tag: Some("workflow:consultation".into()),
             state: None,
             workflow: "consultation".into(),
@@ -893,6 +894,7 @@ branch = "{event.node_id}"
         // The code-task workflow uses `task_id` as its var name.
         let trigger = TriggerDef {
             on: "cx.task_ready".into(),
+            source: None,
             tag: Some("workflow:code-task".into()),
             state: None,
             workflow: "code-task".into(),
@@ -910,6 +912,7 @@ branch = "{event.node_id}"
     fn build_vars_errors_on_unknown_event_field() {
         let trigger = TriggerDef {
             on: "cx.task_ready".into(),
+            source: None,
             tag: None,
             state: None,
             workflow: "whatever".into(),
@@ -932,6 +935,7 @@ branch = "{event.node_id}"
         // NOT magically inject task_id or anything else.
         let trigger = TriggerDef {
             on: "cx.task_ready".into(),
+            source: None,
             tag: None,
             state: None,
             workflow: "whatever".into(),

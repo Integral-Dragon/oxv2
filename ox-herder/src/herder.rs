@@ -76,6 +76,7 @@ pub struct Herder<C: OxClientApi = OxClient> {
     workflows: HashMap<String, WorkflowEngine>,
     triggers: Vec<TriggerDef>,
     pending_triggers: Vec<PendingTrigger>,
+    pending_source_events: Vec<SourceEventData>,
     last_seq: u64,
     /// True while replaying historical events — suppresses side effects.
     replaying: bool,
@@ -125,6 +126,7 @@ impl<C: OxClientApi> Herder<C> {
             workflows: HashMap::new(),
             triggers: Vec::new(),
             pending_triggers: Vec::new(),
+            pending_source_events: Vec::new(),
             last_seq: 0,
             replaying: true,
             replay_target: 0,
@@ -387,6 +389,22 @@ impl<C: OxClientApi> Herder<C> {
             }
             "step.advanced" => {
                 // Pure state — no action needed, scheduler already handled it
+            }
+
+            // Source events (from watcher plugins) — queue for matching.
+            "source" => {
+                let d: SourceEventData = serde_json::from_value(envelope.data)?;
+                tracing::info!(
+                    source = %d.source,
+                    kind = %d.kind,
+                    subject = %d.subject_id,
+                    tags = ?d.tags,
+                    replaying = self.replaying,
+                    "source event"
+                );
+                if !self.replaying {
+                    self.pending_source_events.push(d);
+                }
             }
 
             // cx events — queue for trigger evaluation
@@ -932,6 +950,11 @@ impl<C: OxClientApi> Herder<C> {
             )
             .await;
         }
+
+        let source_events = std::mem::take(&mut self.pending_source_events);
+        for event in source_events {
+            self.evaluate_triggers_for_source_event(&event).await;
+        }
     }
 
     /// Trigger evaluator that takes a pre-fetched cx state. State is
@@ -1087,8 +1110,130 @@ impl<C: OxClientApi> Herder<C> {
     /// is the watcher's responsibility under the event-sources plan —
     /// the server-side matcher has no special-cased knowledge of any
     /// source's lifecycle.
-    async fn evaluate_triggers_for_source_event(&mut self, _event: &SourceEventData) {
-        unimplemented!("slice 2: evaluate_triggers_for_source_event")
+    async fn evaluate_triggers_for_source_event(&mut self, event: &SourceEventData) {
+        for trigger in &self.triggers {
+            if trigger.on != event.kind {
+                continue;
+            }
+            if let Some(ref want_source) = trigger.source
+                && want_source != &event.source
+            {
+                continue;
+            }
+            if let Some(ref tag_pattern) = trigger.tag
+                && !event.tags.iter().any(|t| t == tag_pattern)
+            {
+                continue;
+            }
+
+            let origin = ExecutionOrigin::Source {
+                source: event.source.clone(),
+                kind: event.kind.clone(),
+                subject_id: event.subject_id.clone(),
+            };
+
+            // Dedup — same rule as the legacy cx path: herder blocks
+            // on running OR escalated.
+            let existing: Vec<_> = self
+                .executions
+                .values()
+                .map(|e| (&e.origin, e.workflow.as_str(), e.status.as_str()))
+                .collect();
+            if is_origin_active(
+                existing.into_iter(),
+                &origin,
+                &trigger.workflow,
+                |s| s == "running" || s == "escalated",
+            ) {
+                tracing::debug!(
+                    source = %event.source,
+                    kind = %event.kind,
+                    subject = %event.subject_id,
+                    workflow = %trigger.workflow,
+                    "trigger suppressed: execution already exists"
+                );
+                continue;
+            }
+
+            // Build workflow vars from the `[trigger.vars]` block
+            // resolved against an EventContext::Source. On a missing
+            // field, emit trigger.failed and skip.
+            let ctx = EventContext::Source {
+                source: event.source.clone(),
+                kind: event.kind.clone(),
+                subject_id: event.subject_id.clone(),
+                tags: event.tags.clone(),
+                data: event.data.clone(),
+            };
+            let trigger_vars = match trigger.build_vars(&ctx) {
+                Ok(v) => v,
+                Err(ox_core::workflow::TriggerError::MissingEventField { path }) => {
+                    tracing::warn!(
+                        source = %event.source,
+                        kind = %event.kind,
+                        subject = %event.subject_id,
+                        workflow = %trigger.workflow,
+                        path = %path,
+                        "trigger var interpolation failed — missing event field"
+                    );
+                    let failed = TriggerFailedData::from_missing_field(
+                        Seq(self.last_seq),
+                        &trigger.on,
+                        trigger.tag.as_deref(),
+                        &trigger.workflow,
+                        path,
+                    );
+                    if let Err(e) = self.client.post_trigger_failed(&failed).await {
+                        tracing::warn!(err = %e, "failed to post trigger.failed event");
+                    }
+                    continue;
+                }
+            };
+
+            tracing::info!(
+                source = %event.source,
+                kind = %event.kind,
+                subject = %event.subject_id,
+                workflow = %trigger.workflow,
+                "trigger matched, creating execution"
+            );
+
+            let vars_for_local = trigger_vars.clone();
+            let workflow_for_local = trigger.workflow.clone();
+            match self
+                .client
+                .create_execution(
+                    &trigger.workflow,
+                    &trigger.on,
+                    trigger_vars,
+                    Some(origin.clone()),
+                )
+                .await
+            {
+                Ok(exec_id) => {
+                    tracing::info!(exec = %exec_id, "execution created from source event");
+
+                    // Optimistic local insert for dedup — same pattern
+                    // as the legacy cx path.
+                    self.executions.insert(
+                        exec_id.0.clone(),
+                        ExecutionView {
+                            vars: vars_for_local,
+                            origin: origin.clone(),
+                            workflow: workflow_for_local,
+                            status: "running".into(),
+                            phase: ExecPhase::AwaitingStep,
+                            visit_counts: HashMap::new(),
+                            last_output: None,
+                            retry_tracker: RetryTracker::new(),
+                        },
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(err = %e, "failed to create execution from source event");
+                }
+            }
+        }
     }
 
     // ── Tick ────────────────────────────────────────────────────────
