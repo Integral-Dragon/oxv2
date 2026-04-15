@@ -1,16 +1,18 @@
-# cx Integration
+# cx: The Reference Event Source
 
 cx is a file-native hierarchical issue tracker. It is a passive tool —
 it stores the work graph and answers queries. It has no knowledge of ox.
 
-ox depends on cx; cx does not depend on ox.
+ox depends on cx only through **`ox-cx-watcher`**, a standalone
+process that observes a cx-enabled repository and posts source events
+to ox-server's ingest endpoint. cx is not wired into ox-server at all;
+swapping cx for Linear, GitHub Issues, or anything else is a matter of
+replacing the watcher binary, not changing the server.
 
-> **Future direction:** the cx-specific poller that lives inside
-> ox-server today is planned to move out into a standalone
-> `ox-cx-watcher` process behind a generic ingest API, so ox can be
-> driven by other sources (Linear, GitHub, Jira) without changing
-> ox-server itself. See [event-sources.md](event-sources.md) for the
-> decoupling plan.
+This document covers the cx integration specifically. For the
+watcher-plugin boundary the server exposes, see
+[event-sources.md](event-sources.md) and
+[../event-sources-design.md](../event-sources-design.md).
 
 ---
 
@@ -51,56 +53,97 @@ to main's `.complex/`.
 
 ---
 
-## cx log as Event Source
+## ox-cx-watcher
 
-ox-server derives cx events by running `cx log --json`, which returns
-structured change entries from the git history of `.complex/`. This is
-used both for background polling and for post-merge event derivation.
+`ox-cx-watcher` is a standalone binary. `ox-ctl up` launches it
+alongside `ox-server` and `ox-herder` when `.ox/config.toml` lists
+`cx` in its `watchers = [...]` array. A machine running ox without cx
+simply leaves the watcher off the list; no `ox-*watcher` binary needs
+to be on disk.
 
-This approach:
+### What the watcher does
 
-- **Eliminates merge conflicts** — no separate event log files that
-  conflict when multiple branches merge.
-- **Uses cx's own diffing** — `cx log` understands node JSON, comment
-  files, and body files natively. ox-server doesn't parse `.complex/`
-  internals.
-- **Catches direct cx mutations** — a user running `cx surface` on the
-  repo is detected by the poll loop, not only changes arriving via merge.
+Every tick (10s by default):
 
-### Background poll loop
+1. Call `GET /api/watchers/cx/cursor` to read the last committed
+   cursor. On first boot the server returns `cursor: null` — the
+   cold-start case described below.
+2. Run `cx log --json --since <cursor>` in the repo. The latest
+   commit SHA becomes the next cursor.
+3. For every touched node, run `cx show <id> --json` to get the
+   current canonical state, then map that snapshot into a
+   `SourceEventData`:
 
-ox-server runs a poll loop every 10 seconds:
+   | cx state | source kind |
+   |----------|-------------|
+   | `ready` | `node.ready` |
+   | `claimed` | `node.claimed` |
+   | `integrated` | `node.done` |
+   | `latent` | *(no event)* |
 
-1. Read the cx cursor (last-seen commit SHA) from the `kv` table
-2. Run `cx log --json --since <cursor>` in the repo directory
-3. Map changes to ox events (state transitions, new comments)
-4. Append derived events to the ox event log
-5. Store the latest commit SHA as the new cursor
+   Each event carries `source = "cx"`, `subject_id = <node_id>`, the
+   node's tags, and the full node snapshot JSON as `data`. The
+   idempotency key is `<node_id>:<kind>:<short_sha>` so the same state
+   transition observed in multiple ticks dedups server-side.
+4. New comments are mapped into `kind = "comment.added"` events with
+   a stable idempotency key based on the comment author, tag, and
+   parent node SHA.
+5. POST one `IngestBatch` to `/api/events/ingest` with
+   `cursor_before = <old cursor>` and `cursor_after = <new cursor>`.
+6. On 409 (CAS mismatch — another watcher wrote to this source, or
+   the row was manually reset), re-GET the cursor and retry with the
+   fresh value.
+7. On 5xx/network error, back off and retry with the same batch. The
+   watcher never advances its in-memory cursor until the server has
+   returned 200.
 
-On first run (no cursor), ox-server fetches the full `cx log --json`
-to catch up on all existing cx state. This means starting ox-server
-against a repo with existing cx issues will immediately detect any
-`ready` nodes and trigger workflows.
+### Cold start
 
-### Post-merge event derivation
+On the very first call, `GET /api/watchers/cx/cursor` returns `null`.
+The watcher does not replay the full cx log — that could mean
+thousands of historical commits. Instead it:
 
-After `merge_to_main`, ox-server also runs `cx log --json --since
-<pre_merge_sha>` to immediately derive events from the merge without
-waiting for the next poll tick.
+1. Snapshots the current `git rev-parse HEAD` as the cursor-to-be.
+2. Fetches `cx list --json` and emits one `node.ready` /
+   `node.claimed` / `node.done` event per currently actionable node.
+3. POSTs a single batch with `cursor_before: null, cursor_after:
+   <HEAD>`.
 
-### cx log change format
+This means bringing ox up against a repo with existing cx state
+immediately produces source events for whatever work is currently
+ready, without replaying history.
 
-`cx log --json` returns an array of commit entries, each with a
-`changes` array of structured diffs:
+### Why the watcher is stateless on disk
 
-| Action | Fields | Maps to |
-|--------|--------|---------|
-| `created` | `node_id`, `state`, `title`, `tags` | `cx.task_ready` if state=ready |
-| `modified` | `node_id`, `fields.state.{from,to}` | `cx.task_ready/claimed/integrated` |
-| `comment_added` | `node_id`, `tag`, `author`, `body` | `cx.comment_added` |
+The cursor lives on the server inside the same transaction as the
+event append and idempotency record. The watcher holds only an
+in-memory copy of the last-committed cursor. If the watcher crashes
+it re-fetches the cursor on boot; if the server was down during the
+last tick the watcher's in-memory state is lost but the server
+cursor never advanced, so the next boot re-derives the same batch
+from cx.
 
-ox-server also maintains a cx projection (`GET /api/state/cx`) derived
-from these events.
+This keeps there being one place to inspect, reset, or rewind the cx
+cursor — the `watcher_cursors` row — and avoids the class of bugs
+where a watcher's local cursor file diverges from server reality.
+
+### State suppression lives in the watcher
+
+Integrated and shadowed nodes must not start new workflow executions
+through an auto-fired `node.ready` event. The filter that enforces
+this lives inside `ox-cx-watcher/mapping.rs` — the watcher simply
+does not emit `node.ready` for a node it observes as already
+`integrated` or `shadowed`. The server-side trigger matcher has no
+cx-specific logic; it matches what the watcher chose to ingest.
+
+### Post-merge side effects
+
+ox-server's `merge_to_main` action does not try to emit cx events
+directly. After a merge lands, the cx watcher observes the new
+commits on its next tick (or sooner if triggered by a merge signal
+in a future revision) and emits the corresponding source events
+through the same path as everything else. There is one code path for
+cx events, not two.
 
 ---
 
@@ -167,40 +210,40 @@ context of a task they have been assigned.
 
 ## Events
 
-cx events are emitted by ox-server when a merge to main produces changes
-to `.complex/`. Git events are emitted by ox-server when it performs or
-attempts git operations.
+All cx facts reach ox-server as `EventType::Source` envelopes
+authored by `ox-cx-watcher`. Triggers match on `source = "cx"` and
+the watcher-native kinds listed below.
 
 All events follow the common envelope defined in [events.md](events.md).
 
-### cx events
+### Source event kinds emitted by ox-cx-watcher
 
 ```
-cx.task_ready       { node_id, tags[], workflow }
-cx.task_claimed     { node_id, part }
-cx.task_integrated  { node_id }
-cx.task_shadowed    { node_id, reason }
-cx.comment_added    { node_id, tag, author }
-cx.phase_complete   { node_id }
+{ source: "cx", kind: "node.ready",    subject_id: <node_id>, tags, data }
+{ source: "cx", kind: "node.claimed",  subject_id: <node_id>, tags, data }
+{ source: "cx", kind: "node.done",     subject_id: <node_id>, tags, data }
+{ source: "cx", kind: "comment.added", subject_id: <node_id>, tags, data }
 ```
 
-`cx.task_ready` — a node transitioned to ready and carries a `workflow:X`
-tag. The herder creates an execution for the matching workflow.
+`node.ready` — a node transitioned to ready and is not shadowed. The
+watcher filters out already-integrated and shadowed nodes before
+emitting. Trigger with `source = "cx", on = "node.ready"`.
 
-`cx.task_claimed` — a node transitioned to claimed. `part` is the agent
-or persona that claimed it.
+`node.claimed` — a node transitioned to claimed. Informational in
+most workflows; used by some retro/observer workflows.
 
-`cx.task_integrated` — a node transitioned to integrated.
+`node.done` — a node transitioned to integrated. Consumed by
+workflows that react to completion (phase rollups, assign-next-work,
+etc.).
 
-`cx.task_shadowed` — a node was shadowed (blocked from further execution
-after exhausting retries).
+`comment.added` — a comment was added to a node. `data.tag` is the
+comment tag (e.g. `proposal`, `review`, `code-review`). Used to
+trigger workflows that react to specific comment types.
 
-`cx.comment_added` — a comment was added to a node. `tag` is the comment
-tag (e.g. `proposal`, `review`, `code-review`). Used to trigger workflows
-that react to specific comment types.
-
-`cx.phase_complete` — all children of a `#phase` node are integrated.
-Triggers the `phase-review` workflow.
+Node snapshot JSON (state, tags, title, body, meta, edges) rides in
+the event's `data` field, so triggers can template
+`{event.data.title}` or `{event.data.state}` into workflow vars
+without another round-trip to cx.
 
 ### git events
 

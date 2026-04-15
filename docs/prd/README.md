@@ -184,8 +184,11 @@ A thin wrapper around the HTTP API with consistent output formatting and
 `--json` support for scripting.
 
 ox-ctl is not used by agents. Runtimes communicate with ox-runner through
-the runtime interface (see [runtimes.md](runtimes.md)). Agents call `cx`
-directly on their branch for issue graph operations.
+the runtime interface (see [runtimes.md](runtimes.md)). Steps may mutate
+source-specific state as a side effect — e.g. a cx-integrated workflow
+shells out to `cx` to claim, comment, integrate, or shadow nodes on its
+branch. cx is one reference example; other source systems
+(Linear, GitHub, Jira) would be mutated through their own clients.
 
 See [ox-ctl.md](ox-ctl.md) for the full command reference.
 

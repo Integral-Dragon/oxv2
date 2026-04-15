@@ -16,7 +16,7 @@ For what ox does (as opposed to how), see [prd/README.md](prd/README.md).
 
 ## Crate Layout
 
-Ox is a Cargo workspace with four binary crates and one library crate.
+Ox is a Cargo workspace with five binary crates and one library crate.
 
 ```
 ox/
@@ -26,7 +26,14 @@ ox/
   ox-herder/          event-driven orchestration loop
   ox-runner/          step executor
   ox-ctl/             operator CLI
+  ox-cx-watcher/      cx source watcher (reference event source)
 ```
+
+Watchers live in their own crates — one per source system. Only the
+cx watcher exists today. A deployment that uses Linear or GitHub
+instead of cx would install `ox-linear-watcher` or `ox-github-watcher`
+alongside the server; ox-server itself has no knowledge of any
+specific source system.
 
 ### ox-core
 
