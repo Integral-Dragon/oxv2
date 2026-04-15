@@ -6,6 +6,7 @@ members = [
     "ox-herder",
     "ox-runner",
     "ox-ctl",
+    "ox-cx-watcher",
     "ox-rt",
 ]
 
