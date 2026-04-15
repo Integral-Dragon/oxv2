@@ -427,7 +427,6 @@ fn format_origin(origin: &ox_core::events::ExecutionOrigin) -> String {
             subject_id,
             ..
         } => format!("{source}:{subject_id}"),
-        CxNode { node_id } => format!("cx:{node_id}"),
         Execution {
             parent_execution_id,
             parent_step,
@@ -1274,9 +1273,11 @@ mod tests {
     use ox_core::types::ExecutionId;
 
     #[test]
-    fn format_origin_cx_node() {
-        let o = ExecutionOrigin::CxNode {
-            node_id: "aJuO".into(),
+    fn format_origin_source_cx_node() {
+        let o = ExecutionOrigin::Source {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: "aJuO".into(),
         };
         assert_eq!(format_origin(&o), "cx:aJuO");
     }
@@ -1318,8 +1319,10 @@ mod tests {
 
     #[test]
     fn format_origin_truncates_long_values_with_ellipsis() {
-        let o = ExecutionOrigin::CxNode {
-            node_id: "thisIsAReallyLongNodeIdentifierForcingTruncation".into(),
+        let o = ExecutionOrigin::Source {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: "thisIsAReallyLongNodeIdentifierForcingTruncation".into(),
         };
         let s = format_origin(&o);
         // Max width is 24, ellipsis '…' counts as 1 char.

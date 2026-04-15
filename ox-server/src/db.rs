@@ -43,11 +43,6 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             PRIMARY KEY (execution_id, step, attempt, name)
         );
 
-        CREATE TABLE IF NOT EXISTS kv (
-            key   TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS step_logs (
             execution_id TEXT    NOT NULL,
             step         TEXT    NOT NULL,
@@ -160,33 +155,6 @@ pub fn upsert_runner_heartbeat(
         rusqlite::params![runner_id, ts, execution_id, step, attempt],
     )
     .context("upserting runner heartbeat")?;
-    Ok(())
-}
-
-/// Get a value from the kv table.
-#[allow(dead_code)]
-pub fn get_kv(conn: &Connection, key: &str) -> Result<Option<String>> {
-    let mut stmt = conn
-        .prepare("SELECT value FROM kv WHERE key = ?1")
-        .context("preparing kv query")?;
-    let mut rows = stmt
-        .query_map(rusqlite::params![key], |row| row.get::<_, String>(0))
-        .context("querying kv")?;
-    match rows.next() {
-        Some(row) => Ok(Some(row.context("reading kv row")?)),
-        None => Ok(None),
-    }
-}
-
-/// Set a value in the kv table.
-#[allow(dead_code)]
-pub fn set_kv(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO kv (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        rusqlite::params![key, value],
-    )
-    .context("upserting kv")?;
     Ok(())
 }
 

@@ -93,10 +93,9 @@ pub struct SecretsState {
     pub secrets: HashMap<String, String>,
 }
 
-// cx state is no longer projected from events. The event log diverged
-// from cx truth whenever events were missed (e.g. an integrate that
-// happened outside the cx_log poll window). Reconciliation reads live
-// state from cx commands instead — see `cx::fetch_cx_state`.
+// Source-specific state is not projected from events. Watchers own
+// the mapping from source truth to source events; downstream
+// workflows read back via triggers and source-specific step actions.
 
 // ── Combined Projections ────────────────────────────────────────────
 
@@ -341,10 +340,14 @@ impl Projections {
                 if let Ok(data) =
                     serde_json::from_value::<ExecutionCreatedData>(event.data.clone())
                 {
+                    // Events from pre-slice-5 logs may lack an origin on
+                    // the wire. Default to Manual — the operator can see
+                    // the execution in the list and retrigger from the
+                    // real source if needed.
                     let origin = data
                         .origin
                         .clone()
-                        .unwrap_or_else(|| fallback_origin(&data.vars));
+                        .unwrap_or(ExecutionOrigin::Manual { user: None });
                     let mut execs = self.executions.write().unwrap();
                     execs.executions.insert(
                         data.execution_id.0.clone(),
@@ -408,11 +411,11 @@ impl Projections {
                 }
             }
 
-            // cx events arrive in the log for audit / SSE consumers but
-            // are no longer folded into a projection — cx commands are
-            // the source of truth for node state.
-
-            // Other events don't update projections
+            // Source events, git events, and trigger events are
+            // appended to the log for audit / SSE consumers but are not
+            // folded into projections — workflows read them via trigger
+            // matching, and source state of truth lives in the source
+            // system itself.
             _ => {}
         }
     }

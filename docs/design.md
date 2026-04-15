@@ -66,7 +66,7 @@ Modules:
 | `main` | CLI arg parsing, server startup, graceful shutdown |
 | `db` | SQLite connection pool, event log append/read, schema migrations |
 | `events` | Event bus — append, broadcast to SSE subscribers, replay |
-| `projections` | In-memory state rebuilt from the event log (pool, executions, cx) |
+| `projections` | In-memory state rebuilt from the event log (pool, executions, secrets) |
 | `pool` | Runner pool management — registration, heartbeats, drain, staleness/mismatch detection |
 | `api` | Axum router, REST handlers, request/response types |
 | `sse` | SSE endpoint, subscriber management, `Last-Event-ID` resume, secret redaction |
@@ -74,9 +74,8 @@ Modules:
 | `git` | Git smart HTTP protocol handlers (`/git/*`) |
 | `artifacts` | Artifact storage, chunk writes, fetch, streaming reads |
 | `pty_relay` | WebSocket relay for interactive PTY sessions (bridges runner ↔ client) |
-| `merge` | `merge_to_main` implementation, cx diff extraction |
+| `merge` | `merge_to_main` implementation |
 | `ingest` | Watcher batch ingest handler, cursor CAS, idempotency dedup |
-| `cx` | cx state projection, diff parsing, cx event derivation *(removed in the event-sources migration — relocates to `ox-cx-watcher`)* |
 
 ### ox-herder
 
@@ -112,7 +111,7 @@ Modules:
 | `socket` | Unix domain socket server for the runtime interface |
 | `proxy` | API proxy — local listener, request/response interception, metric extraction |
 | `signals` | Post-exit signal collection (no_commits, dirty_workspace, etc.) |
-| `artifacts` | Implicit artifact collection (commits, cx-diff), declared artifact forwarding |
+| `artifacts` | Implicit artifact collection (commits), declared artifact forwarding |
 | `confirm` | Branch push, confirm API call, two-phase completion |
 
 ### ox-ctl
@@ -229,13 +228,6 @@ pub enum EventType {
     ArtifactClosed,
     // Source event (from watcher ingest)
     Source,
-    // cx (deprecated — removed in the event-sources migration)
-    CxTaskReady,
-    CxTaskClaimed,
-    CxTaskIntegrated,
-    CxTaskShadowed,
-    CxCommentAdded,
-    CxPhaseComplete,
     // Git
     GitBranchPushed,
     GitMerged,
@@ -518,10 +510,9 @@ shape. Auth is purely additive middleware.
 3. Replay event log to rebuild projections
 4. Resolve configuration search path, load workflow definitions
 5. Initialise bare git repo if not present
-6. Start background tasks: heartbeat checker. (Watchers run as
-   separate processes now — see `ox-ctl up` below. The legacy
-   in-server `cx_poll_loop` is no longer spawned; slice 5 of the
-   event-sources migration deletes the code.)
+6. Start background tasks: heartbeat checker. Event ingestion is
+   entirely out-of-process — watcher binaries launched by `ox-ctl up`
+   post source events to `/api/events/ingest`.
 7. Start Axum server (API + SSE + git endpoints)
 8. On SIGTERM: stop accepting connections, drain SSE, flush WAL, exit
 

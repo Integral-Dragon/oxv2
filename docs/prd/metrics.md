@@ -162,9 +162,12 @@ available.
 | `lines_added` | gauge | git diff | Lines added vs branch base |
 | `lines_removed` | gauge | git diff | Lines removed vs branch base |
 | `files_changed` | gauge | git diff | Number of files modified |
-| `cx_nodes_created` | gauge | cx-diff | cx nodes created by this step |
-| `cx_nodes_updated` | gauge | cx-diff | cx nodes modified by this step |
-| `cx_comments_added` | gauge | cx-diff | cx comments added by this step |
+
+Source-specific side-effect metrics (`cx_nodes_created`,
+`cx_comments_added`, Linear `issues_transitioned`, GitHub
+`prs_opened`, ...) are not core metrics. Source-integrated workflows
+can declare them via runtime `[metric]` blocks or capture them inside
+a source-specific declared artifact.
 
 ---
 

@@ -25,10 +25,15 @@ workflow TOML.
 |------|--------|-----------|
 | `log` | Agent stdout/stderr | yes |
 | `commits` | `git log <base>..HEAD` at step completion | no |
-| `cx-diff` | `.complex/` changes on the branch at step completion | no |
 
-`log` is always streamed live. `commits` and `cx-diff` are collected once
-after the agent exits and the branch is pushed.
+`log` is always streamed live. `commits` is collected once after the
+agent exits and the branch is pushed.
+
+Source-specific side-effect artifacts (a `cx-diff` capturing
+`.complex/` changes, a GitHub PR metadata blob, a Linear ticket
+transition log) are collected by source-specific runtimes or
+workflow steps, not by the core runner — they are declared like any
+other workflow artifact below.
 
 ---
 
@@ -169,7 +174,7 @@ A typical UI flow for watching a running step:
 3. Open a second connection: `GET /api/executions/{id}/steps/{step}/artifacts/log/stream`
 4. Render log content as chunks arrive
 5. Receive `artifact.closed` on the event stream — log is complete
-6. Fetch `commits` and `cx-diff` via the fetch endpoint
+6. Fetch `commits` via the fetch endpoint
 
 Two connections with different concerns: the event stream for lifecycle
 notifications, the artifact stream for content.
@@ -188,35 +193,12 @@ artifact.closed     { execution_id, step, artifact, size, sha256 }
 ```
 
 `artifact.declared` — emitted at step dispatch for each artifact the step
-will produce. `source` is `log`, `git-commits`, `cx-diff`, or `file`.
-`streaming` indicates whether content will be available live via the
-stream endpoint before the artifact closes.
+will produce. `source` is `log`, `git-commits`, or `file`. `streaming`
+indicates whether content will be available live via the stream
+endpoint before the artifact closes.
 
 `artifact.closed` — the artifact is complete and fully available via the
 fetch endpoint. For streaming artifacts this marks the end of the live
 stream. For non-streaming artifacts, `declared` and `closed` arrive
 together at step completion.
 
----
-
-## cx-diff as Artifact
-
-The `cx-diff` artifact deserves specific attention. When a step completes
-and the branch is pushed, ox-server diffs `.complex/` against the branch
-base and stores the result as a structured artifact:
-
-```json
-{
-  "nodes_created": [],
-  "nodes_updated": [
-    { "id": "aJuO", "state_from": "claimed", "state_to": "integrated" }
-  ],
-  "comments_added": [
-    { "node_id": "aJuO", "tag": "proposal", "author": "inspired/software-engineer" }
-  ]
-}
-```
-
-This is also the source from which ox-server derives `cx.*` events when the
-branch merges to main. The `cx-diff` artifact on an in-progress step gives
-a preview of what cx changes will land when the branch merges.

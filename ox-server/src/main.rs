@@ -1,9 +1,5 @@
 mod api;
 mod artifacts;
-// Dormant — kept to let existing tests and signatures compile until
-// slice 5 of the event-sources migration deletes the module entirely.
-#[allow(dead_code)]
-mod cx;
 mod db;
 mod events;
 mod git;
@@ -96,12 +92,9 @@ async fn main() -> Result<()> {
         .append(EventType::ServerReady, serde_json::json!({}))
         .expect("failed to emit server.ready");
 
-    // Event ingestion is out-of-process now — see
-    // docs/prd/event-sources.md. ox-cx-watcher (and any other
-    // configured watcher) runs as a sibling process launched by
-    // ox-ctl up, and posts source events to /api/events/ingest. The
-    // legacy in-server cx_poll_loop is dormant; slice 5 of the
-    // migration deletes the code entirely.
+    // Event ingestion is out-of-process — watcher binaries launched
+    // by `ox-ctl up` POST source events to `/api/events/ingest`. The
+    // server has no source-specific polling of any kind.
 
     // SIGHUP config reload
     #[cfg(unix)]
@@ -160,56 +153,6 @@ async fn main() -> Result<()> {
 
     tracing::info!("ox-server shut down gracefully");
     Ok(())
-}
-
-#[allow(dead_code)]
-const CX_CURSOR_KEY: &str = "cx_log_cursor";
-
-#[allow(dead_code)]
-async fn cx_poll_loop(state: AppState) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        interval.tick().await;
-
-        // Read cursor from db
-        let cursor = match state.bus.with_conn(|conn| db::get_kv(conn, CX_CURSOR_KEY)) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(err = %e, "failed to read cx cursor");
-                continue;
-            }
-        };
-
-        let result = match cx::poll_cx_log(&state.repo_path, cursor.as_deref()) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(err = ?e, "cx poll failed (repo may not have .complex/)");
-                continue;
-            }
-        };
-
-        // Append derived events. apply_poll_result returns the cursor
-        // only if every append succeeded — on failure we skip the cursor
-        // advance so the next tick retries the same window. See
-        // apply_poll_result docs for at-least-once semantics.
-        let latest_hash = match cx::apply_poll_result(result, |t, d| {
-            state.bus.append(t, d).map(|_| ())
-        }) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(err = ?e, "cx poll tick failed — cursor not advanced, will retry");
-                continue;
-            }
-        };
-
-        if let Some(hash) = latest_hash
-            && let Err(e) = state.bus.with_conn(|conn| db::set_kv(conn, CX_CURSOR_KEY, &hash))
-        {
-            tracing::warn!(err = ?e, "failed to update cx cursor");
-        }
-    }
 }
 
 async fn shutdown_signal() {

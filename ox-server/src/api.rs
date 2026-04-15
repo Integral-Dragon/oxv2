@@ -11,7 +11,6 @@ use std::collections::HashMap;
 
 use crate::AppState;
 use crate::artifacts;
-use crate::cx;
 use crate::events::{IngestBatch, IngestError, WatcherCursor};
 use crate::merge;
 use crate::pool;
@@ -28,7 +27,6 @@ pub fn router() -> Router<AppState> {
         // State projections
         .route("/api/state/pool", get(get_pool_state))
         .route("/api/state/executions", get(get_executions_state))
-        .route("/api/state/cx", get(get_cx_state))
         // Secrets
         .route("/api/secrets", get(list_secrets))
         .route("/api/secrets/{name}", put(set_secret).delete(delete_secret))
@@ -59,7 +57,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/watchers/{source}/cursor", get(get_watcher_cursor))
         .route("/api/events/ingest", post(ingest_batch))
         // Triggers
-        .route("/api/triggers/evaluate", post(evaluate_triggers))
         .route("/api/triggers/failed", post(post_trigger_failed))
         // Metrics
         .route(
@@ -398,17 +395,6 @@ struct CreateExecutionRequest {
 
 fn default_trigger() -> String {
     "manual".into()
-}
-
-/// Render an `ExecutionStatus` as the tag string used by the
-/// `is_origin_active` predicate.
-fn status_str(s: &projections::ExecutionStatus) -> &'static str {
-    match s {
-        projections::ExecutionStatus::Running => "running",
-        projections::ExecutionStatus::Completed => "completed",
-        projections::ExecutionStatus::Escalated => "escalated",
-        projections::ExecutionStatus::Cancelled => "cancelled",
-    }
 }
 
 async fn create_execution(
@@ -885,19 +871,6 @@ async fn step_advance(
     StatusCode::NO_CONTENT
 }
 
-// ── cx State ───────────────────────────────────────────────────────
-
-async fn get_cx_state(State(state): State<AppState>) -> Json<serde_json::Value> {
-    // Live read from cx — never trust the event log for current state.
-    match cx::fetch_cx_state(&state.repo_path) {
-        Ok(snap) => Json(serde_json::to_value(&snap).unwrap()),
-        Err(e) => {
-            tracing::warn!(err = %e, "cx list failed for /api/state/cx");
-            Json(serde_json::json!({ "nodes": {} }))
-        }
-    }
-}
-
 // ── Complete / Escalate ────────────────────────────────────────────
 
 async fn complete_execution(
@@ -979,20 +952,11 @@ async fn merge_step(
                 )
                 .unwrap();
 
-            // Derive and append cx events from the merge diff
-            match cx::derive_cx_events_for_merge(&state.repo_path, &prev_head) {
-                Ok(cx_events) => {
-                    for cx_event in cx_events {
-                        state
-                            .bus
-                            .append(cx_event.event_type, cx_event.data)
-                            .unwrap();
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(err = %e, "failed to derive cx events from merge");
-                }
-            }
+            // Source-specific side effects of the merge (cx node state
+            // transitions, etc.) are observed by the corresponding
+            // watcher on its next tick and arrive back as source events
+            // through /api/events/ingest. The server does not derive
+            // them here.
 
             Ok(Json(serde_json::json!({
                 "status": "merged",
@@ -1026,192 +990,13 @@ async fn merge_step(
 
 // ── Triggers ───────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct TriggerRequest {
-    node_id: String,
-    #[serde(default)]
-    force: bool,
-}
-
-async fn evaluate_triggers(
-    State(state): State<AppState>,
-    Json(req): Json<TriggerRequest>,
-) -> Json<serde_json::Value> {
-    let execs = state.bus.projections.executions();
-
-    // Live single-node lookup via cx — same source-of-truth rule as
-    // /api/state/cx. Returns None if the node doesn't exist; we
-    // continue with empty tags so triggers tagged "*" can still fire
-    // if you have any.
-    let node = cx::fetch_node(&state.repo_path, &req.node_id);
-
-    // Check if node is shadowed (skip unless force)
-    if !req.force
-        && let Some(n) = &node
-            && n.shadowed {
-                return Json(serde_json::json!({
-                    "triggered": [],
-                    "skipped": "node is shadowed",
-                }));
-            }
-
-    let node_tags: Vec<String> = node.as_ref().map(|n| n.tags.clone()).unwrap_or_default();
-
-    let hot = state.hot.load();
-    let mut triggered = vec![];
-
-    for trigger in &hot.triggers {
-        // Check event type match
-        if trigger.on != "cx.task_ready" {
-            continue;
-        }
-
-        // Check tag match
-        if let Some(ref tag_pattern) = trigger.tag
-            && !node_tags.iter().any(|t| t == tag_pattern) {
-                continue;
-            }
-
-        let workflow_name = &trigger.workflow;
-
-        // Dedup check: is there already a running execution with the same
-        // (origin, workflow) pair? Origin here is the firing cx node.
-        let origin = ox_core::events::ExecutionOrigin::CxNode {
-            node_id: req.node_id.clone(),
-        };
-        if !req.force {
-            let existing: Vec<_> = execs
-                .executions
-                .values()
-                .map(|e| (&e.origin, e.workflow.as_str(), status_str(&e.status)))
-                .collect();
-            // API-initiated triggers block only on currently-running
-            // executions. A completed run is eligible for re-trigger.
-            if ox_core::events::is_origin_active(
-                existing.into_iter(),
-                &origin,
-                workflow_name,
-                |s| s == "running",
-            ) {
-                continue;
-            }
-        }
-
-        // Create execution
-        let epoch = chrono::Utc::now().timestamp();
-        let seq = state.bus.current_seq() + 1;
-        let execution_id = ExecutionId(format!("e-{epoch}-{seq}"));
-
-        // Build workflow vars by interpolating the trigger's [trigger.vars]
-        // block against the firing event context. On any error, emit a
-        // trigger.failed event and skip this trigger.
-        let event_ctx = ox_core::events::EventContext::CxTaskReady {
-            node_id: req.node_id.clone(),
-        };
-        let input_vars = match trigger.build_vars(&event_ctx) {
-            Ok(v) => v,
-            Err(ox_core::workflow::TriggerError::MissingEventField { path }) => {
-                tracing::warn!(
-                    workflow = %workflow_name,
-                    path = %path,
-                    "trigger var interpolation failed — missing event field"
-                );
-                let failed = ox_core::events::TriggerFailedData::from_missing_field(
-                    ox_core::types::Seq(state.bus.current_seq()),
-                    &trigger.on,
-                    trigger.tag.as_deref(),
-                    workflow_name,
-                    path,
-                );
-                state
-                    .bus
-                    .append(
-                        EventType::TriggerFailed,
-                        serde_json::to_value(failed).unwrap(),
-                    )
-                    .unwrap();
-                continue;
-            }
-        };
-
-        // Validate against the workflow's var declarations. If the workflow
-        // isn't loaded, that's an UnknownWorkflow failure. If validation
-        // fails, that's a ValidationFailed — both surface as trigger.failed.
-        let vars = match hot.workflows.get(workflow_name) {
-            Some(wf) => match wf.validate_vars(&input_vars) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(
-                        workflow = %workflow_name,
-                        err = %e,
-                        "trigger var validation failed"
-                    );
-                    let failed = ox_core::events::TriggerFailedData::from_validation_error(
-                        ox_core::types::Seq(state.bus.current_seq()),
-                        &trigger.on,
-                        trigger.tag.as_deref(),
-                        workflow_name,
-                        e,
-                    );
-                    state
-                        .bus
-                        .append(
-                            EventType::TriggerFailed,
-                            serde_json::to_value(failed).unwrap(),
-                        )
-                        .unwrap();
-                    continue;
-                }
-            },
-            None => {
-                tracing::warn!(
-                    workflow = %workflow_name,
-                    "trigger references unknown workflow"
-                );
-                let failed = ox_core::events::TriggerFailedData::for_unknown_workflow(
-                    ox_core::types::Seq(state.bus.current_seq()),
-                    &trigger.on,
-                    trigger.tag.as_deref(),
-                    workflow_name,
-                );
-                state
-                    .bus
-                    .append(
-                        EventType::TriggerFailed,
-                        serde_json::to_value(failed).unwrap(),
-                    )
-                    .unwrap();
-                continue;
-            }
-        };
-
-        let data = ExecutionCreatedData {
-            execution_id: execution_id.clone(),
-            workflow: workflow_name.clone(),
-            trigger: trigger.on.clone(),
-            vars,
-            origin: Some(origin.clone()),
-        };
-
-        state
-            .bus
-            .append(
-                EventType::ExecutionCreated,
-                serde_json::to_value(data).unwrap(),
-            )
-            .unwrap();
-
-        triggered.push(serde_json::json!({
-            "execution_id": execution_id,
-            "workflow": workflow_name,
-        }));
-    }
-
-    Json(serde_json::json!({ "triggered": triggered }))
-}
-
 /// Append a `trigger.failed` event. Used by the herder when its own
 /// `build_vars` pass errors before the server ever sees the request.
+///
+/// Manual triggering (the old `POST /api/triggers/evaluate` with a cx
+/// node_id) is no longer supported server-side. To synthesize an event
+/// by hand, post to `/api/events/ingest` directly or file a source
+/// fact in the watched system.
 async fn post_trigger_failed(
     State(state): State<AppState>,
     Json(data): Json<TriggerFailedData>,

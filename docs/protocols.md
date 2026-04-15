@@ -269,9 +269,9 @@ When the runner receives `step.dispatched` via SSE:
 13. Close streaming artifacts
     POST /api/executions/{id}/steps/{step}/artifacts/{name}/close
 
-14. Collect non-streaming artifacts (commits, cx-diff)
+14. Collect non-streaming artifacts (commits, declared)
     POST .../artifacts/commits/chunks + close
-    POST .../artifacts/cx-diff/chunks + close
+    POST .../artifacts/{declared}/chunks + close
 
 15. Collect metrics from proxy, compute derived metrics
 
@@ -299,23 +299,20 @@ assembles this file before spawning the runtime process.
 
 ### Prompt Structure
 
-The prompt file is assembled from multiple sources in a fixed order:
+The prompt file is assembled from workflow vars, prior step output,
+and the step's own `prompt` template. The core structure is:
 
 ```
-## Task
+## Work
 
-{task_title}
+{title}
 
-{task_body}
+{body}
 
 ## Previous Step
 
 Step: {prev_step_name}
 Output: {prev_output}
-
-## Task Context
-
-{cx_comments}
 
 ## Instructions
 
@@ -324,16 +321,14 @@ Output: {prev_output}
 
 ### Source Data
 
-**Task title and body** — fetched from the cx node via
-`GET /api/state/cx` or by reading `.complex/nodes/{task_id}.json`
-from the cloned workspace.
+**Workflow vars** — `title`, `body`, `branch`, and any other vars
+declared on the workflow are supplied by the trigger that fired the
+execution. For source-event triggers, they template from
+`{event.source}`, `{event.subject_id}`, and `{event.data.*}` — the
+watcher decides what payload the trigger can see.
 
 **Previous step output** — the `output` value from the preceding step
 attempt, carried in the `step.dispatched` event data as `prev_output`.
-
-**cx comments** — all comments on the cx node, ordered chronologically.
-These carry inter-step communication (proposals, review feedback,
-verdicts). Read from `.complex/nodes/{task_id}.json` in the workspace.
 
 **Step prompt** — the `prompt` field from the step's runtime spec in
 the workflow TOML. This is the step-specific instruction.
@@ -341,12 +336,11 @@ the workflow TOML. This is the step-specific instruction.
 ### Interpolation
 
 The prompt field in the step spec supports `{name}` interpolation for
-all built-in variables and runtime fields:
+workflow vars and built-in runtime fields:
 
 | Variable | Value |
 |----------|-------|
-| `{task_id}` | cx node ID |
-| `{task_title}` | cx node title |
+| `{<var>}` | Any workflow var declared by the workflow definition |
 | `{prev_output}` | Output value from the previous step |
 | `{prev_step}` | Name of the previous step |
 | `{execution_id}` | Current execution ID |
@@ -355,16 +349,20 @@ all built-in variables and runtime fields:
 | `{workspace}` | Workspace path |
 | `{prompt_file}` | Path to the assembled prompt file |
 
+### Source-specific context
+
+Source-specific context (cx comments on a node, GitHub PR reviews, a
+Linear issue's history) is injected through source-integrated
+workflow steps or runtime file mappings — not by the core prompt
+assembler. For example, a cx-integrated workflow step might run
+`cx show {task_id} --json` in a pre-step hook and stage the output
+as a workspace file.
+
 ### Sections Omitted When Empty
 
 If there is no previous step (first step in the workflow), the
-"Previous Step" section is omitted entirely. If there are no cx
-comments, the "Task Context" section is omitted. If the step has no
+"Previous Step" section is omitted entirely. If the step has no
 `prompt` field, the "Instructions" section is omitted.
-
-The prompt file always contains at least the "Task" section. An empty
-prompt file is an error — it means the task has no title, which
-indicates a misconfigured cx node.
 
 ### Persona Files
 

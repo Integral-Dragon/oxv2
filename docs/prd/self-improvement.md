@@ -140,7 +140,7 @@ prompt    = """Review all executions in this phase. For each execution, examine:
 - Metrics: token spend, duration, retries, escalations
 - Signals: no_commits, dirty_workspace, exited_silent
 - Commits: what code was actually produced?
-- cx-diff: what task state changes happened?
+- Source side effects: what did the step mutate in cx / GitHub / Linear?
 - Outcomes: did review pass or fail? Did the task escalate or get
   shadowed? Did a follow-up task have to clean up this work? A retro
   that only examines process optimizes for legible process; a retro
@@ -220,7 +220,8 @@ A poll trigger that fires periodically to consolidate and prune memory.
 
 ```toml
 [[trigger]]
-on            = "cx.task_ready"
+on            = "node.ready"
+source        = "cx"
 tag           = "retro-schedule"
 poll_interval = "24h"
 workflow      = "retro-consolidate"

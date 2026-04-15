@@ -49,19 +49,6 @@ struct ExecutionView {
     retry_tracker: RetryTracker,
 }
 
-/// A pending trigger to evaluate in the next scheduling pass.
-/// `state` is the node's cx state at the time the event was emitted,
-/// carried in the event payload so the herder doesn't have to round
-/// trip back to the server. Empty string = unknown (historical events
-/// written before the field existed); treated as None at the call site.
-#[derive(Debug)]
-struct PendingTrigger {
-    node_id: String,
-    event_type: String,
-    tags: Vec<String>,
-    state: String,
-}
-
 pub struct Herder<C: OxClientApi = OxClient> {
     client: C,
     server_url: String,
@@ -75,7 +62,6 @@ pub struct Herder<C: OxClientApi = OxClient> {
     executions: HashMap<String, ExecutionView>,
     workflows: HashMap<String, WorkflowEngine>,
     triggers: Vec<TriggerDef>,
-    pending_triggers: Vec<PendingTrigger>,
     pending_source_events: Vec<SourceEventData>,
     last_seq: u64,
     /// True while replaying historical events — suppresses side effects.
@@ -125,7 +111,6 @@ impl<C: OxClientApi> Herder<C> {
             executions: HashMap::new(),
             workflows: HashMap::new(),
             triggers: Vec::new(),
-            pending_triggers: Vec::new(),
             pending_source_events: Vec::new(),
             last_seq: 0,
             replaying: true,
@@ -289,10 +274,13 @@ impl<C: OxClientApi> Herder<C> {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
+                // Events from pre-slice-5 logs may lack an origin;
+                // fall back to Manual so the execution still lands in
+                // local state.
                 let origin = d
                     .origin
                     .clone()
-                    .unwrap_or_else(|| fallback_origin(&d.vars));
+                    .unwrap_or(ExecutionOrigin::Manual { user: None });
 
                 self.executions.insert(
                     d.execution_id.0.clone(),
@@ -407,32 +395,6 @@ impl<C: OxClientApi> Herder<C> {
                 }
             }
 
-            // cx events — queue for trigger evaluation
-            "cx.task_ready" => {
-                let d: CxTaskReadyData = serde_json::from_value(envelope.data)?;
-                tracing::info!(node = %d.node_id, tags = ?d.tags, state = %d.state, replaying = self.replaying, "cx.task_ready");
-                if !self.replaying {
-                    self.pending_triggers.push(PendingTrigger {
-                        node_id: d.node_id,
-                        event_type: "cx.task_ready".into(),
-                        tags: d.tags,
-                        state: d.state,
-                    });
-                }
-            }
-            "cx.task_claimed" => {
-                let d: CxTaskClaimedData = serde_json::from_value(envelope.data)?;
-                tracing::info!(node = %d.node_id, "cx.task_claimed");
-            }
-            "cx.task_integrated" => {
-                let d: CxTaskIntegratedData = serde_json::from_value(envelope.data)?;
-                tracing::info!(node = %d.node_id, "cx.task_integrated");
-            }
-            "cx.task_shadowed" => {
-                let d: CxTaskShadowedData = serde_json::from_value(envelope.data)?;
-                tracing::info!(node = %d.node_id, reason = %d.reason, "cx.task_shadowed");
-            }
-
             // Git events
             "git.merged" => {
                 let d: GitMergedData = serde_json::from_value(envelope.data)?;
@@ -480,10 +442,9 @@ impl<C: OxClientApi> Herder<C> {
     // ── The Scheduler ──────────────────────────────────────────────
 
     async fn schedule(&mut self) {
-        // Phase 1: Evaluate pending triggers. cx state flows in as SSE
-        // events derived from `cx log` + `cx show` in ox-server; every
-        // trigger-relevant change reaches us that way, so there is no
-        // separate reconcile pass.
+        // Phase 1: Evaluate pending source-event triggers queued by
+        // handle_event. Source events arrive on the SSE stream as
+        // `EventType::Source` envelopes from watcher plugins.
         self.evaluate_pending_triggers().await;
 
         // Phase 2: Process execution state machines (loop until stable)
@@ -934,168 +895,9 @@ impl<C: OxClientApi> Herder<C> {
             self.last_config_refresh = Instant::now();
         }
 
-        let triggers = std::mem::take(&mut self.pending_triggers);
-
-        for trigger in triggers {
-            let state = if trigger.state.is_empty() {
-                None
-            } else {
-                Some(trigger.state.as_str())
-            };
-            self.evaluate_triggers_for_node_with_state(
-                &trigger.node_id,
-                &trigger.event_type,
-                &trigger.tags,
-                state,
-            )
-            .await;
-        }
-
         let source_events = std::mem::take(&mut self.pending_source_events);
         for event in source_events {
             self.evaluate_triggers_for_source_event(&event).await;
-        }
-    }
-
-    /// Trigger evaluator that takes a pre-fetched cx state. State is
-    /// carried on the cx.task_ready event payload (emitted by
-    /// ox-server's cx poll loop, which queried `cx show` for truth),
-    /// so no round-trip back to the server is needed here.
-    async fn evaluate_triggers_for_node_with_state(
-        &mut self,
-        node_id: &str,
-        event_type: &str,
-        tags: &[String],
-        current_state: Option<&str>,
-    ) {
-        for trigger in &self.triggers {
-            if trigger.on != event_type {
-                continue;
-            }
-
-            if let Some(ref tag_pattern) = trigger.tag
-                && !tags.iter().any(|t| t == tag_pattern) {
-                    continue;
-                }
-
-            // Dedup: skip if there's already an active execution with the
-            // same (origin, workflow) pair. The herder blocks on running
-            // AND escalated — it won't auto-retry an escalated execution.
-            let origin = ExecutionOrigin::CxNode {
-                node_id: node_id.to_string(),
-            };
-            let existing: Vec<_> = self
-                .executions
-                .values()
-                .map(|e| (&e.origin, e.workflow.as_str(), e.status.as_str()))
-                .collect();
-            if is_origin_active(
-                existing.into_iter(),
-                &origin,
-                &trigger.workflow,
-                |s| s == "running" || s == "escalated",
-            ) {
-                tracing::debug!(
-                    node = %node_id,
-                    workflow = %trigger.workflow,
-                    "trigger suppressed: execution already exists"
-                );
-                continue;
-            }
-
-            if let Some(state) = current_state
-                && (state == "integrated" || state == "shadowed") {
-                    tracing::debug!(
-                        node = %node_id,
-                        state = %state,
-                        "trigger suppressed: node is {state}"
-                    );
-                    continue;
-                }
-
-            tracing::info!(
-                node = %node_id,
-                workflow = %trigger.workflow,
-                "trigger matched, creating execution"
-            );
-
-            // Build workflow vars by interpolating the trigger's [trigger.vars]
-            // block against the firing event context. Workflow var names are
-            // declared by each workflow (e.g. `task_id`, `branch`); the trigger
-            // file maps event fields into whatever names the workflow expects.
-            //
-            // On a missing-field error, emit `trigger.failed` through the
-            // server's event log so the failure is observable to operators.
-            // The emission is deterministic per replay — guarded elsewhere.
-            let event_ctx = EventContext::CxTaskReady {
-                node_id: node_id.to_string(),
-            };
-            let trigger_vars = match trigger.build_vars(&event_ctx) {
-                Ok(v) => v,
-                Err(ox_core::workflow::TriggerError::MissingEventField { path }) => {
-                    tracing::warn!(
-                        node = %node_id,
-                        workflow = %trigger.workflow,
-                        path = %path,
-                        "trigger var interpolation failed — missing event field"
-                    );
-                    let failed = TriggerFailedData::from_missing_field(
-                        Seq(self.last_seq),
-                        &trigger.on,
-                        trigger.tag.as_deref(),
-                        &trigger.workflow,
-                        path,
-                    );
-                    if let Err(e) = self.client.post_trigger_failed(&failed).await {
-                        tracing::warn!(err = %e, "failed to post trigger.failed event");
-                    }
-                    continue;
-                }
-            };
-
-            // Clone before moving into create_execution so we can build
-            // the optimistic local view from the same data on success.
-            let vars_for_local = trigger_vars.clone();
-            let workflow_for_local = trigger.workflow.clone();
-            match self
-                .client
-                .create_execution(
-                    &trigger.workflow,
-                    &trigger.on,
-                    trigger_vars,
-                    Some(origin.clone()),
-                )
-                .await
-            {
-                Ok(exec_id) => {
-                    tracing::info!(exec = %exec_id, "execution created by trigger");
-
-                    // Optimistic local insert: dedup checks against
-                    // self.executions, but the SSE round-trip carrying
-                    // execution.created back can lag behind a tight
-                    // reconcile loop. Without this, two reconcile passes
-                    // can fire two creates for the same node before SSE
-                    // catches up. Phase=AwaitingStep keeps the state
-                    // machine inert until the real SSE event replaces
-                    // this entry with the proper Ready{first_step}.
-                    self.executions.insert(
-                        exec_id.0.clone(),
-                        ExecutionView {
-                            vars: vars_for_local,
-                            origin: origin.clone(),
-                            workflow: workflow_for_local,
-                            status: "running".into(),
-                            phase: ExecPhase::AwaitingStep,
-                            visit_counts: HashMap::new(),
-                            last_output: None,
-                            retry_tracker: RetryTracker::new(),
-                        },
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(err = %e, "failed to create execution from trigger");
-                }
-            }
         }
     }
 
@@ -1344,19 +1146,7 @@ mod tests {
         }
     }
 
-    fn code_task_trigger() -> TriggerDef {
-        TriggerDef {
-            on: "cx.task_ready".into(),
-            source: None,
-            tag: Some("workflow:code-task".into()),
-            state: None,
-            workflow: "code-task".into(),
-            poll_interval: None,
-            vars: HashMap::new(),
-        }
-    }
-
-    /// Slice 2: source-event trigger. Matches `EventType::Source` with
+    /// Source-event trigger that matches `EventType::Source` with
     /// `source = "cx"` and `kind = "node.ready"`.
     fn cx_source_trigger() -> TriggerDef {
         let mut vars = HashMap::new();
@@ -1389,114 +1179,7 @@ mod tests {
         }
     }
 
-    fn herder_with_trigger(client: MockClient) -> Herder<MockClient> {
-        let mut h = Herder::with_client(client, "http://test", 0, 60, 1);
-        h.triggers = vec![code_task_trigger()];
-        h.replaying = false;
-        h
-    }
-
-    /// Two cx.task_ready events in rapid succession for the same node
-    /// (faster than the SSE round-trip that would carry the
-    /// execution.created event back to the herder) must NOT both fire
-    /// create_execution. The optimistic local insert is what keeps the
-    /// second eval from firing again.
-    #[tokio::test]
-    async fn rapid_repeat_task_ready_does_not_double_fire() {
-        let mut h = herder_with_trigger(MockClient::new());
-        h.evaluate_triggers_for_node_with_state(
-            "Ygdt",
-            "cx.task_ready",
-            &["workflow:code-task".into()],
-            Some("ready"),
-        )
-        .await;
-        h.evaluate_triggers_for_node_with_state(
-            "Ygdt",
-            "cx.task_ready",
-            &["workflow:code-task".into()],
-            Some("ready"),
-        )
-        .await;
-        assert_eq!(h.client.create_calls().len(), 1);
-    }
-
-    /// A cx.task_ready event with state="ready" and the matching tag
-    /// fires create_execution. This is the CcoT path.
-    #[tokio::test]
-    async fn task_ready_event_fires_for_matching_node() {
-        let mut h = herder_with_trigger(MockClient::new());
-        h.evaluate_triggers_for_node_with_state(
-            "CcoT",
-            "cx.task_ready",
-            &["workflow:code-task".into()],
-            Some("ready"),
-        )
-        .await;
-
-        let calls = h.client.create_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "code-task");
-        assert_eq!(
-            calls[0].2,
-            ExecutionOrigin::CxNode {
-                node_id: "CcoT".into()
-            }
-        );
-    }
-
-    /// A cx.task_ready event carrying state="integrated" (which can
-    /// happen if the node transitions integrated between log and show
-    /// on the server side, or if the old projection lingered in the
-    /// event log) must NOT fire create_execution. The suppression
-    /// check on integrated/shadowed is what ripped out the Ygdt bug.
-    #[tokio::test]
-    async fn task_ready_with_integrated_state_does_not_fire() {
-        let mut h = herder_with_trigger(MockClient::new());
-        h.evaluate_triggers_for_node_with_state(
-            "Ygdt",
-            "cx.task_ready",
-            &["workflow:code-task".into()],
-            Some("integrated"),
-        )
-        .await;
-        assert_eq!(h.client.create_calls().len(), 0);
-    }
-
-    /// Skip when an execution for the same (origin, workflow) is
-    /// already running. Idempotency gate — otherwise a later
-    /// cx.task_ready for a node mid-execution would spawn a second.
-    #[tokio::test]
-    async fn task_ready_skipped_when_origin_already_active() {
-        let mut h = herder_with_trigger(MockClient::new());
-        h.executions.insert(
-            "exec-existing".into(),
-            ExecutionView {
-                vars: HashMap::new(),
-                origin: ExecutionOrigin::CxNode {
-                    node_id: "CcoT".into(),
-                },
-                workflow: "code-task".into(),
-                status: "running".into(),
-                phase: ExecPhase::AwaitingStep,
-                visit_counts: HashMap::new(),
-                last_output: None,
-                retry_tracker: RetryTracker::new(),
-            },
-        );
-
-        h.evaluate_triggers_for_node_with_state(
-            "CcoT",
-            "cx.task_ready",
-            &["workflow:code-task".into()],
-            Some("ready"),
-        )
-        .await;
-
-        assert_eq!(h.client.create_calls().len(), 0);
-    }
-
-    // ── Slice 2: source event triggers ─────────────────────────────
+    // ── Source event triggers ───────────────────────────────────────
 
     fn herder_with_source_trigger(client: MockClient) -> Herder<MockClient> {
         let mut h = Herder::with_client(client, "http://test", 0, 60, 1);

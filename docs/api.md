@@ -160,7 +160,7 @@ Response:
     {
       "id": "e-1744364800-42",
       "vars": { "task_id": "aJuO" },
-      "origin": { "type": "cx_node", "node_id": "aJuO" },
+      "origin": { "type": "source", "source": "cx", "kind": "node.ready", "subject_id": "aJuO" },
       "workflow": "code-task",
       "status": "running",
       "current_step": "implement",
@@ -237,11 +237,16 @@ Request:
 ```json
 {
   "workflow": "code-task",
-  "trigger": "cx.task_ready",
+  "trigger": "node.ready",
   "vars": {
     "task_id": "aJuO"
   },
-  "origin": { "type": "cx_node", "node_id": "aJuO" }
+  "origin": {
+    "type": "source",
+    "source": "cx",
+    "kind": "node.ready",
+    "subject_id": "aJuO"
+  }
 }
 ```
 
@@ -253,7 +258,10 @@ is missing, fills defaults for omitted optional vars.
 `{ "type": "manual", "user": null }`. Accepted shapes:
 
 ```json
-{ "type": "cx_node", "node_id": "aJuO" }
+{ "type": "source",
+  "source": "cx",
+  "kind": "node.ready",
+  "subject_id": "aJuO" }
 { "type": "execution",
   "parent_execution_id": "e-1744364800-41",
   "parent_step": "review-plan",
@@ -645,24 +653,10 @@ Response:
 
 Active and recent executions. Same format as `GET /api/executions`.
 
-#### `GET /api/state/cx`
-
-Current cx node states (mirrors `.complex/` on main).
-
-Response:
-
-```json
-{
-  "nodes": [
-    {
-      "id": "aJuO",
-      "title": "Add rate limiting to the API",
-      "state": "claimed",
-      "tags": ["workflow:code-task"]
-    }
-  ]
-}
-```
+Source-specific projections (cx node state, Linear issue state, ...)
+are not served by ox-server — workflow vars carry the snapshot they
+need out of the triggering source event's `data` field, and
+up-to-date source state lives in the source system itself.
 
 ---
 
@@ -773,43 +767,11 @@ shape.
 
 ### Triggers
 
-#### `POST /api/triggers/evaluate`
-
-Evaluate triggers for a cx node. Called by ox-ctl for manual triggering
-(the herder evaluates triggers itself against its SSE stream).
-
-Request:
-
-```json
-{
-  "node_id": "aJuO",
-  "force": false
-}
-```
-
-For each matching trigger, the server:
-
-1. Builds an `EventContext::CxTaskReady { node_id }`
-2. Calls `trigger.build_vars(&ctx)` — on error, appends
-   `trigger.failed` and continues
-3. Runs `WorkflowDef::validate_vars` on the interpolated map — on
-   error, appends `trigger.failed` and continues
-4. Checks dedup via `is_origin_active` with the API liveness rule
-   (blocks only on `running` unless `force` is set)
-5. Creates the execution with `origin: CxNode { node_id }`
-
-Response:
-
-```json
-{
-  "triggered": [
-    {
-      "workflow": "code-task",
-      "execution_id": "e-1744364800-42"
-    }
-  ]
-}
-```
+Manual triggering is not served by ox-server — the herder evaluates
+triggers itself against incoming source events. To fire a workflow by
+hand, synthesize a source event via `POST /api/events/ingest` or
+mutate the underlying source (`cx` node, Linear issue, ...) and let
+the watcher observe it.
 
 #### `POST /api/triggers/failed`
 
@@ -823,7 +785,7 @@ Request: a `TriggerFailedData` payload:
 ```json
 {
   "source_seq": 42,
-  "on": "cx.task_ready",
+  "on": "node.ready",
   "tag": "workflow:consultation",
   "workflow": "consultation",
   "reason": {
@@ -898,7 +860,7 @@ Response:
     "name": "code-task",
     "steps": ["propose", "review-plan", "implement", "review-code", "merge"],
     "triggers": [
-      { "on": "cx.task_ready", "tag": "workflow:code-task", "workflow": "code-task" }
+      { "on": "node.ready", "source": "cx", "tag": "workflow:code-task", "workflow": "code-task" }
     ]
   }
 ]
@@ -1082,7 +1044,6 @@ let app = Router::new()
     .route("/api/watchers/{source}/cursor", get(get_watcher_cursor))
     .route("/api/events/ingest", post(ingest_batch))
     // Triggers
-    .route("/api/triggers/evaluate", post(evaluate_triggers))
     // Secrets
     .route("/api/secrets", get(list_secrets))
     .route("/api/secrets/{name}", put(set_secret).delete(delete_secret))
@@ -1093,7 +1054,6 @@ let app = Router::new()
     // State projections
     .route("/api/state/pool", get(get_pool_state))
     .route("/api/state/executions", get(get_executions_state))
-    .route("/api/state/cx", get(get_cx_state))
     // Git smart HTTP
     .route("/git/*path", any(git_handler));
 ```

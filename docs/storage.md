@@ -67,7 +67,7 @@ CREATE TABLE artifacts_meta (
     step         TEXT    NOT NULL,
     attempt      INTEGER NOT NULL,
     name         TEXT    NOT NULL,
-    source       TEXT    NOT NULL,     -- "log", "git-commits", "cx-diff", "file"
+    source       TEXT    NOT NULL,     -- "log", "git-commits", "file"
     streaming    INTEGER NOT NULL,     -- 0 or 1
     status       TEXT    NOT NULL,     -- "pending", "streaming", "closed"
     size         INTEGER,              -- bytes, set on close
@@ -134,9 +134,9 @@ or heartbeat expiry.
 
 ### watcher_cursors
 
-Per-watcher cursor storage. Replaces the old `cx_log_cursor` KV row.
-Cursors are opaque blobs — the server stores and returns the string a
-watcher last wrote without interpreting it. One row per source.
+Per-watcher cursor storage. Cursors are opaque blobs — the server
+stores and returns the string a watcher last wrote without
+interpreting it. One row per source.
 
 ```sql
 CREATE TABLE watcher_cursors (
@@ -238,7 +238,6 @@ directly — no SQL queries in the API hot path for state reads.
 ```
 GET /api/state/pool         → reads PoolState
 GET /api/state/executions   → reads ExecutionsState
-GET /api/state/cx           → reads CxState
 ```
 
 ---
@@ -272,28 +271,19 @@ resolve `{secret.NAME}` references at step dispatch time.
 
 Applied events: `secret.set`, `secret.deleted`.
 
-### CxState *(deprecated — removed in the event-sources migration)*
-
-Mirrors the current state of `.complex/` on main. A map of node IDs
-to their current state, tags, and recent comments.
-
-Applied events: `cx.task_ready`, `cx.task_claimed`,
-`cx.task_integrated`, `cx.task_shadowed`, `cx.comment_added`,
-`cx.phase_complete`.
-
-This projection is cx-specific and moves out of the server as part of
-the watcher refactor — see [event-sources-design.md](event-sources-design.md).
-Under the new model, source-specific state lives in the watcher or is
-derived from `EventType::Source` events on demand.
+Source-specific state (cx node status, Linear issue status, ...) is
+**not** projected from events. Watchers observe the source of truth
+directly and emit source events carrying whatever snapshot the
+trigger needs. The server stores those events but does not fold them
+into a projection.
 
 ### Rebuild on Startup
 
 ```rust
-fn rebuild_projections(db: &Connection) -> (PoolState, ExecutionsState, SecretsState, CxState) {
+fn rebuild_projections(db: &Connection) -> (PoolState, ExecutionsState, SecretsState) {
     let mut pool = PoolState::default();
     let mut execs = ExecutionsState::default();
     let mut secrets = SecretsState::default();
-    let mut cx = CxState::default();
 
     let mut stmt = db.prepare(
         "SELECT seq, ts, event_type, data FROM events ORDER BY seq ASC"
@@ -304,10 +294,9 @@ fn rebuild_projections(db: &Connection) -> (PoolState, ExecutionsState, SecretsS
         pool.apply(&event);
         execs.apply(&event);
         secrets.apply(&event);
-        cx.apply(&event);
     }
 
-    (pool, execs, secrets, cx)
+    (pool, execs, secrets)
 }
 ```
 

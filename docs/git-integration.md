@@ -121,9 +121,10 @@ All cx mutations happen on branches, not main. This is enforced by
 seguro isolation — the agent can only write to its workspace clone.
 
 When the branch merges to main, cx state changes (comments, state
-transitions, integrations) come with it. ox-server detects these
-via `cx log --json --since <cursor>` and emits corresponding ox
-events.
+transitions, integrations) come with it. `ox-cx-watcher` observes
+the new commits on main on its next tick and posts the corresponding
+source events to `/api/events/ingest` — ox-server itself has no cx
+polling logic.
 
 **Important:** cx commands work on the local `.complex/` directory.
 Inside the seguro VM, this is the clone's `.complex/`, not the
@@ -135,7 +136,7 @@ them to reach main via merge.
 ## Git Push from Agents
 
 The agent is responsible for pushing its work. The workflow prompts
-include explicit `git push origin {task_id}` instructions.
+include explicit `git push origin {branch}` instructions.
 
 **Why agents push (not the runner):**
 - The agent knows when its work is complete
@@ -155,16 +156,17 @@ the same code block.
 
 ## First-Boot State Recovery
 
-On first boot (no cx cursor in the database), ox-server snapshots
-the current cx state using `cx list --json` instead of replaying
-the full `cx log` history. This prevents:
+On first boot (no cursor stored server-side for the `cx` source),
+`ox-cx-watcher` snapshots the current cx state using `cx list --json`
+instead of replaying the full `cx log` history. This prevents:
 
 - Re-triggering workflows for integrated/shadowed nodes
-- Firing stale `cx.task_ready` events from historical transitions
+- Firing stale `node.ready` events from historical transitions
 - Creating duplicate executions for completed work
 
-Subsequent polls use `cx log --json --since <cursor>` to catch
-incremental changes.
+Subsequent ticks use `cx log --json --since <cursor>` to catch
+incremental changes. See [prd/cx.md](prd/cx.md) for the watcher
+lifecycle.
 
 ---
 
@@ -176,10 +178,10 @@ this but would break `cx` commands (which need a working tree to
 read `.complex/` files). The workaround is careful checkout
 management in merge.rs.
 
-**Single writer:** Only ox-server writes to main (via merge). If
-a human commits directly to main while ox is running, the cx cursor
-and merge state may become inconsistent. Stop ox before making
-manual changes to main.
+**Single writer:** Only ox-server writes to main (via merge). If a
+human commits directly to main while ox is running, the cx watcher's
+cursor and merge state may become inconsistent. Stop ox before
+making manual changes to main.
 
 **Branch cleanup:** Merged branches are not automatically deleted.
 They accumulate as refs. This is harmless but messy. A future

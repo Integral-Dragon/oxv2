@@ -70,19 +70,6 @@ pub enum EventType {
     // Source events from watcher plugins.
     #[serde(rename = "source")]
     Source,
-    // cx
-    #[serde(rename = "cx.task_ready")]
-    CxTaskReady,
-    #[serde(rename = "cx.task_claimed")]
-    CxTaskClaimed,
-    #[serde(rename = "cx.task_integrated")]
-    CxTaskIntegrated,
-    #[serde(rename = "cx.task_shadowed")]
-    CxTaskShadowed,
-    #[serde(rename = "cx.comment_added")]
-    CxCommentAdded,
-    #[serde(rename = "cx.phase_complete")]
-    CxPhaseComplete,
     // Git
     #[serde(rename = "git.branch_pushed")]
     GitBranchPushed,
@@ -128,9 +115,10 @@ pub struct ExecutionCreatedData {
     pub trigger: String,
     #[serde(default)]
     pub vars: HashMap<String, String>,
-    /// Origin of this execution. Optional on the wire for backward compat
-    /// with pre-refactor event logs; resolved to a concrete value at
-    /// projection time via `fallback_origin` when absent.
+    /// Origin of this execution — always set on newly-written events.
+    /// Still typed `Option` to round-trip through pre-slice-5 event logs
+    /// that may have lacked the field; projection code treats `None` as
+    /// `ExecutionOrigin::Manual`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<ExecutionOrigin>,
 }
@@ -291,26 +279,8 @@ pub struct SourceEventData {
     pub data: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CxTaskReadyData {
-    pub node_id: String,
-    pub tags: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
-    /// Current cx state at the time the event was emitted. Empty string
-    /// for historical entries written before this field existed — the
-    /// herder treats empty as "unknown" and skips the integrated/shadowed
-    /// suppression check.
-    #[serde(default)]
-    pub state: String,
-}
-
 /// Trigger-firing event context. Exposes the subset of event payload fields
 /// that can be referenced as `{event.X}` inside a `[trigger.vars]` block.
-///
-/// Under the event-sources migration, `Source` is the new canonical
-/// variant used by watcher-produced events. The `Cx*` variants are
-/// deprecated and removed in slice 5 of that migration.
 #[derive(Debug, Clone)]
 pub enum EventContext {
     /// A source event emitted by a watcher. `data` is the free-form
@@ -322,19 +292,10 @@ pub enum EventContext {
         tags: Vec<String>,
         data: serde_json::Value,
     },
-    CxTaskReady { node_id: String },
-    CxTaskClaimed { node_id: String },
-    CxTaskIntegrated { node_id: String },
-    CxTaskShadowed { node_id: String, reason: String },
-    CxCommentAdded {
-        node_id: String,
-        tag: Option<String>,
-        author: Option<String>,
-    },
 }
 
 impl EventContext {
-    /// Resolve a dotted path like `event.node_id` to its string value.
+    /// Resolve a dotted path like `event.subject_id` to its string value.
     /// Returns `None` if the path is not defined for this variant.
     ///
     /// For `Source` contexts, the resolvable fields are:
@@ -357,21 +318,6 @@ impl EventContext {
                 "tags" => Some(tags.join(",")),
                 rest => rest.strip_prefix("data.").and_then(|p| resolve_json_path(data, p)),
             },
-            Self::CxTaskReady { node_id } if field == "node_id" => Some(node_id.clone()),
-            Self::CxTaskClaimed { node_id } if field == "node_id" => Some(node_id.clone()),
-            Self::CxTaskIntegrated { node_id } if field == "node_id" => Some(node_id.clone()),
-            Self::CxTaskShadowed { node_id, reason } => match field {
-                "node_id" => Some(node_id.clone()),
-                "reason" => Some(reason.clone()),
-                _ => None,
-            },
-            Self::CxCommentAdded { node_id, tag, author } => match field {
-                "node_id" => Some(node_id.clone()),
-                "tag" => tag.clone(),
-                "author" => author.clone(),
-                _ => None,
-            },
-            _ => None,
         }
     }
 }
@@ -408,9 +354,6 @@ pub enum ExecutionOrigin {
         kind: String,
         subject_id: String,
     },
-    /// Fired from a cx event tied to a specific node. Deprecated;
-    /// removed in slice 5 of the event-sources migration.
-    CxNode { node_id: String },
     /// Chained from a prior execution via a workflow or step event trigger.
     /// v1 does not wire the workflow-chaining path; the variant exists so
     /// the data model is stable.
@@ -434,22 +377,6 @@ pub enum ChildKind {
     Completed,
     StepCompleted,
     StepFailed,
-}
-
-/// Best-effort synthesis of an origin for pre-refactor events that lack
-/// one on the wire. Old `execution.created` payloads that carried
-/// `vars["task_id"]` are treated as `CxNode`; everything else as `Manual`.
-///
-/// Live code paths should always pass an explicit origin to
-/// `ExecutionCreatedData`. This helper exists solely for event-log replay
-/// compatibility.
-pub fn fallback_origin(vars: &HashMap<String, String>) -> ExecutionOrigin {
-    match vars.get("task_id") {
-        Some(node_id) => ExecutionOrigin::CxNode {
-            node_id: node_id.clone(),
-        },
-        None => ExecutionOrigin::Manual { user: None },
-    }
 }
 
 /// Structural dedup predicate. Returns `true` if any element of `existing`
@@ -482,9 +409,10 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerFailedData {
     /// The `seq` of the event that caused this trigger to fire.
-    /// Lets a UI correlate "which cx event caused this failure".
+    /// Lets a UI correlate "which source event caused this failure".
     pub source_seq: Seq,
-    /// The matched trigger's `on` field (e.g. `"cx.task_ready"`).
+    /// The matched trigger's `on` field (source-native event kind,
+    /// e.g. `"node.ready"`).
     pub on: String,
     /// The matched trigger's `tag`, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -574,38 +502,6 @@ impl TriggerFailedData {
             TriggerFailureReason::UnknownWorkflow,
         )
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CxTaskClaimedData {
-    pub node_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub part: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CxTaskIntegratedData {
-    pub node_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CxTaskShadowedData {
-    pub node_id: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CxCommentAddedData {
-    pub node_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tag: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CxPhaseCompleteData {
-    pub node_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -707,19 +603,21 @@ mod tests {
         );
     }
 
-    // ── slice B: ExecutionOrigin ───────────────────────────────────────
+    // ── ExecutionOrigin ────────────────────────────────────────────────
+
+    fn src_origin(subject: &str) -> ExecutionOrigin {
+        ExecutionOrigin::Source {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: subject.into(),
+        }
+    }
 
     #[test]
     fn execution_origin_structural_equality() {
-        let a = ExecutionOrigin::CxNode {
-            node_id: "aJuO".into(),
-        };
-        let b = ExecutionOrigin::CxNode {
-            node_id: "aJuO".into(),
-        };
-        let c = ExecutionOrigin::CxNode {
-            node_id: "different".into(),
-        };
+        let a = src_origin("aJuO");
+        let b = src_origin("aJuO");
+        let c = src_origin("different");
         let m = ExecutionOrigin::Manual { user: None };
 
         assert_eq!(a, b);
@@ -728,61 +626,21 @@ mod tests {
     }
 
     #[test]
-    fn fallback_origin_synthesizes_cx_node_from_task_id() {
-        let mut vars = HashMap::new();
-        vars.insert("task_id".into(), "aJuO".into());
-        let o = fallback_origin(&vars);
-        assert_eq!(
-            o,
-            ExecutionOrigin::CxNode {
-                node_id: "aJuO".into()
-            }
-        );
-    }
-
-    #[test]
-    fn fallback_origin_without_task_id_is_manual() {
-        let vars = HashMap::new();
-        let o = fallback_origin(&vars);
-        assert_eq!(o, ExecutionOrigin::Manual { user: None });
-    }
-
-    #[test]
-    fn execution_created_data_round_trips_with_and_without_origin() {
-        // New-shape payload: round-trips with origin set.
+    fn execution_created_data_round_trips_origin() {
         let with_origin = ExecutionCreatedData {
             execution_id: ExecutionId("e-1".into()),
-            workflow: "consultation".into(),
-            trigger: "cx.task_ready".into(),
-            vars: HashMap::from([("branch".into(), "aJuO".into())]),
-            origin: Some(ExecutionOrigin::CxNode {
-                node_id: "aJuO".into(),
-            }),
+            workflow: "code-task".into(),
+            trigger: "node.ready".into(),
+            vars: HashMap::from([("task_id".into(), "aJuO".into())]),
+            origin: Some(src_origin("aJuO")),
         };
         let json = serde_json::to_value(&with_origin).unwrap();
         let back: ExecutionCreatedData = serde_json::from_value(json).unwrap();
         assert_eq!(back.origin, with_origin.origin);
         assert_eq!(back.vars, with_origin.vars);
-
-        // Legacy-shape payload: no origin field on the wire, deserializes as None.
-        let legacy_json = serde_json::json!({
-            "execution_id": "e-old",
-            "workflow": "code-task",
-            "trigger": "cx.task_ready",
-            "vars": { "task_id": "aJuO" }
-        });
-        let legacy: ExecutionCreatedData = serde_json::from_value(legacy_json).unwrap();
-        assert_eq!(legacy.origin, None);
-        // The projection's fallback step would synthesize an origin from vars:
-        assert_eq!(
-            fallback_origin(&legacy.vars),
-            ExecutionOrigin::CxNode {
-                node_id: "aJuO".into()
-            }
-        );
     }
 
-    // ── slice C: TriggerFailed ─────────────────────────────────────────
+    // ── TriggerFailed ──────────────────────────────────────────────────
 
     #[test]
     fn trigger_failed_event_type_serializes_to_dotted_name() {
@@ -797,13 +655,13 @@ mod tests {
     fn trigger_failed_data_round_trips_missing_field_reason() {
         let data = TriggerFailedData::from_missing_field(
             Seq(42),
-            "cx.task_ready",
+            "node.ready",
             Some("workflow:consultation"),
             "consultation",
             "event.bogus".into(),
         );
         assert_eq!(data.source_seq, Seq(42));
-        assert_eq!(data.on, "cx.task_ready");
+        assert_eq!(data.on, "node.ready");
         assert_eq!(data.tag.as_deref(), Some("workflow:consultation"));
         assert_eq!(data.workflow, "consultation");
         assert_eq!(
@@ -822,7 +680,7 @@ mod tests {
     fn trigger_failed_data_round_trips_validation_reason() {
         let data = TriggerFailedData::from_validation_error(
             Seq(7),
-            "cx.task_ready",
+            "node.ready",
             None,
             "code-task",
             "missing required variable: task_id".into(),
@@ -842,7 +700,7 @@ mod tests {
     fn trigger_failed_data_round_trips_unknown_workflow_reason() {
         let data = TriggerFailedData::for_unknown_workflow(
             Seq(1),
-            "cx.task_ready",
+            "node.ready",
             Some("workflow:ghost"),
             "ghost",
         );
@@ -866,12 +724,8 @@ mod tests {
 
     #[test]
     fn is_origin_active_matches_on_origin_workflow_and_liveness() {
-        let origin_a = ExecutionOrigin::CxNode {
-            node_id: "aJuO".into(),
-        };
-        let origin_b = ExecutionOrigin::CxNode {
-            node_id: "other".into(),
-        };
+        let origin_a = src_origin("aJuO");
+        let origin_b = src_origin("other");
         let wf = "consultation";
         let active = |s: &str| s == "running";
 

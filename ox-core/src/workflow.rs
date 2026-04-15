@@ -833,52 +833,69 @@ push = true
     fn parse_triggers_file() {
         let toml = r#"
 [[trigger]]
-on = "cx.task_ready"
-tag = "workflow:code-task"
+on     = "node.ready"
+source = "cx"
+tag    = "workflow:code-task"
 workflow = "code-task"
 
 [[trigger]]
-on = "cx.comment_added"
-tag = "review-requested"
+on     = "comment.added"
+source = "cx"
+tag    = "review-requested"
 workflow = "code-task"
 "#;
         let file: TriggersFile = toml::from_str(toml).unwrap();
         assert_eq!(file.trigger.len(), 2);
-        assert_eq!(file.trigger[0].on, "cx.task_ready");
+        assert_eq!(file.trigger[0].on, "node.ready");
+        assert_eq!(file.trigger[0].source.as_deref(), Some("cx"));
         assert_eq!(file.trigger[0].workflow, "code-task");
-        assert_eq!(file.trigger[1].on, "cx.comment_added");
+        assert_eq!(file.trigger[1].on, "comment.added");
     }
 
     #[test]
     fn parse_trigger_with_vars_block() {
         let toml = r#"
 [[trigger]]
-on       = "cx.task_ready"
+on       = "node.ready"
+source   = "cx"
 tag      = "workflow:consultation"
 workflow = "consultation"
 [trigger.vars]
-branch = "{event.node_id}"
+branch = "{event.subject_id}"
 "#;
         let file: TriggersFile = toml::from_str(toml).unwrap();
         assert_eq!(file.trigger.len(), 1);
         let t = &file.trigger[0];
-        assert_eq!(t.vars.get("branch").map(String::as_str), Some("{event.node_id}"));
+        assert_eq!(
+            t.vars.get("branch").map(String::as_str),
+            Some("{event.subject_id}")
+        );
+    }
+
+    fn sample_source_ctx(subject: &str) -> EventContext {
+        EventContext::Source {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: subject.into(),
+            tags: vec![],
+            data: serde_json::json!({}),
+        }
     }
 
     #[test]
-    fn build_vars_interpolates_event_node_id_into_named_var() {
+    fn build_vars_interpolates_subject_id_into_named_var() {
         // The consultation workflow uses `branch` as its var name.
-        // A cx.task_ready trigger must map event.node_id → branch.
+        // Its trigger maps event.subject_id → branch.
         let trigger = TriggerDef {
-            on: "cx.task_ready".into(),
-            source: None,
+            on: "node.ready".into(),
+            source: Some("cx".into()),
             tag: Some("workflow:consultation".into()),
             state: None,
             workflow: "consultation".into(),
             poll_interval: None,
-            vars: HashMap::from([("branch".into(), "{event.node_id}".into())]),
+            vars: HashMap::from([("branch".into(), "{event.subject_id}".into())]),
         };
-        let ctx = EventContext::CxTaskReady { node_id: "aJuO".into() };
+        let ctx = sample_source_ctx("aJuO");
 
         let result = trigger.build_vars(&ctx).expect("build_vars should succeed");
 
@@ -893,15 +910,15 @@ branch = "{event.node_id}"
     fn build_vars_interpolates_for_code_task_shape() {
         // The code-task workflow uses `task_id` as its var name.
         let trigger = TriggerDef {
-            on: "cx.task_ready".into(),
-            source: None,
+            on: "node.ready".into(),
+            source: Some("cx".into()),
             tag: Some("workflow:code-task".into()),
             state: None,
             workflow: "code-task".into(),
             poll_interval: None,
-            vars: HashMap::from([("task_id".into(), "{event.node_id}".into())]),
+            vars: HashMap::from([("task_id".into(), "{event.subject_id}".into())]),
         };
-        let ctx = EventContext::CxTaskReady { node_id: "bXYz".into() };
+        let ctx = sample_source_ctx("bXYz");
 
         let result = trigger.build_vars(&ctx).unwrap();
 
@@ -911,7 +928,7 @@ branch = "{event.node_id}"
     #[test]
     fn build_vars_errors_on_unknown_event_field() {
         let trigger = TriggerDef {
-            on: "cx.task_ready".into(),
+            on: "node.ready".into(),
             source: None,
             tag: None,
             state: None,
@@ -919,7 +936,7 @@ branch = "{event.node_id}"
             poll_interval: None,
             vars: HashMap::from([("x".into(), "{event.bogus}".into())]),
         };
-        let ctx = EventContext::CxTaskReady { node_id: "n".into() };
+        let ctx = sample_source_ctx("n");
 
         let err = trigger.build_vars(&ctx).expect_err("should fail on bogus field");
 
@@ -934,7 +951,7 @@ branch = "{event.node_id}"
         // A trigger with no [trigger.vars] block should produce no vars —
         // NOT magically inject task_id or anything else.
         let trigger = TriggerDef {
-            on: "cx.task_ready".into(),
+            on: "node.ready".into(),
             source: None,
             tag: None,
             state: None,
@@ -942,7 +959,7 @@ branch = "{event.node_id}"
             poll_interval: None,
             vars: HashMap::new(),
         };
-        let ctx = EventContext::CxTaskReady { node_id: "n".into() };
+        let ctx = sample_source_ctx("n");
 
         let result = trigger.build_vars(&ctx).unwrap();
         assert!(result.is_empty());
