@@ -1,14 +1,14 @@
 {
   "id": "4UYg",
   "title": "Slice 3: ox-cx-watcher crate (parallel path)",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "claude",
   "created_at": "2026-04-15T17:09:09.303795973Z",
-  "updated_at": "2026-04-15T17:29:15.946108104Z",
+  "updated_at": "2026-04-15T20:19:13.121148043Z",
   "parent": "5H3N",
   "meta": {
-    "_reason": "starting slice 3: ox-cx-watcher standalone crate"
+    "_reason": "slice 3 done: ox-cx-watcher crate with mapping, client, tick loop, and 18 unit tests. Integration against a live server comes in slice 4."
   },
   "edges": [
     {
