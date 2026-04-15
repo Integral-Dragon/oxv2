@@ -226,6 +226,23 @@ worker receiving a retry knows what went wrong.
 
 ---
 
+## Deterministic Control
+
+The workflow engine never asks an agent what step should run next.
+Transitions are evaluated from declared step output, signals, failure
+state, retry counters, and event facts.
+
+Agents can produce outputs such as `pass`, `fail`, `proposed`, or
+`needs-human`, but the meaning of those outputs is defined by the workflow
+TOML. The output value is data, not authority. This keeps orchestration
+inspectable, replayable, and testable.
+
+If a workflow needs a new path, encode that path in the workflow definition.
+Agents may propose workflow changes as artifacts, but applying those changes
+is a normal branch/merge operation.
+
+---
+
 ## Personas and Runtimes
 
 Steps name a persona. The persona declares which runtime and model to

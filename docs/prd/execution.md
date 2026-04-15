@@ -100,6 +100,11 @@ everything.
 See [runtimes.md](runtimes.md) for the full specification of the runtime
 interface, runtime definitions, and command templates.
 
+The `done` output value is not an instruction to Ox. It is data. The
+workflow definition decides how that data routes execution. An agent can
+report `pass`, `fail`, or any other output, but only a matching transition
+can advance the workflow to the corresponding next step.
+
 ---
 
 ## Two-Phase Completion

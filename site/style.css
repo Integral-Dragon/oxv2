@@ -52,7 +52,6 @@ main {
   font-size: 6rem;
   line-height: 1;
   margin: 0 0 1rem;
-  letter-spacing: -0.04em;
   color: var(--accent);
   font-weight: 700;
 }
@@ -62,7 +61,6 @@ main {
   margin: 0 0 1rem;
   color: var(--fg);
   font-weight: 600;
-  letter-spacing: -0.01em;
 }
 
 .sub {
@@ -182,6 +180,10 @@ code {
   gap: 1.5rem;
 }
 
+.cols.two {
+  grid-template-columns: repeat(2, 1fr);
+}
+
 .cols > div {
   border: 1px solid var(--line);
   padding: 1.2rem;
@@ -194,9 +196,30 @@ code {
 }
 
 @media (max-width: 640px) {
-  .cols { grid-template-columns: 1fr; }
+  .cols,
+  .cols.two { grid-template-columns: 1fr; }
   .masthead h1 { font-size: 4rem; }
   main { padding: 3rem 1.25rem 3rem; }
+}
+
+/* example */
+
+pre {
+  margin: 0;
+  padding: 1.2rem;
+  border: 1px solid var(--line);
+  overflow-x: auto;
+  background: rgba(29, 29, 31, 0.45);
+}
+
+pre code {
+  display: block;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.95em;
+  line-height: 1.6;
+  color: var(--fg);
 }
 
 /* principles */

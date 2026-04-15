@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ox — GitHub for agents</title>
-<meta name="description" content="Ox is an event-sourced workflow engine for AI agents. Multi-agent teams in isolated sandboxes, coordinated by a human.">
-<meta property="og:title" content="ox — GitHub for agents">
-<meta property="og:description" content="Event-sourced workflow engine for AI agents. Human in the loop, not in the way.">
+<title>ox — deterministic workflows for agentic work</title>
+<meta name="description" content="Ox keeps hands-off agentic work moving with deterministic, event-driven workflows. Agents do cognition. Ox does coordination.">
+<meta property="og:title" content="ox — deterministic workflows for agentic work">
+<meta property="og:description" content="Agents propose, write, review, and investigate. Ox triggers workflows, dispatches steps, records artifacts, retries failures, and escalates.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,39 +15,68 @@
 
 <header class="masthead">
   <h1>ox</h1>
-  <p class="tag">GitHub for agents.</p>
-  <p class="sub">Event-sourced workflow engine for AI agents. Multi-agent teams in isolated sandboxes, coordinated by a human.</p>
+  <p class="tag">Deterministic workflows for hands-off agentic work.</p>
+  <p class="sub">Agents propose, write, review, and investigate. Ox triggers workflows, dispatches steps, records artifacts, retries failures, and escalates when the facts say to stop.</p>
   <nav class="cta">
-    <a href="https://github.com/integral-dragon/oxv2" class="btn">github &rarr;</a>
-    <a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/README.md" class="btn">read the prd &rarr;</a>
+    <a href="https://github.com/integral-dragon/oxv2" class="btn">view source &rarr;</a>
+    <a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/README.md" class="btn">read the product spec &rarr;</a>
   </nav>
 </header>
 
 <section>
-  <h2>the pitch</h2>
+  <h2>the thesis</h2>
   <p>
-    Issues track work. Pull requests are workflow executions. Runners are
-    fungible VMs. Events drive everything. You play the repo owner &mdash;
-    setting direction, reviewing escalations, controlling budget &mdash;
-    while agents handle contribution.
+    Agents should do judgment-heavy work. Coordination should be
+    deterministic.
   </p>
   <p>
-    Personas define <em>who</em> an agent is. Skills define <em>what</em>
-    they can do. Workflows define <em>what runs, when, and how</em>.
-    The engine is generic. Complex multi-agent orchestrations are
-    configuration, not code.
+    Ox does not ask an agent what happens next. Workflows advance from
+    explicit events: a task became ready, a step was confirmed, a runner
+    missed heartbeat, a merge failed, or a signal was observed.
+  </p>
+  <p>
+    Agent outputs are data. Workflow transitions are policy.
   </p>
 </section>
 
 <section>
-  <h2>five rings</h2>
+  <h2>the loop</h2>
   <ol class="rings">
-    <li><b>engine</b> &mdash; event-sourced workflow execution with isolated runners. runs on your laptop.</li>
-    <li><b>skills</b> &mdash; capability packages (tools, scripts, instructions) composable at every level.</li>
-    <li><b>ecosystem</b> &mdash; a registry for sharing skills, personas, and workflows.</li>
-    <li><b>platform</b> &mdash; hosted infra: cloud runners, GitHub integration, web dashboard.</li>
-    <li><b>self&#8209;improvement</b> &mdash; retro workflows that review history and update memory. agents get better over time.</li>
+    <li><b>event</b> &mdash; an external source says work is ready.</li>
+    <li><b>dispatch</b> &mdash; ox assigns the next workflow step to an isolated runner.</li>
+    <li><b>execute</b> &mdash; an agent or human process works in a fresh branch workspace.</li>
+    <li><b>confirm</b> &mdash; the runner collects artifacts, signals, metrics, pushes, and confirms.</li>
+    <li><b>advance</b> &mdash; deterministic transitions decide whether to continue, retry, merge, or escalate.</li>
   </ol>
+</section>
+
+<section>
+  <h2>the boundary</h2>
+  <div class="cols two">
+    <div>
+      <h3>agents do cognition</h3>
+      <p>plans, code, reviews, investigations, summaries, tradeoffs, clarifying questions.</p>
+    </div>
+    <div>
+      <h3>ox does coordination</h3>
+      <p>triggers, state, dispatch, retries, timeouts, artifacts, branch discipline, escalation.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>example</h2>
+  <pre><code>task.ready
+  -> propose
+  -> review-plan
+  -> implement
+  -> review-code
+  -> merge_to_main
+
+failures retry.
+loops have visit limits.
+merge conflicts escalate.
+the agent never chooses the graph.</code></pre>
 </section>
 
 <section>
@@ -71,16 +100,14 @@
 <section>
   <h2>principles</h2>
   <ul class="principles">
-    <li><b>event&nbsp;sourced.</b> all state is a projection of an append-only log. history is always recoverable.</li>
-    <li><b>single writer to main.</b> nothing writes to main except ox-server's merge. the merge is the serialisation point.</li>
-    <li><b>fungible executors.</b> runners have no identity. any runner can run any step. pool size <em>is</em> the WIP limit.</li>
-    <li><b>branch discipline for everyone.</b> agent or human. all work happens on branches and merges when done.</li>
-    <li><b>git log as event source.</b> cx state changes are derived from <code>git log</code>. no separate event files.</li>
+    <li><b>deterministic orchestration.</b> agents produce outputs and artifacts. workflows decide what those facts mean.</li>
+    <li><b>events are facts.</b> all state is a projection of an append-only log. history is always recoverable.</li>
+    <li><b>isolated runners.</b> each step gets a fresh workspace and runtime process.</li>
     <li><b>two&#8209;phase completion.</b> a step isn't done until the runner confirms it. the herder never races in-flight work.</li>
-    <li><b>personas are primary.</b> workflows name personas, not runtimes. swap a persona, swap everything about how the step runs.</li>
-    <li><b>orchestration is configuration.</b> personas, skills, workflows are files. the infrastructure is generic.</li>
-    <li><b>skills are portable.</b> files on disk, executables on PATH. no protocol dependency. any agent can use them.</li>
-    <li><b>the herder is dumb.</b> no AI in the infrastructure layer. intelligence lives in agents and personas.</li>
+    <li><b>artifacts are first-class.</b> logs, commits, cx activity, metrics, and declared files are addressable outputs.</li>
+    <li><b>single writer to main.</b> nothing writes to main except ox-server's merge. the merge is the serialisation point.</li>
+    <li><b>humans review escalations.</b> people set direction and handle exceptions instead of sitting in the happy path.</li>
+    <li><b>agents never coordinate agents.</b> no AI in the infrastructure layer. intelligence lives inside bounded steps.</li>
   </ul>
 </section>
 
@@ -88,21 +115,12 @@
   <h2>dig deeper</h2>
   <p class="muted">the product spec, straight from the repo.</p>
   <ul class="docs">
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/README.md">README</a> &mdash; the full overview</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/events.md">events</a> &mdash; event model, log, SSE, projections</li>
+    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/README.md">overview</a> &mdash; product doctrine and core model</li>
     <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/workflows.md">workflows</a> &mdash; TOML, steps, transitions, triggers</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/artifacts.md">artifacts</a> &mdash; artifact model, streaming, implicit artifacts</li>
     <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/execution.md">execution</a> &mdash; pool, runners, two-phase completion, signals</li>
+    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/events.md">events</a> &mdash; event model, log, SSE, projections</li>
+    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/artifacts.md">artifacts</a> &mdash; artifact model, streaming, implicit artifacts</li>
     <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/runners.md">runners</a> &mdash; runner model, lifecycle, heartbeats, pool</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/runtimes.md">runtimes</a> &mdash; runtime definitions, command templates, runtime interface</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/secrets.md">secrets</a> &mdash; secret management, delivery, injection</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/metrics.md">metrics</a> &mdash; step metrics, collection, types</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/cx.md">cx</a> &mdash; cx integration, branch discipline, git log events</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/ox-ctl.md">ox-ctl</a> &mdash; CLI reference</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/skills.md">skills</a> &mdash; skill format, hierarchy, resolution, packaging</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/ecosystem.md">ecosystem</a> &mdash; registry for skills, personas, workflows</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/self-improvement.md">self-improvement</a> &mdash; retro workflows, memory layers</li>
-    <li><a href="https://github.com/integral-dragon/oxv2/blob/main/docs/prd/platform.md">platform</a> &mdash; SaaS architecture, cloud runners, web dashboard</li>
   </ul>
 </section>
 

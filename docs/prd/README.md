@@ -1,34 +1,85 @@
 # Ox
 
-Ox is an event-sourced workflow engine for AI agents. It runs multi-agent
-teams inside isolated sandboxes, coordinated by a human user.
+Ox is a deterministic workflow engine for hands-off agentic work.
 
-The mental model is **GitHub for agents**: issues track work, pull requests
-are workflow executions, runners are fungible VMs, and events drive
-everything. The human acts as the repository owner — setting direction,
-reviewing escalations, controlling budget — while agents handle contribution.
+Agents do judgment-heavy work: propose plans, write code, review changes,
+investigate failures, and explain tradeoffs. Ox does coordination:
+triggering workflows, dispatching steps, advancing state, retrying failures,
+enforcing branch discipline, collecting artifacts, and escalating to humans.
 
-The workflow system is fully configurable. Personas define who an agent is;
-skills define what an agent can do; workflow TOML files define what steps
-run, in what order, with what transitions. The engine is generic — complex
-multi-agent orchestrations are configuration, not code.
+Ox does not use agents to orchestrate agents. Workflow control is explicit,
+event-driven, replayable infrastructure.
 
-The system is designed in concentric rings — each ring works independently
-but amplifies the others:
+The operating model is close to CI/CD for agent work: external events start
+workflows, isolated runners execute steps, artifacts record what happened,
+and deterministic transitions decide what runs next.
 
-1. **Engine** — the core: event-sourced workflow execution with isolated
-   runners. Run locally on a laptop with `ox-up`.
-2. **Skills** — capability packages (tools, scripts, instructions) that
-   give agents abilities beyond reading and writing code. Composable
-   at the runtime, persona, workflow, and step level.
-3. **Ecosystem** — a registry and community for sharing skills, personas,
-   and workflows. Publish, discover, and compose building blocks across
-   projects and teams.
-4. **Platform** — hosted infrastructure: cloud runners, GitHub integration,
-   web dashboard, multi-tenancy, billing. The same engine, managed.
-5. **Self-improvement** — retro workflows that review execution history
-   and update memory files, so agents get better at working in a project
-   over time.
+For coding workflows, this feels like **GitHub for agents**: issues track
+work, branches isolate attempts, merges serialize completed work, runners
+are fungible VMs, and humans review escalations instead of sitting in the
+happy path.
+
+---
+
+## Product Doctrine
+
+### Agents do cognition
+
+Agents are used where language-model judgment is valuable:
+
+- Reading ambiguous task context
+- Proposing implementation plans
+- Writing code
+- Reviewing code
+- Investigating failures
+- Summarizing tradeoffs
+- Asking humans for clarification
+
+### Ox does coordination
+
+Ox owns the mechanics that should not depend on model judgment:
+
+- Trigger matching
+- Workflow state
+- Step dispatch
+- Retries and visit limits
+- Runner liveness
+- Timeout handling
+- Transition matching
+- Artifact collection
+- Branch merge discipline
+- Escalation routing
+
+### Events are facts
+
+Ox advances only from explicit events: a task became ready, a step was
+confirmed, a runner missed heartbeat, a merge failed, an artifact closed,
+or a signal was observed.
+
+An agent may recommend what should happen next, but Ox decides whether the
+workflow is allowed to advance.
+
+### Workflows are policy
+
+Teams encode their operating policy in workflow files. The workflow graph is
+the source of truth for what happens next, not an agent improvising process
+at runtime.
+
+---
+
+## Core Layers
+
+The system is designed in layers. Each layer works independently but
+amplifies the ones below it:
+
+1. **Workflow engine** — deterministic event-driven orchestration.
+2. **Execution layer** — isolated runners, artifacts, metrics, and signals.
+3. **Agent interface** — personas, runtimes, and skills.
+4. **Integrations** — event sources such as cx, GitHub, Linear, Jira, and
+   webhooks.
+5. **Product surfaces** — CLI, dashboard, hosted platform, and APIs.
+6. **Learning loop** — retro workflows and memory built on execution
+   history.
 
 ---
 
@@ -61,9 +112,10 @@ mutates state directly.
 
 The herder is not AI. It counts things and fires triggers:
 
-- Tails the ox event stream for cx state changes (derived from git log,
-  not cx's own events). When a node transitions to ready with a workflow
-  tag, it creates an execution.
+- Tails the ox event stream for external work events. In the reference
+  local setup, those events come from cx state changes derived from git log.
+  Other event sources can map GitHub, Linear, Jira, cron, or webhook events
+  into the same trigger model.
 - Monitors running executions for liveness. Stale runner heartbeat →
   re-dispatch. Retries exhausted → shadow the cx task, fire the escalation
   step defined in the workflow.
@@ -136,6 +188,19 @@ the runtime interface (see [runtimes.md](runtimes.md)). Agents call `cx`
 directly on their branch for issue graph operations.
 
 See [ox-ctl.md](ox-ctl.md) for the full command reference.
+
+---
+
+## Event Sources
+
+Ox workflows start from events. An event source observes an external system,
+maps native activity into Ox events, and advances a server-side cursor.
+
+cx is the reference event source for local development. The intended plugin
+boundary is watcher processes that ingest events through
+`POST /api/events/ingest`.
+
+This keeps the workflow engine independent from any particular work tracker.
 
 ---
 
@@ -263,6 +328,10 @@ actor.
 filtered to `.complex/`. No separate event files, no merge conflicts from
 append-only logs across branches.
 
+**Deterministic orchestration.** Ox never asks an agent which step should
+run next. Agents produce outputs and artifacts; workflow definitions decide
+how those facts route execution.
+
 **Two-phase completion.** A step is not complete until the runner confirms
 it — after pushing the branch and collecting signals. The herder does not
 advance until confirmation. See [execution.md](execution.md).
@@ -289,11 +358,10 @@ commands can use ox skills. The ecosystem grows because the format is
 agent-agnostic — the lock-in is in orchestration and the registry, not
 the file format. See [skills.md](skills.md).
 
-**The system improves itself.** Execution artifacts, metrics, and
-signals feed retro workflows that update memory files. Personas
-accumulate project-specific knowledge over time. The improvement loop
-is a workflow like any other — no special infrastructure. See
-[self-improvement.md](self-improvement.md).
+**The system can improve itself.** Execution artifacts, metrics, and
+signals can feed retro workflows that update memory files. This is a
+workflow pattern built on the engine, not a separate orchestration system.
+See [self-improvement.md](self-improvement.md).
 
 **The herder is dumb.** No AI in the infrastructure layer. The herder counts
 things, checks conditions, and fires triggers. Intelligence lives in agents
@@ -314,9 +382,32 @@ cx does not depend on ox.
 **Not seguro.** seguro is a standalone sandbox tool. Ox uses seguro for
 execution isolation; seguro has no knowledge of ox workflows.
 
-**Not an AI system.** Ox orchestrates AI agents but contains no AI itself.
-The intelligence is in the agents and in the workflow definitions that
-describe how to use them.
+**Not an agent coordinator agent.** Ox does not put an LLM in charge of
+workflow control. Agents perform bounded cognitive tasks inside workflow
+steps. Ox handles orchestration deterministically.
+
+**Not a dynamic process inventor.** Ox does not infer workflow structure,
+choose arbitrary next steps, or invent process from model output. If a
+workflow needs a new path, encode that path in the workflow definition.
+Agents may propose workflow changes as artifacts, but applying those
+changes is a normal branch/merge operation.
+
+---
+
+## Roadmap Layers
+
+The core product is deterministic event-driven workflow execution for
+hands-off agentic work. Several layers amplify that core but are not
+required for the engine to be useful:
+
+- **Skills** package tools, scripts, and instructions for reuse across
+  personas and workflows.
+- **Ecosystem** is a future distribution layer for sharing proven skills,
+  personas, and workflows.
+- **Platform** is hosted Ox: cloud runners, GitHub integration, a web
+  dashboard, authentication, multi-tenancy, billing, and budget controls.
+- **Self-improvement** is a later-stage workflow pattern where retros review
+  execution history and propose memory updates.
 
 ---
 

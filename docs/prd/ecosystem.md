@@ -1,5 +1,10 @@
 # Ecosystem
 
+> **Status:** Future leverage layer. The core Ox product works without a
+> registry. The ecosystem becomes valuable after deterministic workflows,
+> reusable skills, and proven personas exist in enough real projects to
+> share.
+
 Ox's value is in the workflow engine and the composability of its
 configuration: skills define what agents can do, personas define who
 agents are, workflows define how work flows. All three are files in git

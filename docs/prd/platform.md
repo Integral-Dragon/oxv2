@@ -1,15 +1,15 @@
 # Platform
 
 Ox runs locally today: clone the repo, build it, run `ox-up`, manage
-agents from a terminal. The platform layer extends this to a hosted
-service where users connect repos, configure workflows, and run agents
-in the cloud — with a web interface, managed infrastructure, and a
-shared ecosystem.
+agents from a terminal. The platform layer extends the same deterministic
+workflow engine into a hosted service where teams connect repos, configure
+workflows, and run agents in the cloud.
 
 The architecture doesn't fork. The same ox-server, ox-herder, and
-ox-runner components run in the cloud. The platform adds
-multi-tenancy, git integration, cloud runners, a web UI, and billing
-around them.
+ox-runner components run in the cloud. The platform adds the product
+surface and hardening teams need around that engine: authentication,
+repo permissions, runner identity, secret handling, cloud runners,
+multi-tenancy, a web UI, billing, and budget controls.
 
 ---
 

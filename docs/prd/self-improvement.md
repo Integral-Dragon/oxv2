@@ -1,5 +1,9 @@
 # Self-Improvement
 
+> **Status:** Later-stage workflow pattern. Ox should first prove that
+> deterministic workflows can run useful hands-off agent work. The
+> self-improvement loop depends on that execution history existing.
+
 Ox captures a complete record of every execution: event logs, step
 artifacts (logs, commits, cx diffs), metrics (tokens, duration,
 retries, signals), and outcomes (completed, escalated, merged). This
