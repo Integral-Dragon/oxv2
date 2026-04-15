@@ -518,7 +518,10 @@ shape. Auth is purely additive middleware.
 3. Replay event log to rebuild projections
 4. Resolve configuration search path, load workflow definitions
 5. Initialise bare git repo if not present
-6. Start background tasks: cx poll loop, heartbeat checker
+6. Start background tasks: heartbeat checker. (Watchers run as
+   separate processes now — see `ox-ctl up` below. The legacy
+   in-server `cx_poll_loop` is no longer spawned; slice 5 of the
+   event-sources migration deletes the code.)
 7. Start Axum server (API + SSE + git endpoints)
 8. On SIGTERM: stop accepting connections, drain SSE, flush WAL, exit
 
@@ -558,7 +561,14 @@ started by provisioning scripts and register themselves with ox-server.
 ### ox-ctl
 
 Stateless. Each invocation parses args, makes one or more API calls,
-formats output, and exits. No persistent state, no background processes.
+formats output, and exits. No persistent state of its own.
+
+`ox-ctl up` is the exception — it spawns the local ensemble as
+detached processes and writes a pidfile. Today that ensemble is
+`ox-server`, `ox-herder`, one `ox-cx-watcher` per entry in
+`.ox/config.toml`'s `watchers` list, and one or more seguro-wrapped
+`ox-runner` VMs. `ox-ctl down` reads the pidfile and sends SIGTERM to
+every alive entry; watcher processes shut down alongside the rest.
 
 ---
 

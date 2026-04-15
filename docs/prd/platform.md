@@ -167,9 +167,12 @@ consumer, not a new backend.
 progress in real-time via SSE. Click into a step to see streaming
 logs, metrics, and artifacts.
 
-**Task board** — the cx work graph visualised. Nodes with states,
-edges showing dependencies, tags showing workflow triggers. Drag to
-reorder, click to inspect, create tasks directly.
+**Work graph** — the connected source's work visualised. For a
+cx-integrated project this is the cx node graph: states, dependency
+edges, tags showing workflow triggers, drag to reorder, click to
+inspect. For a Linear- or GitHub-integrated project it is the
+corresponding issue view. The view is source-specific; cx is the
+local reference.
 
 **Workflow editor** — visual step graph builder. TOML under the hood,
 but presented as a flowchart with drag-and-drop steps, transition
@@ -265,7 +268,10 @@ The path from signup to first useful execution:
 3. **Pick a workflow** — choose from ecosystem templates or start with
    `code-task`
 4. **Set secrets** — API keys for AI providers (or use platform-provided)
-5. **Create a task** — write a cx issue (via dashboard) with workflow tag
+5. **Create a source event** — write a cx issue, open a GitHub issue,
+   or post a Linear ticket with the right workflow tag. A watcher
+   observes it and posts a source event to ox-server, which fires the
+   workflow.
 6. **Watch it run** — live execution view, streaming logs
 
 Time from signup to first agent running: under 5 minutes for a user

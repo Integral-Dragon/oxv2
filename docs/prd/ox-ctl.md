@@ -27,23 +27,28 @@ through the runtime interface (see [runtimes.md](runtimes.md)).
 List executions.
 
 ```
-ox-ctl exec list [--status <status>] [--workflow <name>] [--task <id>]
+ox-ctl exec list [--status <status>] [--workflow <name>] [--subject <id>]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--status <status>` | Filter by status: `running`, `completed`, `escalated`, `cancelled` |
 | `--workflow <name>` | Filter by workflow name |
-| `--task <id>` | Filter by task (cx node) ID |
+| `--subject <id>` | Filter by source subject ID (e.g. a cx node id) |
 
 Output:
 
 ```
-ID          TASK    WORKFLOW    STEP        STATUS     AGE
-aJuO-e1     aJuO    code-task   implement   running    4m
-bX3k-e2     bX3k    code-task   merge       completed  12m
-cR9p-e1     cR9p    triage      assess      running    1m
+ID          ORIGIN          WORKFLOW    STEP        STATUS     AGE
+aJuO-e1     cx:aJuO         code-task   implement   running    4m
+bX3k-e2     cx:bX3k         code-task   merge       completed  12m
+cR9p-e1     cx:cR9p         triage      assess      running    1m
 ```
+
+The `ORIGIN` column shows the source and subject of the event that
+created the execution — `cx:<node_id>` for cx-sourced work,
+`linear:<issue_id>` for Linear, `manual` for API calls without an
+originating event, and so on.
 
 ### `ox-ctl exec show <id>`
 
@@ -59,7 +64,7 @@ Output:
 
 ```
 Execution: aJuO-e1
-Task:      aJuO — "Add rate limiting to the API"
+Origin:    cx:aJuO — "Add rate limiting to the API"
 Workflow:  code-task
 Status:    running
 
@@ -152,20 +157,27 @@ the step is running or after completion.
 
 ## Triggers
 
-### `ox-ctl trigger <node-id>`
+### `ox-ctl trigger`
 
-Evaluate triggers for a cx node. Fires any matching workflow.
+Synthesize a source event and evaluate triggers against it. Fires any
+matching workflow. Used to manually start a workflow on a subject
+that is already in the correct state, or to re-run a workflow after
+manual intervention.
 
 ```
-ox-ctl trigger <node-id> [--force]
+ox-ctl trigger --source <name> --kind <kind> --subject <id> [--force]
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Fire even if this node was recently triggered (bypass dedup) |
+| `--source <name>` | Watcher namespace (e.g. `cx`, `linear`, `github`) |
+| `--kind <kind>` | Source-native event kind (e.g. `node.ready`, `issue.labeled`) |
+| `--subject <id>` | Source-native correlation key — the `subject_id` the event is about |
+| `--force` | Fire even if a matching execution is already live (bypass dedup) |
 
-Used to manually start a workflow on a task that is already in ready
-state, or to re-run a workflow after manual intervention.
+A convenience alias `ox-ctl trigger cx-node <node_id>` expands to
+`--source cx --kind node.ready --subject <node_id>` for the common
+cx case.
 
 ---
 
@@ -260,7 +272,7 @@ ox-ctl events [--since <seq>] [--type <prefix>]
 | Flag | Description |
 |------|-------------|
 | `--since <seq>` | Start from this sequence number |
-| `--type <prefix>` | Filter to events whose type matches this prefix (e.g. `step.`, `cx.`) |
+| `--type <prefix>` | Filter to events whose type matches this prefix (e.g. `step.`, `source`) |
 
 Output (default):
 
@@ -342,7 +354,8 @@ ox-ctl secrets delete anthropic_api_key
 
 ### `ox-ctl status`
 
-Show server health, pool size, and active execution count.
+Show server health, pool size, active execution count, and the state
+of each configured watcher.
 
 ```
 ox-ctl status
@@ -355,7 +368,27 @@ ox-server   healthy   uptime 2d 4h
 pool        3 runners (2 executing, 1 idle)
 executions  2 running, 0 escalated
 workflows   8 loaded
+
+watchers
+  SOURCE   LAST INGEST           CURSOR            STATUS
+  cx       2026-04-15T12:00:03Z  d59b010abc12…     alive
 ```
+
+The watchers section is rendered from `GET /api/watchers`. Each row
+is one entry in the `watcher_cursors` table:
+
+- **SOURCE** — watcher identifier.
+- **LAST INGEST** — timestamp of the last successful ingest call
+  (including empty-batch liveness pings).
+- **CURSOR** — the opaque cursor string the watcher last committed,
+  truncated for display. The cursor is a git sha for cx, a delivery
+  id for a webhook watcher, or a timestamp for a polling API watcher.
+- **STATUS** — `alive` if the last call committed cleanly, otherwise
+  the short error from `last_error`.
+
+If `last_error` is set the status column turns into the error text —
+for example, `cas:expected X got Y` when two concurrent watchers
+fight over the same source row.
 
 ---
 
