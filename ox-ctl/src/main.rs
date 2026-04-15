@@ -227,6 +227,29 @@ async fn main() -> Result<()> {
     }
 }
 
+// ── Watchers (status section) ───────────────────────────────────────
+
+/// One row as returned by `GET /api/watchers`. Mirrors the server's
+/// `WatcherCursorRow` — kept local so ox-ctl can render without
+/// pulling a shared crate for the HTTP shape.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct WatcherRow {
+    source: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    updated_at: String,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+/// Render the watchers section of `ox-ctl status`. Pure — takes the
+/// rows as input and returns the string to print (with a trailing
+/// newline per line). Empty input renders an empty string so the
+/// caller can decide whether to print a header.
+fn format_watchers_section(_rows: &[WatcherRow]) -> String {
+    unimplemented!("slice 4: format_watchers_section")
+}
+
 // ── Status ──────────────────────────────────────────────────────────
 
 async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
@@ -1450,5 +1473,103 @@ mod tests {
             "consultation",
         ]);
         assert!(result.is_ok(), "--status/--workflow should parse cleanly");
+    }
+
+    // ── format_watchers_section (slice 4) ─────────────────────────
+
+    fn row(
+        source: &str,
+        cursor: Option<&str>,
+        updated_at: &str,
+        last_error: Option<&str>,
+    ) -> WatcherRow {
+        WatcherRow {
+            source: source.into(),
+            cursor: cursor.map(String::from),
+            updated_at: updated_at.into(),
+            last_error: last_error.map(String::from),
+        }
+    }
+
+    #[test]
+    fn format_watchers_section_empty_returns_empty_string() {
+        assert_eq!(format_watchers_section(&[]), "");
+    }
+
+    #[test]
+    fn format_watchers_section_renders_header_and_alive_row() {
+        let out = format_watchers_section(&[row(
+            "cx",
+            Some("d59b010abc12def3"),
+            "2026-04-15T12:00:03Z",
+            None,
+        )]);
+        assert!(out.contains("SOURCE"), "header row missing: {out}");
+        assert!(out.contains("LAST INGEST"));
+        assert!(out.contains("CURSOR"));
+        assert!(out.contains("STATUS"));
+        assert!(out.contains("cx"));
+        assert!(out.contains("2026-04-15T12:00:03Z"));
+        assert!(out.contains("alive"));
+        // Full cursor truncated for display — leading prefix still present.
+        assert!(out.contains("d59b010abc12"), "cursor prefix missing in: {out}");
+    }
+
+    #[test]
+    fn format_watchers_section_shows_last_error_in_status_column() {
+        let out = format_watchers_section(&[row(
+            "cx",
+            Some("sha-abc"),
+            "2026-04-15T12:00:03Z",
+            Some("cas:expected None got \"sha-real\""),
+        )]);
+        assert!(
+            out.contains("cas:expected"),
+            "last_error should appear in status column: {out}"
+        );
+        assert!(
+            !out.contains(" alive "),
+            "alive must not be shown when last_error is set: {out}"
+        );
+    }
+
+    #[test]
+    fn format_watchers_section_renders_null_cursor_as_placeholder() {
+        let out = format_watchers_section(&[row(
+            "cx",
+            None,
+            "2026-04-15T12:00:03Z",
+            None,
+        )]);
+        // Missing cursor: show "-" or similar placeholder, not "null".
+        assert!(
+            !out.contains("null"),
+            "raw null should not leak to display: {out}"
+        );
+        assert!(
+            out.contains(" - ") || out.contains(" -\n") || out.contains("  -"),
+            "expected dash placeholder, got: {out}"
+        );
+    }
+
+    #[test]
+    fn format_watchers_section_renders_multiple_rows() {
+        let out = format_watchers_section(&[
+            row("cx", Some("aaaaaaaabbbbcccc"), "2026-04-15T11:00:00Z", None),
+            row(
+                "linear",
+                Some("2026-04-15T12:00:00Z"),
+                "2026-04-15T12:00:03Z",
+                None,
+            ),
+        ]);
+        assert!(out.contains("cx"));
+        assert!(out.contains("linear"));
+        // Both have their own line.
+        let lines: Vec<_> = out.lines().collect();
+        assert!(
+            lines.len() >= 3,
+            "expected header + 2 data rows, got {lines:?}"
+        );
     }
 }

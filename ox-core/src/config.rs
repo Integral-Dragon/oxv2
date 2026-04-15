@@ -239,6 +239,12 @@ pub struct OxConfig {
     /// Heartbeat grace period in seconds.
     #[serde(default = "default_heartbeat_grace")]
     pub heartbeat_grace: u64,
+    /// Names of event-source watchers `ox-ctl up` should launch
+    /// alongside the server. Each name resolves to `ox-<name>-watcher`
+    /// in the same directory as `ox-server`. Additive across the
+    /// config.toml search path and de-duplicated on name.
+    #[serde(default)]
+    pub watchers: Vec<String>,
 }
 
 fn default_triggers() -> Vec<String> {
@@ -254,6 +260,7 @@ impl Default for OxConfig {
         Self {
             triggers: default_triggers(),
             heartbeat_grace: DEFAULT_HEARTBEAT_GRACE,
+            watchers: Vec::new(),
         }
     }
 }
@@ -316,9 +323,32 @@ pub fn load_config(search_path: &[PathBuf]) -> OxConfig {
         }
     }
 
+    // Watchers: additive across the search path, de-duped on first
+    // occurrence so two layers declaring `["cx"]` don't spawn two
+    // processes.
+    let mut watchers: Vec<String> = Vec::new();
+    {
+        let mut seen = std::collections::HashSet::new();
+        for dir in search_path {
+            let path = dir.join("config.toml");
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(cfg) = toml::from_str::<OxConfig>(&content) else {
+                continue;
+            };
+            for name in cfg.watchers {
+                if seen.insert(name.clone()) {
+                    watchers.push(name);
+                }
+            }
+        }
+    }
+
     OxConfig {
         triggers: trigger_paths,
         heartbeat_grace: first_heartbeat.unwrap_or(DEFAULT_HEARTBEAT_GRACE),
+        watchers,
     }
 }
 
@@ -369,6 +399,95 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    // ── watchers (slice 4 of event-sources migration) ─────────────
+
+    #[test]
+    fn load_config_parses_watchers_from_config_toml() {
+        let dir = tmp_base("watchers-parse");
+        fs::write(
+            dir.join("config.toml"),
+            r#"
+            triggers = []
+            watchers = ["cx"]
+            "#,
+        )
+        .unwrap();
+
+        let cfg = load_config(&[dir.clone()]);
+        assert_eq!(cfg.watchers, vec!["cx".to_string()]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_config_merges_watchers_additively_across_search_path() {
+        let a = tmp_base("watchers-a");
+        let b = tmp_base("watchers-b");
+        fs::write(
+            a.join("config.toml"),
+            r#"
+            triggers = []
+            watchers = ["cx"]
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            b.join("config.toml"),
+            r#"
+            triggers = []
+            watchers = ["linear", "github"]
+            "#,
+        )
+        .unwrap();
+
+        let cfg = load_config(&[a.clone(), b.clone()]);
+        assert_eq!(
+            cfg.watchers,
+            vec!["cx".to_string(), "linear".to_string(), "github".to_string()]
+        );
+        fs::remove_dir_all(&a).ok();
+        fs::remove_dir_all(&b).ok();
+    }
+
+    /// A project that declares the same watcher in both its local
+    /// config.toml and the embedded defaults must only spawn ONE
+    /// watcher process. De-dup is first-wins, so the repo-local
+    /// ordering is preserved.
+    #[test]
+    fn load_config_dedups_watchers_declared_in_two_layers() {
+        let a = tmp_base("watchers-dedup-a");
+        let b = tmp_base("watchers-dedup-b");
+        fs::write(
+            a.join("config.toml"),
+            r#"
+            triggers = []
+            watchers = ["cx"]
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            b.join("config.toml"),
+            r#"
+            triggers = []
+            watchers = ["cx"]
+            "#,
+        )
+        .unwrap();
+
+        let cfg = load_config(&[a.clone(), b.clone()]);
+        assert_eq!(cfg.watchers, vec!["cx".to_string()]);
+        fs::remove_dir_all(&a).ok();
+        fs::remove_dir_all(&b).ok();
+    }
+
+    #[test]
+    fn load_config_watchers_defaults_to_empty() {
+        let dir = tmp_base("watchers-empty");
+        fs::write(dir.join("config.toml"), "triggers = []\n").unwrap();
+        let cfg = load_config(&[dir.clone()]);
+        assert!(cfg.watchers.is_empty());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

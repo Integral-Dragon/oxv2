@@ -95,11 +95,27 @@ pub fn is_running(_pid: u32) -> bool {
 /// `bin_dir` read-only mount seguro shares into each runner VM — but we
 /// still verify their presence up front so the user gets a clean error
 /// instead of a cryptic runner-VM failure later.
+///
+/// Watcher binaries are NOT pre-resolved at this point. They're looked
+/// up lazily by name via [`Binaries::watcher`] once the hot config's
+/// `watchers` list is known — a project that omits cx from its config
+/// shouldn't need `ox-cx-watcher` on disk.
 #[derive(Debug, Clone)]
 pub struct Binaries {
     pub ox_server: PathBuf,
     pub ox_herder: PathBuf,
     pub bin_dir: PathBuf,
+}
+
+impl Binaries {
+    /// Resolve a watcher binary by name. A configured watcher called
+    /// `cx` must be available as `ox-cx-watcher` in the same directory
+    /// as `ox-server`. Returns an error if the binary is missing so
+    /// `ox-ctl up` fails loudly at startup instead of later at spawn
+    /// time.
+    pub fn watcher(&self, _name: &str) -> Result<PathBuf> {
+        unimplemented!("slice 4: Binaries::watcher")
+    }
 }
 
 /// Resolve the sibling binaries relative to a given `bin_dir`. Returns an
@@ -661,6 +677,48 @@ mod tests {
         // ox-rt deliberately missing
         let err = resolve_binaries_in(&dir).unwrap_err();
         assert!(err.to_string().contains("ox-rt"), "got: {err}");
+    }
+
+    // ── Binaries::watcher (slice 4) ──────────────────────────────
+
+    fn fake_binaries(dir: &Path) -> Binaries {
+        Binaries {
+            ox_server: dir.join("ox-server"),
+            ox_herder: dir.join("ox-herder"),
+            bin_dir: dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn watcher_lookup_returns_sibling_path() {
+        let dir = tmp("watcher-lookup");
+        std::fs::write(dir.join("ox-cx-watcher"), b"#!/bin/sh\n").unwrap();
+        let bins = fake_binaries(&dir);
+        let path = bins.watcher("cx").expect("cx resolves");
+        assert_eq!(path, dir.join("ox-cx-watcher"));
+    }
+
+    #[test]
+    fn watcher_lookup_errors_when_missing() {
+        let dir = tmp("watcher-missing");
+        // no ox-linear-watcher in the dir
+        let bins = fake_binaries(&dir);
+        let err = bins.watcher("linear").unwrap_err().to_string();
+        assert!(
+            err.contains("ox-linear-watcher"),
+            "expected error to name the missing binary, got: {err}"
+        );
+    }
+
+    #[test]
+    fn watcher_lookup_resolves_multi_character_names() {
+        let dir = tmp("watcher-multi");
+        std::fs::write(dir.join("ox-github-watcher"), b"").unwrap();
+        let bins = fake_binaries(&dir);
+        assert_eq!(
+            bins.watcher("github").unwrap(),
+            dir.join("ox-github-watcher")
+        );
     }
 
     // ── Seguro argv ─────────────────────────────────────────────────
