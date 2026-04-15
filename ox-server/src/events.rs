@@ -202,22 +202,200 @@ impl EventBus {
 
     /// Read a single watcher's cursor row. Returns `None` if the
     /// watcher has never posted a batch — the first-boot cold start.
-    pub fn get_watcher_cursor(&self, _source: &str) -> Result<Option<WatcherCursor>> {
-        unimplemented!("slice 1: get_watcher_cursor")
+    pub fn get_watcher_cursor(&self, source: &str) -> Result<Option<WatcherCursor>> {
+        let conn = self.conn.lock().unwrap();
+        read_watcher_cursor(&conn, source)
     }
 
     /// List all known watcher cursors. Used by `GET /api/watchers`.
     pub fn list_watcher_cursors(&self) -> Result<Vec<WatcherCursor>> {
-        unimplemented!("slice 1: list_watcher_cursors")
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT source, cursor, updated_at, updated_seq, last_error
+                 FROM watcher_cursors ORDER BY source ASC",
+            )
+            .context("preparing watcher_cursors list query")?;
+        let rows = stmt
+            .query_map([], row_to_watcher_cursor)
+            .context("querying watcher_cursors")?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("reading watcher_cursors row")?);
+        }
+        Ok(out)
     }
 
     /// Ingest a batch of source events from a watcher. One SQLite
     /// transaction: CAS the cursor, dedup via `ingest_idempotency`,
     /// append `EventType::Source` rows, update `watcher_cursors`.
     /// Projections and SSE broadcast happen after commit.
-    pub fn ingest_batch(&self, _batch: IngestBatch) -> Result<IngestResult, IngestError> {
-        unimplemented!("slice 1: ingest_batch")
+    pub fn ingest_batch(&self, batch: IngestBatch) -> Result<IngestResult, IngestError> {
+        let IngestBatch {
+            source,
+            cursor_before,
+            cursor_after,
+            events,
+        } = batch;
+
+        let mut conn = self.conn.lock().unwrap();
+        let mut next_seq = self.next_seq.lock().unwrap();
+
+        // CAS: compare stored cursor against cursor_before.
+        let existing = read_watcher_cursor(&conn, &source).map_err(IngestError::Storage)?;
+        let stored_cursor = existing.as_ref().and_then(|r| r.cursor.clone());
+        if stored_cursor != cursor_before {
+            // Best-effort: record the failure reason on the row so
+            // operators can see why a watcher is stuck. Any DB error
+            // here is swallowed — the caller still sees CursorConflict.
+            let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let last_error = format!(
+                "cas: expected {:?}, stored {:?}",
+                cursor_before, stored_cursor
+            );
+            let _ = conn.execute(
+                "INSERT INTO watcher_cursors (source, cursor, updated_at, updated_seq, last_error)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(source) DO UPDATE SET
+                   updated_at = excluded.updated_at,
+                   last_error = excluded.last_error",
+                rusqlite::params![&source, &stored_cursor, &ts, None::<i64>, &last_error],
+            );
+            return Err(IngestError::CursorConflict {
+                expected: cursor_before,
+                actual: stored_cursor,
+            });
+        }
+
+        // Begin the atomic write: idempotency inserts, event appends,
+        // cursor upsert — all or nothing.
+        let tx = conn
+            .transaction()
+            .context("starting ingest transaction")
+            .map_err(IngestError::Storage)?;
+
+        let mut appended_envelopes: Vec<EventEnvelope> = Vec::with_capacity(events.len());
+        let mut deduped: u32 = 0;
+        let mut last_appended_seq: Option<u64> = existing.as_ref().and_then(|r| r.updated_seq);
+        let ts = Utc::now();
+        let ts_str = ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        for event in events {
+            // `INSERT OR IGNORE` implements silent per-event dedup.
+            let seq = *next_seq;
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO ingest_idempotency
+                     (source, idempotency_key, first_seen_seq, first_seen_ts)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![&source, &event.idempotency_key, seq, &ts_str],
+                )
+                .context("insert ingest_idempotency")
+                .map_err(IngestError::Storage)?;
+            if inserted == 0 {
+                deduped += 1;
+                continue;
+            }
+
+            let data_value = serde_json::to_value(&event)
+                .context("serializing SourceEventData")
+                .map_err(IngestError::Storage)?;
+            let data_str = serde_json::to_string(&data_value)
+                .context("encoding SourceEventData json")
+                .map_err(IngestError::Storage)?;
+
+            tx.execute(
+                "INSERT INTO events (seq, ts, event_type, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![seq, &ts_str, "source", &data_str],
+            )
+            .context("appending source event")
+            .map_err(IngestError::Storage)?;
+
+            *next_seq = seq + 1;
+            last_appended_seq = Some(seq);
+
+            appended_envelopes.push(EventEnvelope {
+                seq: Seq(seq),
+                ts,
+                event_type: EventType::Source,
+                data: data_value,
+            });
+        }
+
+        // Upsert watcher_cursors with the new cursor, clearing last_error.
+        tx.execute(
+            "INSERT INTO watcher_cursors
+             (source, cursor, updated_at, updated_seq, last_error)
+             VALUES (?1, ?2, ?3, ?4, NULL)
+             ON CONFLICT(source) DO UPDATE SET
+               cursor      = excluded.cursor,
+               updated_at  = excluded.updated_at,
+               updated_seq = excluded.updated_seq,
+               last_error  = NULL",
+            rusqlite::params![
+                &source,
+                &cursor_after,
+                &ts_str,
+                last_appended_seq.map(|s| s as i64),
+            ],
+        )
+        .context("upserting watcher_cursors")
+        .map_err(IngestError::Storage)?;
+
+        tx.commit()
+            .context("committing ingest transaction")
+            .map_err(IngestError::Storage)?;
+
+        // After commit: apply projections and broadcast SSE. Subscribers
+        // never observe events that later roll back.
+        drop(conn);
+        drop(next_seq);
+        for envelope in &appended_envelopes {
+            self.projections.apply(envelope);
+            let _ = self.tx.send(envelope.redacted_for_sse());
+        }
+
+        Ok(IngestResult {
+            appended: appended_envelopes.len() as u32,
+            deduped,
+        })
     }
+}
+
+fn read_watcher_cursor(conn: &Connection, source: &str) -> Result<Option<WatcherCursor>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT source, cursor, updated_at, updated_seq, last_error
+             FROM watcher_cursors WHERE source = ?1",
+        )
+        .context("preparing watcher_cursors query")?;
+    let mut rows = stmt
+        .query_map(rusqlite::params![source], row_to_watcher_cursor)
+        .context("querying watcher_cursors")?;
+    match rows.next() {
+        Some(row) => Ok(Some(row.context("reading watcher_cursors row")?)),
+        None => Ok(None),
+    }
+}
+
+fn row_to_watcher_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<WatcherCursor> {
+    let source: String = row.get(0)?;
+    let cursor: Option<String> = row.get(1)?;
+    let updated_at_str: String = row.get(2)?;
+    let updated_seq: Option<i64> = row.get(3)?;
+    let last_error: Option<String> = row.get(4)?;
+    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+    Ok(WatcherCursor {
+        source,
+        cursor,
+        updated_at,
+        updated_seq: updated_seq.map(|n| n as u64),
+        last_error,
+    })
 }
 
 #[cfg(test)]

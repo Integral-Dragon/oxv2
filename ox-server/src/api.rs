@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use crate::AppState;
 use crate::artifacts;
 use crate::cx;
+use crate::events::{IngestBatch, IngestError, WatcherCursor};
 use crate::merge;
 use crate::pool;
 use crate::projections;
@@ -53,6 +54,10 @@ pub fn router() -> Router<AppState> {
         // Config
         .route("/api/config/reload", post(reload_config))
         .route("/api/config/check", post(check_config))
+        // Watchers (source event ingest)
+        .route("/api/watchers", get(list_watchers))
+        .route("/api/watchers/{source}/cursor", get(get_watcher_cursor))
+        .route("/api/events/ingest", post(ingest_batch))
         // Triggers
         .route("/api/triggers/evaluate", post(evaluate_triggers))
         .route("/api/triggers/failed", post(post_trigger_failed))
@@ -1593,5 +1598,117 @@ async fn check_config(
             "valid": false,
             "errors": [e.to_string()]
         }))),
+    }
+}
+
+// ── Watchers (source event ingest) ─────────────────────────────────
+
+#[derive(Serialize)]
+struct WatcherCursorRow {
+    source: String,
+    cursor: Option<String>,
+    updated_at: String,
+    updated_seq: Option<u64>,
+    last_error: Option<String>,
+}
+
+impl From<WatcherCursor> for WatcherCursorRow {
+    fn from(c: WatcherCursor) -> Self {
+        Self {
+            source: c.source,
+            cursor: c.cursor,
+            updated_at: c
+                .updated_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            updated_seq: c.updated_seq,
+            last_error: c.last_error,
+        }
+    }
+}
+
+async fn list_watchers(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<WatcherCursorRow>>, (StatusCode, Json<serde_json::Value>)> {
+    match state.bus.list_watcher_cursors() {
+        Ok(rows) => Ok(Json(rows.into_iter().map(WatcherCursorRow::from).collect())),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+#[derive(Serialize)]
+struct CursorResponse {
+    cursor: Option<String>,
+    updated_at: Option<String>,
+}
+
+async fn get_watcher_cursor(
+    State(state): State<AppState>,
+    Path(source): Path<String>,
+) -> Result<Json<CursorResponse>, (StatusCode, Json<serde_json::Value>)> {
+    match state.bus.get_watcher_cursor(&source) {
+        Ok(Some(row)) => Ok(Json(CursorResponse {
+            cursor: row.cursor,
+            updated_at: Some(
+                row.updated_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+        })),
+        Ok(None) => Ok(Json(CursorResponse {
+            cursor: None,
+            updated_at: None,
+        })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+struct IngestBatchRequest {
+    source: String,
+    #[serde(default)]
+    cursor_before: Option<String>,
+    cursor_after: String,
+    #[serde(default)]
+    events: Vec<SourceEventData>,
+}
+
+#[derive(Serialize)]
+struct IngestBatchResponse {
+    appended: u32,
+    deduped: u32,
+}
+
+async fn ingest_batch(
+    State(state): State<AppState>,
+    Json(req): Json<IngestBatchRequest>,
+) -> Result<Json<IngestBatchResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let batch = IngestBatch {
+        source: req.source,
+        cursor_before: req.cursor_before,
+        cursor_after: req.cursor_after,
+        events: req.events,
+    };
+    match state.bus.ingest_batch(batch) {
+        Ok(result) => Ok(Json(IngestBatchResponse {
+            appended: result.appended,
+            deduped: result.deduped,
+        })),
+        Err(IngestError::CursorConflict { expected, actual }) => Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "cursor_before mismatch",
+                "expected": expected,
+                "actual": actual,
+            })),
+        )),
+        Err(IngestError::Storage(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )),
     }
 }
