@@ -1,14 +1,14 @@
 {
   "id": "q2dh",
   "title": "Slice 4: switchover — ox-ctl launches watcher, cx poller disabled",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "claude",
   "created_at": "2026-04-15T17:09:26.962140613Z",
-  "updated_at": "2026-04-15T20:20:16.503203982Z",
+  "updated_at": "2026-04-15T20:31:02.780909990Z",
   "parent": "5H3N",
   "meta": {
-    "_reason": "starting slice 4: ox-ctl up launches watcher, cx_poll_loop disabled"
+    "_reason": "slice 4 done: cx_poll_loop dormant, ox-ctl up launches ox-cx-watcher, triggers.toml flipped to source/kind syntax, cmd_status renders watchers section. 202 tests green. End-to-end exercise is manual until ox-ctl up is run against a real repo."
   },
   "edges": [
     {
