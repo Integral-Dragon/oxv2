@@ -934,8 +934,8 @@ impl<C: OxClientApi> Herder<C> {
                 subject_id: event.subject_id.clone(),
             };
 
-            // Dedup — same rule as the legacy cx path: herder blocks
-            // on running OR escalated.
+            // Dedup — herder blocks on running OR escalated
+            // executions for the same (origin, workflow) pair.
             let existing: Vec<_> = self
                 .executions
                 .values()
@@ -1015,8 +1015,10 @@ impl<C: OxClientApi> Herder<C> {
                 Ok(exec_id) => {
                     tracing::info!(exec = %exec_id, "execution created from source event");
 
-                    // Optimistic local insert for dedup — same pattern
-                    // as the legacy cx path.
+                    // Optimistic local insert for dedup: a second
+                    // event arriving before the SSE round-trip carrying
+                    // execution.created back must see this execution in
+                    // `self.executions` and skip the matcher.
                     self.executions.insert(
                         exec_id.0.clone(),
                         ExecutionView {
@@ -1266,8 +1268,7 @@ mod tests {
 
     /// Dedup: a second source event with the same
     /// `(source, kind, subject_id)` tuple while the first execution is
-    /// still live must NOT fire a second execution. Mirrors the
-    /// existing CxNode origin dedup rule.
+    /// still live must NOT fire a second execution.
     #[tokio::test]
     async fn source_event_skipped_when_origin_already_active() {
         let mut h = herder_with_source_trigger(MockClient::new());

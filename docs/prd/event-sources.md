@@ -1,34 +1,37 @@
 # Event Sources (Watcher Plugins)
 
-> **Status:** Proposal. Not implemented. The current ox-server has a
-> cx-specific poller (`ox-server/src/cx.rs` + `cx_poll_loop` in
-> `main.rs`) baked in. This document describes the plan to decouple it.
+> **Status:** Implemented. ox-server has no source-specific code;
+> `ox-cx-watcher` is the reference watcher plugin that posts cx
+> state changes to `/api/events/ingest`. This document stays in the
+> tree as the design of record for the watcher boundary; the
+> migration-plan sections below are kept as history of how the
+> refactor landed.
 
 ## Problem
 
-Today ox-server is hardcoded to one external system: **complex** (cx).
-A `cx_poll_loop` runs inside ox-server, shells out to `cx log` every
-10 seconds, parses the output, and appends cx-specific event types
+ox-server had one hardcoded ingestion path: **complex** (cx). A
+`cx_poll_loop` ran inside ox-server, shelled out to `cx log` every
+10 seconds, parsed the output, and appended cx-specific event types
 (`CxTaskReady`, `CxTaskClaimed`, `CxTaskIntegrated`, `CxCommentAdded`)
-to the event bus. Triggers match on these event types to fire
+to the event bus. Triggers matched on these event types to fire
 workflows.
 
-This couples ox-server to cx. To run ox against a Linear project, a
-GitHub repo's issues, Jira, or any other work tracker, ox-server would
-need a second hardcoded poller — and a third, and a fourth. Every new
-source is a change to ox-server itself.
+This coupled ox-server to cx. Running ox against a Linear project, a
+GitHub repo's issues, Jira, or any other work tracker would have
+required a second hardcoded poller — and a third, and a fourth. Every
+new source was a change to ox-server itself.
 
-The engine is otherwise source-agnostic: runner dispatch, pool
-management, retries, reviews, merges, artifacts, metrics — none of it
-cares where the triggering event came from. Only the ingestion path is
-coupled.
+The engine below the ingestion point is source-agnostic: runner
+dispatch, pool management, retries, reviews, merges, artifacts,
+metrics — none of it cares where the triggering event came from. Only
+the ingestion path was coupled.
 
-There is no generic "task" object in Ox. An external event may be about
-a cx node, a GitHub issue, a Linear ticket, a timer tick, or a webhook
-payload. Ox treats that event as a possible trigger for a workflow
-execution. After the execution starts, the workflow branch, step
-artifacts, logs, commits, and side effects are the shared state between
-steps.
+There is no generic "task" object in Ox. An external event may be
+about a cx node, a GitHub issue, a Linear ticket, a timer tick, or a
+webhook payload. Ox treats that event as a possible trigger for a
+workflow execution. After the execution starts, the workflow branch,
+step artifacts, logs, commits, and side effects are the shared state
+between steps.
 
 ## Goal
 

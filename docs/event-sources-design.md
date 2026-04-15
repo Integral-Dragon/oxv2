@@ -1,10 +1,17 @@
 # Event Sources — Implementation Design
 
+> **Status:** Implemented across five vertical slices, each shipped as
+> its own red/green commit pair. This document is the design of record
+> for the watcher boundary; it also preserves the pre-migration
+> "baseline" section as historical context for why the refactor was
+> structured the way it was. See the commit history for the code
+> that actually landed.
+
 Companion to [prd/event-sources.md](prd/event-sources.md). The PRD
 states the problem and the target shape (watchers push, server ingests,
-server stays source-agnostic). This document describes how that change
-lands in the current tree: the data shapes, the module edits, the new
-crate, the HTTP surface, and the order of operations.
+server stays source-agnostic). This document describes how the change
+lands in the tree: the data shapes, the module edits, the new crate,
+the HTTP surface, and the order of operations.
 
 Scope is **ingestion only**. Runner-side mutation (the ox-runner VM
 shelling out to `cx`) is out of scope and has its own follow-up PRD.
@@ -17,32 +24,35 @@ that, the execution's branch and artifacts are how steps share state.
 
 ---
 
-## Current shape (baseline)
+## Baseline (historical — pre-migration)
 
-The tree today has one hardcoded source:
+> The tree **had** one hardcoded source before this migration landed.
+> Kept for context on what the refactor replaced.
 
-- `ox-server/src/cx.rs` — shells to `cx log --json --since <sha>`,
-  derives events, implements at-least-once semantics.
-- `ox-server/src/main.rs:165` — `cx_poll_loop()`, spawned at server
-  startup, 10s interval, reads/writes `CX_CURSOR_KEY = "cx_log_cursor"`
-  in the server KV table.
-- `ox-core/src/events.rs:17` — `EventType::Cx{TaskReady, TaskClaimed,
+- `ox-server/src/cx.rs` — shelled to `cx log --json --since <sha>`,
+  derived events, implemented at-least-once semantics. **Deleted.**
+- `ox-server/src/main.rs` — `cx_poll_loop()`, spawned at server
+  startup, 10s interval, read/wrote `CX_CURSOR_KEY = "cx_log_cursor"`
+  in the server KV table. **Deleted.**
+- `ox-core/src/events.rs` — `EventType::Cx{TaskReady, TaskClaimed,
   TaskIntegrated, TaskShadowed, CommentAdded, PhaseComplete}`, each
-  with its own `*Data` struct.
-- `ox-core/src/workflow.rs:203` — `TriggerDef { on, tag, state,
-  workflow, vars }`; `on` is a dotted event-type string like
-  `"cx.task_ready"`.
-- `ox-herder/src/herder.rs:941` —
-  `evaluate_triggers_for_node_with_state()`: matches on `trigger.on ==
-  event_type`, then `tag`, then dedup/state.
-- `ox-ctl/src/up.rs:243` — spawns `ox-server`, `ox-herder`, and
-  seguro-wrapped `ox-runner` instances via `spawn_detached()`.
-- `ox-core/src/config.rs:234` — `OxConfig { triggers, heartbeat_grace
-  }`; no concept of watchers.
+  with its own `*Data` struct. **Deleted.**
+- `ox-core/src/workflow.rs` — `TriggerDef { on, tag, state, workflow,
+  vars }`; `on` was a dotted event-type string like `"cx.task_ready"`.
+  **`source: Option<String>`** field added; triggers now fire on
+  `on = "node.ready"` / `source = "cx"`.
+- `ox-herder/src/herder.rs` — `evaluate_triggers_for_node_with_state()`:
+  matched on `trigger.on == event_type`, then `tag`, then dedup/state.
+  **Replaced** by `evaluate_triggers_for_source_event()`.
+- `ox-ctl/src/up.rs` — spawned `ox-server`, `ox-herder`, and
+  seguro-wrapped `ox-runner` instances. **Now** also spawns configured
+  watchers from `.ox/config.toml`'s `watchers = [...]` list.
+- `ox-core/src/config.rs` — `OxConfig { triggers, heartbeat_grace }`.
+  **Gained** a `watchers: Vec<String>` field.
 
 The engine below the ingestion point (dispatch, pools, retries,
-reviews, merges, artifacts, metrics) is already source-agnostic.
-Everything we change lives above the event-bus append call.
+reviews, merges, artifacts, metrics) was already source-agnostic.
+Every change landed above the event-bus append call.
 
 ---
 

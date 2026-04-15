@@ -240,6 +240,12 @@ impl EventBus {
 
         let mut conn = self.conn.lock().unwrap();
         let mut next_seq = self.next_seq.lock().unwrap();
+        // Local candidate — the in-memory counter in `*next_seq` only
+        // advances after `tx.commit()` succeeds below. If any write in
+        // the transaction fails and SQLite rolls back, the counter
+        // stays where it was, so retries don't create gaps in the
+        // event log (db.rs: "guarantees no gaps").
+        let mut next_seq_candidate: u64 = *next_seq;
 
         // CAS: compare stored cursor against cursor_before.
         let existing = read_watcher_cursor(&conn, &source).map_err(IngestError::Storage)?;
@@ -282,7 +288,7 @@ impl EventBus {
 
         for event in events {
             // `INSERT OR IGNORE` implements silent per-event dedup.
-            let seq = *next_seq;
+            let seq = next_seq_candidate;
             let inserted = tx
                 .execute(
                     "INSERT OR IGNORE INTO ingest_idempotency
@@ -311,7 +317,10 @@ impl EventBus {
             .context("appending source event")
             .map_err(IngestError::Storage)?;
 
-            *next_seq = seq + 1;
+            // Advance only the local candidate. The shared counter
+            // stays untouched until after commit — see the comment at
+            // the top of this method.
+            next_seq_candidate = seq + 1;
             last_appended_seq = Some(seq);
 
             appended_envelopes.push(EventEnvelope {
@@ -345,6 +354,11 @@ impl EventBus {
         tx.commit()
             .context("committing ingest transaction")
             .map_err(IngestError::Storage)?;
+
+        // Commit succeeded — publish the new counter value so future
+        // calls pick up from here. Any earlier failure would have left
+        // this untouched.
+        *next_seq = next_seq_candidate;
 
         // After commit: apply projections and broadcast SSE. Subscribers
         // never observe events that later roll back.
@@ -601,6 +615,43 @@ mod tests {
 
         let cursor = bus.get_watcher_cursor("cx").unwrap().unwrap();
         assert_eq!(cursor.cursor.as_deref(), Some("sha-abc"));
+    }
+
+    /// Invariant: after any successful ingest_batch, `current_seq()`
+    /// matches the highest seq that actually landed in the events
+    /// table. Catches regressions where the in-memory counter drifts
+    /// ahead of disk (e.g. if we bumped `next_seq` before tx.commit()
+    /// succeeded, a rolled-back write would leave the counter one
+    /// step ahead of reality and the next insert would create a gap).
+    #[test]
+    fn ingest_batch_keeps_current_seq_in_sync_with_disk() {
+        let bus = test_bus();
+
+        bus.ingest_batch(IngestBatch {
+            source: "cx".into(),
+            cursor_before: None,
+            cursor_after: "sha-1".into(),
+            events: vec![sample_event("k1")],
+        })
+        .unwrap();
+
+        bus.ingest_batch(IngestBatch {
+            source: "cx".into(),
+            cursor_before: Some("sha-1".into()),
+            cursor_after: "sha-2".into(),
+            events: vec![sample_event("k2"), sample_event("k3")],
+        })
+        .unwrap();
+
+        let max_seq: u64 = bus.with_conn(|conn| {
+            conn.query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))
+                .unwrap()
+        });
+        assert_eq!(
+            bus.current_seq(),
+            max_seq,
+            "in-memory counter must equal max(events.seq) after successful ingest"
+        );
     }
 
     #[test]

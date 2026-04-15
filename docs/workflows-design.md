@@ -64,23 +64,22 @@ any source's lifecycle — it matches what the watcher chose to ingest.
 
 A trigger is suppressed if there is already an active execution with
 the same `(origin, workflow)` pair, where `origin` is typed
-(`ExecutionOrigin::Source | CxNode | Execution | Manual`) and compared
+(`ExecutionOrigin::Source | Execution | Manual`) and compared
 structurally. For source events the dedup key is
 `(source, kind, subject_id)` — the same subject firing the same kind
 of event will not double-start a workflow while one is already live.
 
-Two liveness rules share a predicate (`is_origin_active`) with
-different `is_active` callbacks:
+The herder's `is_origin_active` predicate uses the running-or-escalated
+liveness rule:
 
-- **API path** (`/api/triggers/evaluate`, `ox-ctl trigger`): blocks
-  only on `running`. Explicit re-trigger is allowed once a prior run
-  has completed.
 - **Herder auto-evaluation**: blocks on `running | escalated`. The
   herder will not auto-retry an escalated execution — that is a
   human-in-the-loop decision.
 
-The `--force` flag on `ox-ctl trigger` bypasses dedup. This is used
-for manual re-runs after intervention.
+Manual re-runs after intervention are done by mutating the source
+system (re-tagging a cx node, adding a Linear comment) or by posting
+a synthetic event directly to `/api/events/ingest`. There is no
+dedicated `ox-ctl trigger` command post-slice-5.
 
 Dedup state is derived from the executions projection — no separate
 tracking needed.
@@ -373,82 +372,25 @@ already squashed (1 commit ahead), fast-forward preserves it as-is.
 On conflict in any path, the merge is aborted and the step fails.
 The repo is always left clean on main.
 
-### Post-Merge: cx Event Derivation
+### Post-Merge: Source Side Effects
 
-After a successful merge, ox-server diffs `.complex/` between the
-previous and new main HEAD:
+After a successful merge, ox-server emits `git.merged` and returns.
+It does **not** diff `.complex/` or derive any source-specific
+events itself — that is a watcher's job.
 
-```rust
-fn derive_cx_events(repo: &Repository, prev: Oid, new: Oid) -> Vec<CxEvent> {
-    let prev_tree = repo.find_commit(prev).unwrap().tree().unwrap();
-    let new_tree = repo.find_commit(new).unwrap().tree().unwrap();
+Each source watcher observes its own surface independently. When a
+merge to main changes `.complex/`, `ox-cx-watcher` sees the new
+commits on its next tick, runs `cx log --since <cursor>` and
+`cx show` for each touched node, maps them into
+`EventType::Source` envelopes, and posts them to
+`/api/events/ingest`. A Linear or GitHub watcher would do the same
+through its own API.
 
-    let diff = repo.diff_tree_to_tree(
-        Some(&prev_tree),
-        Some(&new_tree),
-        Some(DiffOptions::new().pathspec(".complex/nodes/")),
-    ).unwrap();
-
-    let mut events = vec![];
-
-    for delta in diff.deltas() {
-        let path = delta.new_file().path().unwrap();
-        let node_id = extract_node_id(path);
-
-        match delta.status() {
-            Delta::Added => {
-                let node = parse_node(repo, delta.new_file());
-                events.push(derive_creation_event(node_id, &node));
-            }
-            Delta::Modified => {
-                let old_node = parse_node(repo, delta.old_file());
-                let new_node = parse_node(repo, delta.new_file());
-                events.extend(derive_modification_events(node_id, &old_node, &new_node));
-            }
-            _ => {}
-        }
-    }
-
-    events
-}
-
-fn derive_modification_events(id: &str, old: &CxNode, new: &CxNode) -> Vec<CxEvent> {
-    let mut events = vec![];
-
-    // State transition
-    if old.state != new.state {
-        match new.state.as_str() {
-            "ready" => events.push(CxEvent::TaskReady {
-                node_id: id.to_string(),
-                tags: new.tags.clone(),
-            }),
-            "claimed" => events.push(CxEvent::TaskClaimed {
-                node_id: id.to_string(),
-            }),
-            "integrated" => events.push(CxEvent::TaskIntegrated {
-                node_id: id.to_string(),
-            }),
-            _ => {}
-        }
-    }
-
-    // New comments
-    let old_comment_count = old.comments.len();
-    for comment in &new.comments[old_comment_count..] {
-        events.push(CxEvent::CommentAdded {
-            node_id: id.to_string(),
-            tag: comment.tag.clone(),
-            author: comment.author.clone(),
-        });
-    }
-
-    events
-}
-```
-
-These derived cx events are appended to the ox event log immediately
-after the `git.merged` event. They trigger further workflow actions
-(e.g. `cx.task_integrated` may trigger a phase completion check).
+The result is that there is exactly one code path for source events
+— the watcher ingest path — regardless of whether the change came
+from a step in the workflow, a merge operation, or a human editing
+files directly. See [prd/cx.md](prd/cx.md) and
+[prd/event-sources.md](prd/event-sources.md).
 
 ---
 
