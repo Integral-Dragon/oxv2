@@ -55,8 +55,6 @@ pub struct SourceEventData {
     pub kind: String,
     pub subject_id: String,
     pub idempotency_key: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
 }
@@ -70,7 +68,6 @@ Field semantics:
 | `kind` | Source-authored event kind, such as `node.ready`, `issue.labeled`, or `schedule.tick` |
 | `subject_id` | Source-native correlation key for what the event is about |
 | `idempotency_key` | Source-authored dedup key, unique within `(source, idempotency_key)` |
-| `tags` | Routing labels used by triggers |
 | `data` | Free-form source payload available to trigger var templates |
 
 Kinds are source-authored strings, not a closed Ox enum. Ox does not
@@ -90,7 +87,6 @@ pub enum EventContext {
         source: String,
         kind: String,
         subject_id: String,
-        tags: Vec<String>,
         data: serde_json::Value,
     },
 }
@@ -103,7 +99,6 @@ Resolvable paths:
 | `{event.source}` | Watcher namespace |
 | `{event.kind}` | Source-authored event kind |
 | `{event.subject_id}` | Source-native subject id |
-| `{event.tags}` | Comma-joined event tags |
 | `{event.data.<path>}` | Dotted walk through the source payload |
 
 Leaf JSON strings, numbers, and booleans resolve to strings.
@@ -115,14 +110,16 @@ produce a `trigger.failed` event.
 ## Trigger Syntax
 
 Triggers match source events by event kind, optional source filter, and
-optional tag filter:
+generic predicates over event fields:
 
 ```toml
 [[trigger]]
 on       = "node.ready"
 source   = "cx"
-tag      = "workflow:code-task"
 workflow = "code-task"
+
+[trigger.where]
+"data.tags" = { contains = "workflow:code-task" }
 
 [trigger.vars]
 branch = "cx-{event.subject_id}"
@@ -131,8 +128,9 @@ title = "{event.data.title}"
 ```
 
 `source` is optional. Omitting it lets one trigger match the same kind
-from multiple watchers. `tag` is optional. When present, the tag must
-appear in `SourceEventData.tags`.
+from multiple watchers. `[trigger.where]` is optional. Keys are event
+paths without the `event.` prefix; values are exact scalar matches or
+`{ contains = "..." }` predicates for arrays and strings.
 
 ---
 
@@ -236,10 +234,10 @@ Request:
       "kind": "node.ready",
       "subject_id": "Q6cY",
       "idempotency_key": "Q6cY:node.ready:e0f42b7",
-      "tags": ["workflow:code-task"],
       "data": {
         "node_id": "Q6cY",
         "state": "ready",
+        "tags": ["workflow:code-task"],
         "title": "Implement watcher ingest"
       }
     }
@@ -310,9 +308,9 @@ if let Some(ref want_source) = trigger.source
 {
     continue;
 }
-if let Some(ref tag_pattern) = trigger.tag
-    && !event.tags.iter().any(|t| t == tag_pattern)
-{
+
+let ctx = EventContext::Source { source, kind, subject_id, data };
+if !trigger.matches_where(&ctx) {
     continue;
 }
 ```
@@ -392,9 +390,9 @@ Mapping:
 | integrated node | `source = "cx", kind = "node.done"` |
 | added comment | `source = "cx", kind = "comment.added"` |
 
-Node events carry node tags at the event level and a node snapshot in
-`data`. Comment events carry the comment tag in `tags` and comment
-metadata in `data`.
+Node events carry node tags inside `data.tags` with the node snapshot.
+Comment events carry the comment tag inside `data.tag` with comment
+metadata.
 
 ---
 

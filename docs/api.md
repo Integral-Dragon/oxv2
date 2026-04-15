@@ -569,11 +569,11 @@ Request:
       "kind": "node.ready",
       "subject_id": "Q6cY",
       "idempotency_key": "Q6cY:node.ready:a1b2c3d",
-      "tags": ["workflow:code-task"],
       "data": {
         "title": "ccstat models — model-mix breakdown over time",
         "node_id": "Q6cY",
-        "state": "ready"
+        "state": "ready",
+        "tags": ["workflow:code-task"]
       }
     }
   ]
@@ -589,8 +589,7 @@ Request:
 | `events[].kind`            | yes      | Source-native event kind (e.g. `node.ready`, `issue.labeled`)          |
 | `events[].subject_id`      | yes      | Source-native correlation key                                          |
 | `events[].idempotency_key` | yes      | Dedup key; duplicates are dropped silently                             |
-| `events[].tags`            | no       | Routing labels for trigger matching                                    |
-| `events[].data`            | no       | Free-form payload, available to trigger var templates                  |
+| `events[].data`            | no       | Free-form payload, available to trigger matching and var templates     |
 
 \* `cursor_before` is `null` on the very first call for a new source.
 

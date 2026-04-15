@@ -244,7 +244,6 @@ mod tests {
             kind: "node.ready".into(),
             subject_id: "Q6cY".into(),
             idempotency_key: key.into(),
-            tags: vec![],
             data: serde_json::json!({}),
         }
     }

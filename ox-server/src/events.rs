@@ -543,8 +543,11 @@ mod tests {
             kind: "node.ready".into(),
             subject_id: "Q6cY".into(),
             idempotency_key: key.into(),
-            tags: vec!["workflow:code-task".into()],
-            data: serde_json::json!({ "title": "test", "state": "ready" }),
+            data: serde_json::json!({
+                "title": "test",
+                "state": "ready",
+                "tags": ["workflow:code-task"]
+            }),
         }
     }
 

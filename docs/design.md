@@ -426,8 +426,7 @@ watcher process, runs a single SQLite transaction that:
 2. For each event, attempts `INSERT OR IGNORE INTO ingest_idempotency`.
    Duplicate keys silently drop the event.
 3. Appends non-duplicate events as `EventType::Source` rows with a
-   `SourceEventData` payload (`source`, `kind`, `subject_id`, `tags`,
-   `data`).
+   `SourceEventData` payload (`source`, `kind`, `subject_id`, `data`).
 4. Updates `watcher_cursors[source] = cursor_after` with fresh
    `updated_at` / `updated_seq` / cleared `last_error`.
 

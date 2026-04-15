@@ -1,0 +1,83 @@
+# cx surface workflow: after code-task integration, promote the next ready work.
+#
+# This is intentionally cx-specific. Ox still only sees source events,
+# workflows, steps, executions, agents, and artifacts; the cx board is
+# interpreted by this workflow's prompts and cx CLI calls.
+
+[workflow]
+name        = "cx-surface"
+description = "Inspect cx after a completed code-task and surface actionable follow-up work"
+persona     = "inspired/tech-lead"
+
+[workflow.vars]
+completed_task_id = { required = true, description = "cx node that just completed" }
+branch            = { required = true, description = "branch used for cx mutations" }
+
+[[step]]
+name   = "surface"
+output = "decision"
+prompt = """A code-task has just completed. Inspect the current cx graph and surface the next actionable work.
+
+Completed node: `{workflow.completed_task_id}`
+
+Rules:
+
+1. Read the completed node:
+   `cx show {workflow.completed_task_id}`
+2. Inspect the current graph:
+   ```
+   cx status
+   cx tree
+   cx list --json
+   cx therapy
+   ```
+3. Identify latent nodes that are now unblocked and ready for execution.
+   Prefer nodes that already carry a workflow tag such as `workflow:code-task`.
+   Do not invent work, do not rewrite specs, and do not touch integrated nodes.
+4. If there is actionable work, surface only those nodes:
+   ```
+   cx surface <id> [<id> ...] --reason "unblocked after {workflow.completed_task_id}"
+   git add .complex/
+   git commit -m "surface({workflow.completed_task_id}): next cx work"
+   git push origin {workflow.branch}
+   ox-rt done surface
+   ```
+5. If nothing should be surfaced, leave the tree unchanged and run:
+   `ox-rt done none`
+
+Do not comment on `{workflow.completed_task_id}`. Touching an integrated
+`workflow:code-task` node can emit another `node.done` event and retrigger
+this workflow.
+"""
+
+[step.workspace]
+git_clone = true
+branch    = "{branch}"
+push      = true
+
+[step.runtime.env]
+GIT_AUTHOR_NAME     = "{persona.name}"
+GIT_AUTHOR_EMAIL    = "{persona.name}@ox.local"
+GIT_COMMITTER_NAME  = "{persona.name}"
+GIT_COMMITTER_EMAIL = "{persona.name}@ox.local"
+
+[[step.transition]]
+match = "surface"
+goto  = "merge"
+
+[[step.transition]]
+match = "none"
+goto  = "complete"
+
+[[step.transition]]
+match = "*"
+goto  = "escalate"
+
+[[step]]
+name        = "merge"
+action      = "merge_to_main"
+squash      = true
+max_retries = 2
+
+[step.workspace]
+branch = "{branch}"

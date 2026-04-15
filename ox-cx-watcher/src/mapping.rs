@@ -2,7 +2,7 @@
 //!
 //! This is where the watcher's editorial decisions live: which cx
 //! states become source events, what the `kind` strings are, how the
-//! idempotency key is built, and which nodes are filtered out
+//! source payload is shaped, how the idempotency key is built, and which nodes are filtered out
 //! server-ward (shadowed / integrated spawners, etc.).
 //!
 //! Everything else in the watcher is plumbing — fetch state, POST
@@ -41,10 +41,7 @@ pub mod kinds {
 /// Non-`ready` shadowed states still emit — `node.claimed` /
 /// `node.done` are observational facts that downstream workflows may
 /// care about regardless of shadowing.
-pub fn snapshot_to_event(
-    snap: &CxNodeSnapshot,
-    cursor_hash: &str,
-) -> Option<SourceEventData> {
+pub fn snapshot_to_event(snap: &CxNodeSnapshot, cursor_hash: &str) -> Option<SourceEventData> {
     let kind = match snap.state.as_str() {
         "ready" => {
             if snap.shadowed {
@@ -72,7 +69,6 @@ pub fn snapshot_to_event(
         kind: kind.to_string(),
         subject_id: snap.node_id.clone(),
         idempotency_key,
-        tags: snap.tags.clone(),
         data,
     })
 }
@@ -86,7 +82,11 @@ pub fn comment_to_event(comment: &CxCommentEntry) -> SourceEventData {
     let author_slot = comment.author.as_deref().unwrap_or("-");
     let idempotency_key = format!(
         "{}:{}:{}:{}:{}",
-        comment.node_id, kinds::COMMENT_ADDED, author_slot, tag_slot, short
+        comment.node_id,
+        kinds::COMMENT_ADDED,
+        author_slot,
+        tag_slot,
+        short
     );
 
     let data = serde_json::json!({
@@ -96,22 +96,21 @@ pub fn comment_to_event(comment: &CxCommentEntry) -> SourceEventData {
         "hash": comment.hash,
     });
 
-    // Comments carry the tag as the event-level tag so triggers can
-    // match `workflow:review` etc. without reaching into `data`.
-    let tags = comment.tag.clone().into_iter().collect();
-
     SourceEventData {
         source: SOURCE.to_string(),
         kind: kinds::COMMENT_ADDED.to_string(),
         subject_id: comment.node_id.clone(),
         idempotency_key,
-        tags,
         data,
     }
 }
 
 fn short_sha(sha: &str) -> &str {
-    if sha.len() >= 12 { &sha[..12] } else { sha }
+    if sha.len() >= 12 {
+        &sha[..12]
+    } else {
+        sha
+    }
 }
 
 #[cfg(test)]
@@ -136,7 +135,7 @@ mod tests {
         assert_eq!(ev.source, "cx");
         assert_eq!(ev.kind, "node.ready");
         assert_eq!(ev.subject_id, "Q6cY");
-        assert_eq!(ev.tags, vec!["workflow:code-task".to_string()]);
+        assert_eq!(ev.data["tags"], serde_json::json!(["workflow:code-task"]));
         assert_eq!(ev.idempotency_key, "Q6cY:node.ready:a1b2c3d4e5f6");
         assert_eq!(ev.data["state"], "ready");
         assert_eq!(ev.data["node_id"], "Q6cY");
@@ -155,7 +154,7 @@ mod tests {
         let s = snap("Ygdt", "integrated", &[], false);
         let ev = snapshot_to_event(&s, "cafebabe99887766").expect("integrated → node.done");
         assert_eq!(ev.kind, "node.done");
-        assert!(ev.tags.is_empty());
+        assert_eq!(ev.data["tags"], serde_json::json!([]));
     }
 
     #[test]
@@ -215,9 +214,12 @@ mod tests {
         assert_eq!(ev.source, "cx");
         assert_eq!(ev.kind, "comment.added");
         assert_eq!(ev.subject_id, "Q6cY");
-        assert_eq!(ev.tags, vec!["review".to_string()]);
-        assert_eq!(ev.idempotency_key, "Q6cY:comment.added:alice:review:deadbeef1122");
+        assert_eq!(
+            ev.idempotency_key,
+            "Q6cY:comment.added:alice:review:deadbeef1122"
+        );
         assert_eq!(ev.data["author"], "alice");
+        assert_eq!(ev.data["tag"], "review");
     }
 
     #[test]
@@ -229,7 +231,6 @@ mod tests {
             hash: "feedfacefeedface".into(),
         };
         let ev = comment_to_event(&c);
-        assert!(ev.tags.is_empty());
         assert_eq!(ev.idempotency_key, "Q6cY:comment.added:-:-:feedfacefeed");
     }
 }

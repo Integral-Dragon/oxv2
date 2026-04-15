@@ -232,7 +232,8 @@ Search order (first match wins):
    to learn the format, but override by copying into `{repo}/.ox/`.
 
 The shipped defaults give you three runtimes (`claude`, `codex`,
-`shell`) and one workflow (`code-task`), which is enough to start.
+`shell`) and the cx-oriented workflows needed for the local loop:
+`code-task`, `cx-surface`, `consultation`, and `interactive`.
 
 ## ox-ctl
 
@@ -348,7 +349,8 @@ read_only = false
 
 Transitions match on the step's output string. Matches are checked in
 order; `*` is a catch-all. A prefix match uses `:` (e.g. `"fail:"`
-matches `"fail:lint"`).
+matches `"fail:lint"`). `goto = "complete"` ends the execution
+successfully; `goto = "escalate"` escalates it.
 
 ### triggers
 
@@ -367,9 +369,13 @@ heartbeat_grace = 60             # seconds
 ```toml
 # .ox/workflows/triggers.toml
 [[trigger]]
-on       = "cx.task_ready"       # event type to watch
-tag      = "workflow:code-task"  # optional tag filter
+on       = "node.ready"          # source event kind to watch
+source   = "cx"                  # optional source filter
 workflow = "code-task"           # workflow to execute
+[trigger.where]
+"data.tags" = { contains = "workflow:code-task" }
+[trigger.vars]
+task_id = "{event.subject_id}"
 ```
 
 Trigger files are additive across the search path. If no `config.toml`

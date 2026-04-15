@@ -259,7 +259,7 @@ pub struct SecretDeletedData {
 
 /// Payload for `EventType::Source` — a fact observed by a watcher
 /// plugin. The server stores the envelope verbatim; triggers match on
-/// `source`, `kind`, and `tags`, and can template `data.*` into vars.
+/// `source`, `kind`, and generic fields exposed through `data`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceEventData {
     /// Watcher identifier — `cx`, `linear`, `github`, `schedule`, etc.
@@ -271,9 +271,6 @@ pub struct SourceEventData {
     /// Dedup key. `(source, idempotency_key)` is the dedup boundary on
     /// ingest; duplicates are dropped silently.
     pub idempotency_key: String,
-    /// Routing labels used by triggers.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
     /// Free-form source payload available to trigger var templates.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
@@ -289,7 +286,6 @@ pub enum EventContext {
         source: String,
         kind: String,
         subject_id: String,
-        tags: Vec<String>,
         data: serde_json::Value,
     },
 }
@@ -300,23 +296,27 @@ impl EventContext {
     ///
     /// For `Source` contexts, the resolvable fields are:
     /// - `event.source` / `event.kind` / `event.subject_id`
-    /// - `event.tags` (comma-joined when referenced directly)
     /// - `event.data.<key>...` — dotted walk into the JSON payload
     pub fn resolve(&self, path: &str) -> Option<String> {
+        self.resolve_value(path).and_then(value_to_string)
+    }
+
+    /// Resolve a dotted path like `event.data.tags` to its JSON value.
+    pub fn resolve_value(&self, path: &str) -> Option<serde_json::Value> {
         let field = path.strip_prefix("event.")?;
         match self {
             Self::Source {
                 source,
                 kind,
                 subject_id,
-                tags,
                 data,
             } => match field {
-                "source" => Some(source.clone()),
-                "kind" => Some(kind.clone()),
-                "subject_id" => Some(subject_id.clone()),
-                "tags" => Some(tags.join(",")),
-                rest => rest.strip_prefix("data.").and_then(|p| resolve_json_path(data, p)),
+                "source" => Some(serde_json::Value::String(source.clone())),
+                "kind" => Some(serde_json::Value::String(kind.clone())),
+                "subject_id" => Some(serde_json::Value::String(subject_id.clone())),
+                rest => rest
+                    .strip_prefix("data.")
+                    .and_then(|p| resolve_json_value(data, p)),
             },
         }
     }
@@ -325,13 +325,17 @@ impl EventContext {
 /// Walk a dotted path into a JSON value, coercing leaf scalars to
 /// strings. Returns `None` if any segment is missing or the leaf is an
 /// object/array/null.
-fn resolve_json_path(root: &serde_json::Value, path: &str) -> Option<String> {
+fn resolve_json_value(root: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     let mut cur = root;
     for seg in path.split('.') {
         cur = cur.get(seg)?;
     }
-    match cur {
-        serde_json::Value::String(s) => Some(s.clone()),
+    Some(cur.clone())
+}
+
+fn value_to_string(value: serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s),
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         _ => None,
@@ -414,9 +418,6 @@ pub struct TriggerFailedData {
     /// The matched trigger's `on` field (source-native event kind,
     /// e.g. `"node.ready"`).
     pub on: String,
-    /// The matched trigger's `tag`, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tag: Option<String>,
     /// The workflow the trigger would have fired.
     pub workflow: String,
     pub reason: TriggerFailureReason,
@@ -437,17 +438,10 @@ pub enum TriggerFailureReason {
 }
 
 impl TriggerFailedData {
-    fn new(
-        source_seq: Seq,
-        on: &str,
-        tag: Option<&str>,
-        workflow: &str,
-        reason: TriggerFailureReason,
-    ) -> Self {
+    fn new(source_seq: Seq, on: &str, workflow: &str, reason: TriggerFailureReason) -> Self {
         Self {
             source_seq,
             on: on.to_string(),
-            tag: tag.map(str::to_string),
             workflow: workflow.to_string(),
             reason,
         }
@@ -457,14 +451,12 @@ impl TriggerFailedData {
     pub fn from_missing_field(
         source_seq: Seq,
         on: &str,
-        tag: Option<&str>,
         workflow: &str,
         missing_path: String,
     ) -> Self {
         Self::new(
             source_seq,
             on,
-            tag,
             workflow,
             TriggerFailureReason::MissingEventField { path: missing_path },
         )
@@ -474,30 +466,22 @@ impl TriggerFailedData {
     pub fn from_validation_error(
         source_seq: Seq,
         on: &str,
-        tag: Option<&str>,
         workflow: &str,
         message: String,
     ) -> Self {
         Self::new(
             source_seq,
             on,
-            tag,
             workflow,
             TriggerFailureReason::ValidationFailed { message },
         )
     }
 
     /// Build a failure record when the trigger's workflow doesn't exist.
-    pub fn for_unknown_workflow(
-        source_seq: Seq,
-        on: &str,
-        tag: Option<&str>,
-        workflow: &str,
-    ) -> Self {
+    pub fn for_unknown_workflow(source_seq: Seq, on: &str, workflow: &str) -> Self {
         Self::new(
             source_seq,
             on,
-            tag,
             workflow,
             TriggerFailureReason::UnknownWorkflow,
         )
@@ -656,13 +640,11 @@ mod tests {
         let data = TriggerFailedData::from_missing_field(
             Seq(42),
             "node.ready",
-            Some("workflow:consultation"),
             "consultation",
             "event.bogus".into(),
         );
         assert_eq!(data.source_seq, Seq(42));
         assert_eq!(data.on, "node.ready");
-        assert_eq!(data.tag.as_deref(), Some("workflow:consultation"));
         assert_eq!(data.workflow, "consultation");
         assert_eq!(
             data.reason,
@@ -681,7 +663,6 @@ mod tests {
         let data = TriggerFailedData::from_validation_error(
             Seq(7),
             "node.ready",
-            None,
             "code-task",
             "missing required variable: task_id".into(),
         );
@@ -698,12 +679,7 @@ mod tests {
 
     #[test]
     fn trigger_failed_data_round_trips_unknown_workflow_reason() {
-        let data = TriggerFailedData::for_unknown_workflow(
-            Seq(1),
-            "node.ready",
-            Some("workflow:ghost"),
-            "ghost",
-        );
+        let data = TriggerFailedData::for_unknown_workflow(Seq(1), "node.ready", "ghost");
         assert_eq!(data.reason, TriggerFailureReason::UnknownWorkflow);
         let json = serde_json::to_value(&data).unwrap();
         let back: TriggerFailedData = serde_json::from_value(json).unwrap();

@@ -2,12 +2,12 @@
 # executions. Each trigger declares:
 #   - `on`: the source-native event kind it matches (e.g. `node.ready`)
 #   - `source`: the watcher namespace it filters on (e.g. `cx`)
-#   - `tag`: an optional tag that must appear on the event's tags list
+#   - `[trigger.where]`: optional predicates over event fields
 #   - `workflow`: the workflow to run
 #   - `[trigger.vars]`: how to populate the workflow's declared vars
 #     from event fields. Templates may reference `{event.source}`,
-#     `{event.kind}`, `{event.subject_id}`, `{event.tags}`, or
-#     `{event.data.<path>}` for dotted walks into the source payload.
+#     `{event.kind}`, `{event.subject_id}`, or `{event.data.<path>}`
+#     for dotted walks into the source payload.
 #
 # ox-cx-watcher emits source events with `source = "cx"` and kinds
 # `node.ready` / `node.claimed` / `node.done` / `comment.added`.
@@ -15,15 +15,27 @@
 [[trigger]]
 on       = "node.ready"
 source   = "cx"
-tag      = "workflow:code-task"
 workflow = "code-task"
+[trigger.where]
+"data.tags" = { contains = "workflow:code-task" }
 [trigger.vars]
 task_id = "{event.subject_id}"
 
 [[trigger]]
 on       = "node.ready"
 source   = "cx"
-tag      = "workflow:consultation"
 workflow = "consultation"
+[trigger.where]
+"data.tags" = { contains = "workflow:consultation" }
 [trigger.vars]
 branch = "{event.subject_id}"
+
+[[trigger]]
+on       = "node.done"
+source   = "cx"
+workflow = "cx-surface"
+[trigger.where]
+"data.tags" = { contains = "workflow:code-task" }
+[trigger.vars]
+completed_task_id = "{event.subject_id}"
+branch = "cx-surface-{event.subject_id}"

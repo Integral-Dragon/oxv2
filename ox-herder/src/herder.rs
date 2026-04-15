@@ -386,7 +386,6 @@ impl<C: OxClientApi> Herder<C> {
                     source = %d.source,
                     kind = %d.kind,
                     subject = %d.subject_id,
-                    tags = ?d.tags,
                     replaying = self.replaying,
                     "source event"
                 );
@@ -902,9 +901,9 @@ impl<C: OxClientApi> Herder<C> {
     }
 
     /// Match source events (from watcher plugins) against configured
-    /// triggers. A trigger matches when its `on` equals the event kind
-    /// and — if set — its `source` equals the event source and its
-    /// `tag` appears in the event's tag list. Dedup is by
+    /// triggers. A trigger matches when its `on` equals the event kind,
+    /// its optional `source` equals the event source, and every
+    /// `[trigger.where]` predicate matches the event context. Dedup is by
     /// `ExecutionOrigin::Source { source, kind, subject_id }`; vars
     /// template against an `EventContext::Source` context.
     ///
@@ -922,12 +921,6 @@ impl<C: OxClientApi> Herder<C> {
             {
                 continue;
             }
-            if let Some(ref tag_pattern) = trigger.tag
-                && !event.tags.iter().any(|t| t == tag_pattern)
-            {
-                continue;
-            }
-
             let origin = ExecutionOrigin::Source {
                 source: event.source.clone(),
                 kind: event.kind.clone(),
@@ -964,9 +957,11 @@ impl<C: OxClientApi> Herder<C> {
                 source: event.source.clone(),
                 kind: event.kind.clone(),
                 subject_id: event.subject_id.clone(),
-                tags: event.tags.clone(),
                 data: event.data.clone(),
             };
+            if !trigger.matches_where(&ctx) {
+                continue;
+            }
             let trigger_vars = match trigger.build_vars(&ctx) {
                 Ok(v) => v,
                 Err(ox_core::workflow::TriggerError::MissingEventField { path }) => {
@@ -981,7 +976,6 @@ impl<C: OxClientApi> Herder<C> {
                     let failed = TriggerFailedData::from_missing_field(
                         Seq(self.last_seq),
                         &trigger.on,
-                        trigger.tag.as_deref(),
                         &trigger.workflow,
                         path,
                     );
@@ -1155,11 +1149,16 @@ mod tests {
         vars.insert("branch".into(), "cx-{event.subject_id}".into());
         vars.insert("task_id".into(), "{event.subject_id}".into());
         vars.insert("title".into(), "{event.data.title}".into());
+        let where_ = HashMap::from([(
+            "data.tags".into(),
+            ox_core::workflow::TriggerWhere::Contains {
+                contains: "workflow:code-task".into(),
+            },
+        )]);
         TriggerDef {
             on: "node.ready".into(),
             source: Some("cx".into()),
-            tag: Some("workflow:code-task".into()),
-            state: None,
+            where_,
             workflow: "code-task".into(),
             poll_interval: None,
             vars,
@@ -1172,11 +1171,11 @@ mod tests {
             kind: "node.ready".into(),
             subject_id: "Q6cY".into(),
             idempotency_key: "Q6cY:node.ready:sha-abc".into(),
-            tags: vec!["workflow:code-task".into()],
             data: serde_json::json!({
                 "title": "ccstat models — model-mix breakdown over time",
                 "node_id": "Q6cY",
-                "state": "ready"
+                "state": "ready",
+                "tags": ["workflow:code-task"]
             }),
         }
     }
@@ -1252,14 +1251,14 @@ mod tests {
         assert_eq!(h.client.create_calls().len(), 0);
     }
 
-    /// A trigger with a `tag` filter must NOT fire when the event's
-    /// tag list does not include it.
+    /// A trigger with a `[trigger.where]` filter must NOT fire when
+    /// the event payload does not match it.
     #[tokio::test]
-    async fn source_event_does_not_fire_when_tag_missing() {
+    async fn source_event_does_not_fire_when_where_missing() {
         let mut h = herder_with_source_trigger(MockClient::new());
 
         let mut event = sample_cx_source_event();
-        event.tags = vec!["workflow:other".into()];
+        event.data["tags"] = serde_json::json!(["workflow:other"]);
 
         h.evaluate_triggers_for_source_event(&event).await;
 

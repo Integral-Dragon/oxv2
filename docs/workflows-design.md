@@ -18,19 +18,19 @@ events arrive on the SSE stream.
 ### Flow
 
 ```
-EventType::Source arrives (SourceEventData { source, kind, subject_id, tags, data })
+EventType::Source arrives (SourceEventData { source, kind, subject_id, data })
   │
   ▼
 herder: for each trigger in loaded trigger files:
   │
   ├─ does trigger.on match the event's `kind`?
   ├─ if trigger.source is set, does it match the event's `source`?
-  ├─ if trigger.tag is set, is it in the event's `tags` list?
+  ├─ does every [trigger.where] predicate match the event context?
   │
   ├─ build EventContext::Source from the envelope
-  │  (source, kind, subject_id, tags, data — all available as
+  │  (source, kind, subject_id, data — all available as
   │   {event.source}, {event.kind}, {event.subject_id},
-  │   {event.tags}, {event.data.*})
+  │   {event.data.*})
   │
   ├─ call trigger.build_vars(&ctx):
   │  ├─ interpolate each [trigger.vars] template
@@ -138,6 +138,12 @@ fn next_step(
     for transition in &step_def.transitions {
         if transition_matches(&transition.match_pattern, output) {
             let target = &transition.goto;
+            if target == "complete" {
+                return StepAdvance::Complete;
+            }
+            if target == "escalate" {
+                return StepAdvance::Escalate;
+            }
             return check_visits(workflow, target, visit_counts);
         }
     }
@@ -164,6 +170,12 @@ fn check_visits(
             let goto = step_def.max_visits_goto
                 .as_deref()
                 .unwrap_or("escalate");
+            if goto == "complete" {
+                return StepAdvance::Complete;
+            }
+            if goto == "escalate" {
+                return StepAdvance::Escalate;
+            }
             return StepAdvance::Goto(goto.to_string());
         }
     }

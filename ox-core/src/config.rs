@@ -641,8 +641,9 @@ name = "one"
             r#"
 [[trigger]]
 on       = "cx.task_ready"
-tag      = "workflow:code-task"
 workflow = "code-task"
+[trigger.where]
+"data.tags" = { contains = "workflow:code-task" }
 "#,
         )
         .unwrap();

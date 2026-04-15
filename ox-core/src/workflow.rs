@@ -212,10 +212,10 @@ pub struct TriggerDef {
     /// triggers leave this unset.
     #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
-    pub tag: Option<String>,
-    #[serde(default)]
-    pub state: Option<String>,
+    /// Generic field predicates. Keys are event paths without the
+    /// `event.` prefix, e.g. `data.tags` or `data.workflow`.
+    #[serde(default, rename = "where")]
+    pub where_: HashMap<String, TriggerWhere>,
     pub workflow: String,
     #[serde(default)]
     pub poll_interval: Option<String>,
@@ -233,15 +233,21 @@ pub enum TriggerError {
 }
 
 impl TriggerDef {
+    /// Return true when every `[trigger.where]` predicate matches the
+    /// firing event context.
+    pub fn matches_where(&self, ctx: &EventContext) -> bool {
+        self.where_.iter().all(|(path, cond)| {
+            let event_path = format!("event.{path}");
+            cond.matches(ctx.resolve_value(&event_path))
+        })
+    }
+
     /// Resolve the trigger's `[trigger.vars]` block against an event context,
     /// returning the map of workflow vars to pass to `create_execution`.
     ///
     /// Each value is a template that may reference `{event.X}` fields from
     /// the firing event. Unknown fields produce `TriggerError::MissingEventField`.
-    pub fn build_vars(
-        &self,
-        ctx: &EventContext,
-    ) -> Result<HashMap<String, String>, TriggerError> {
+    pub fn build_vars(&self, ctx: &EventContext) -> Result<HashMap<String, String>, TriggerError> {
         let mut out = HashMap::with_capacity(self.vars.len());
         for (name, template) in &self.vars {
             out.insert(name.clone(), interpolate_event_template(template, ctx)?);
@@ -250,12 +256,46 @@ impl TriggerDef {
     }
 }
 
+/// A single `[trigger.where]` condition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TriggerWhere {
+    /// Exact scalar match.
+    Eq(String),
+    /// Array/string containment.
+    Contains { contains: String },
+}
+
+impl TriggerWhere {
+    fn matches(&self, value: Option<serde_json::Value>) -> bool {
+        let Some(value) = value else {
+            return false;
+        };
+
+        match self {
+            Self::Eq(want) => match value {
+                serde_json::Value::String(s) => s == *want,
+                serde_json::Value::Number(n) => n.to_string() == *want,
+                serde_json::Value::Bool(b) => b.to_string() == *want,
+                _ => false,
+            },
+            Self::Contains { contains } => match value {
+                serde_json::Value::Array(items) => items.iter().any(|item| match item {
+                    serde_json::Value::String(s) => s == contains,
+                    serde_json::Value::Number(n) => n.to_string() == *contains,
+                    serde_json::Value::Bool(b) => b.to_string() == *contains,
+                    _ => false,
+                }),
+                serde_json::Value::String(s) => s == *contains,
+                _ => false,
+            },
+        }
+    }
+}
+
 /// Interpolate `{event.X}` references in a template against the given context.
 /// Literal text and non-event braces are passed through unchanged.
-fn interpolate_event_template(
-    template: &str,
-    ctx: &EventContext,
-) -> Result<String, TriggerError> {
+fn interpolate_event_template(template: &str, ctx: &EventContext) -> Result<String, TriggerError> {
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -359,8 +399,8 @@ impl WorkflowEngine {
         // Check transitions on the current step
         for transition in &step_def.transitions {
             if transition_matches(&transition.match_pattern, output) {
-                if transition.goto == "escalate" {
-                    return StepAdvance::Escalate;
+                if let Some(advance) = reserved_step_advance(&transition.goto) {
+                    return advance;
                 }
                 return self.check_visits(&transition.goto, visit_counts);
             }
@@ -374,26 +414,20 @@ impl WorkflowEngine {
         }
     }
 
-    fn check_visits(
-        &self,
-        target: &str,
-        visit_counts: &mut HashMap<String, u32>,
-    ) -> StepAdvance {
+    fn check_visits(&self, target: &str, visit_counts: &mut HashMap<String, u32>) -> StepAdvance {
         let count = visit_counts.entry(target.to_string()).or_insert(0);
         *count += 1;
 
         if let Some(step_def) = self.steps.get(target)
             && let Some(max) = step_def.max_visits
-                && *count > max {
-                    let goto = step_def
-                        .max_visits_goto
-                        .as_deref()
-                        .unwrap_or("escalate");
-                    if goto == "escalate" {
-                        return StepAdvance::Escalate;
-                    }
-                    return StepAdvance::Goto(goto.to_string());
-                }
+            && *count > max
+        {
+            let goto = step_def.max_visits_goto.as_deref().unwrap_or("escalate");
+            if let Some(advance) = reserved_step_advance(goto) {
+                return advance;
+            }
+            return StepAdvance::Goto(goto.to_string());
+        }
 
         StepAdvance::Goto(target.to_string())
     }
@@ -401,6 +435,14 @@ impl WorkflowEngine {
     /// Get the first step name.
     pub fn first_step(&self) -> Option<&str> {
         self.steps.get_index(0).map(|(name, _)| name.as_str())
+    }
+}
+
+fn reserved_step_advance(target: &str) -> Option<StepAdvance> {
+    match target {
+        "complete" => Some(StepAdvance::Complete),
+        "escalate" => Some(StepAdvance::Escalate),
+        _ => None,
     }
 }
 
@@ -592,6 +634,27 @@ mod tests {
         let mut visits = HashMap::new();
         let result = engine.next_step("tiebreak", "done", &mut visits);
         assert_eq!(result, StepAdvance::Complete);
+    }
+
+    #[test]
+    fn transition_can_complete_execution() {
+        let mut engine = make_engine();
+        engine.steps.get_mut("review").unwrap().transitions.insert(
+            0,
+            TransitionDef {
+                match_pattern: "none".into(),
+                goto: "complete".into(),
+            },
+        );
+
+        let mut visits = HashMap::new();
+        let result = engine.next_step("review", "none", &mut visits);
+
+        assert_eq!(result, StepAdvance::Complete);
+        assert!(
+            !visits.contains_key("complete"),
+            "reserved terminal target should not be counted as a step visit"
+        );
     }
 
     #[test]
@@ -835,21 +898,33 @@ push = true
 [[trigger]]
 on     = "node.ready"
 source = "cx"
-tag    = "workflow:code-task"
 workflow = "code-task"
+[trigger.where]
+"data.tags" = { contains = "workflow:code-task" }
 
 [[trigger]]
 on     = "comment.added"
 source = "cx"
-tag    = "review-requested"
 workflow = "code-task"
+[trigger.where]
+"data.tag" = "review-requested"
 "#;
         let file: TriggersFile = toml::from_str(toml).unwrap();
         assert_eq!(file.trigger.len(), 2);
         assert_eq!(file.trigger[0].on, "node.ready");
         assert_eq!(file.trigger[0].source.as_deref(), Some("cx"));
         assert_eq!(file.trigger[0].workflow, "code-task");
+        assert_eq!(
+            file.trigger[0].where_.get("data.tags"),
+            Some(&TriggerWhere::Contains {
+                contains: "workflow:code-task".into()
+            })
+        );
         assert_eq!(file.trigger[1].on, "comment.added");
+        assert_eq!(
+            file.trigger[1].where_.get("data.tag"),
+            Some(&TriggerWhere::Eq("review-requested".into()))
+        );
     }
 
     #[test]
@@ -858,8 +933,9 @@ workflow = "code-task"
 [[trigger]]
 on       = "node.ready"
 source   = "cx"
-tag      = "workflow:consultation"
 workflow = "consultation"
+[trigger.where]
+"data.tags" = { contains = "workflow:consultation" }
 [trigger.vars]
 branch = "{event.subject_id}"
 "#;
@@ -870,6 +946,18 @@ branch = "{event.subject_id}"
             t.vars.get("branch").map(String::as_str),
             Some("{event.subject_id}")
         );
+        assert!(t.matches_where(&EventContext::Source {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: "Q6cY".into(),
+            data: serde_json::json!({ "tags": ["workflow:consultation"] }),
+        }));
+        assert!(!t.matches_where(&EventContext::Source {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: "Q6cY".into(),
+            data: serde_json::json!({ "tags": ["workflow:other"] }),
+        }));
     }
 
     fn sample_source_ctx(subject: &str) -> EventContext {
@@ -877,8 +965,10 @@ branch = "{event.subject_id}"
             source: "cx".into(),
             kind: "node.ready".into(),
             subject_id: subject.into(),
-            tags: vec![],
-            data: serde_json::json!({}),
+            data: serde_json::json!({
+                "tags": ["workflow:code-task"],
+                "state": "ready"
+            }),
         }
     }
 
@@ -889,8 +979,7 @@ branch = "{event.subject_id}"
         let trigger = TriggerDef {
             on: "node.ready".into(),
             source: Some("cx".into()),
-            tag: Some("workflow:consultation".into()),
-            state: None,
+            where_: HashMap::new(),
             workflow: "consultation".into(),
             poll_interval: None,
             vars: HashMap::from([("branch".into(), "{event.subject_id}".into())]),
@@ -912,8 +1001,7 @@ branch = "{event.subject_id}"
         let trigger = TriggerDef {
             on: "node.ready".into(),
             source: Some("cx".into()),
-            tag: Some("workflow:code-task".into()),
-            state: None,
+            where_: HashMap::new(),
             workflow: "code-task".into(),
             poll_interval: None,
             vars: HashMap::from([("task_id".into(), "{event.subject_id}".into())]),
@@ -930,19 +1018,22 @@ branch = "{event.subject_id}"
         let trigger = TriggerDef {
             on: "node.ready".into(),
             source: None,
-            tag: None,
-            state: None,
+            where_: HashMap::new(),
             workflow: "whatever".into(),
             poll_interval: None,
             vars: HashMap::from([("x".into(), "{event.bogus}".into())]),
         };
         let ctx = sample_source_ctx("n");
 
-        let err = trigger.build_vars(&ctx).expect_err("should fail on bogus field");
+        let err = trigger
+            .build_vars(&ctx)
+            .expect_err("should fail on bogus field");
 
         assert_eq!(
             err,
-            TriggerError::MissingEventField { path: "event.bogus".into() }
+            TriggerError::MissingEventField {
+                path: "event.bogus".into()
+            }
         );
     }
 
@@ -953,8 +1044,7 @@ branch = "{event.subject_id}"
         let trigger = TriggerDef {
             on: "node.ready".into(),
             source: None,
-            tag: None,
-            state: None,
+            where_: HashMap::new(),
             workflow: "whatever".into(),
             poll_interval: None,
             vars: HashMap::new(),
