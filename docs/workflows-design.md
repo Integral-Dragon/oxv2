@@ -13,8 +13,7 @@ For the workflow model (what workflows are), see
 ## Trigger Evaluation
 
 Triggers create executions. The herder evaluates triggers when source
-events (or, later, Ox-internal lifecycle events) arrive on the SSE
-stream.
+events arrive on the SSE stream.
 
 ### Flow
 
@@ -54,8 +53,8 @@ herder: for each trigger in loaded trigger files:
 ```
 
 Source-side state suppression (e.g. skip-if-`integrated` for cx nodes)
-is **not** performed by the herder. Under the event-sources plan, each
-watcher filters its own source: a cx watcher does not POST a
+is **not** performed by the herder. Each watcher filters its own
+source: a cx watcher does not POST a
 `node.ready` event for a node that is already `integrated` or
 `shadowed`. The server-side matcher has no special-cased knowledge of
 any source's lifecycle — it matches what the watcher chose to ingest.
@@ -67,19 +66,19 @@ the same `(origin, workflow)` pair, where `origin` is typed
 (`ExecutionOrigin::Source | Execution | Manual`) and compared
 structurally. For source events the dedup key is
 `(source, kind, subject_id)` — the same subject firing the same kind
-of event will not double-start a workflow while one is already live.
+of event does not double-start a workflow while one is already live.
 
 The herder's `is_origin_active` predicate uses the running-or-escalated
 liveness rule:
 
 - **Herder auto-evaluation**: blocks on `running | escalated`. The
-  herder will not auto-retry an escalated execution — that is a
+  herder does not auto-retry an escalated execution — that is a
   human-in-the-loop decision.
 
 Manual re-runs after intervention are done by mutating the source
 system (re-tagging a cx node, adding a Linear comment) or by posting
 a synthetic event directly to `/api/events/ingest`. There is no
-dedicated `ox-ctl trigger` command post-slice-5.
+dedicated `ox-ctl trigger` command.
 
 Dedup state is derived from the executions projection — no separate
 tracking needed.
@@ -102,24 +101,6 @@ The herder posts its own failures through the `/api/triggers/failed`
 endpoint so all `trigger.failed` events flow through the server's
 event bus. Emission is guarded by `!replaying` so a bad trigger in
 the config does not re-emit on every restart.
-
-### Poll Triggers
-
-Triggers with `poll_interval` fire repeatedly while their condition
-holds. The herder tracks these in a `HashMap<TriggerId, Instant>` of
-last-fired times. On each tick:
-
-1. For each poll trigger, check if `poll_interval` has elapsed since
-   last fire
-2. If yes, evaluate the condition against current cx state
-3. If condition holds and dedup passes, create an execution
-4. Update last-fired time
-
-When the condition becomes false (e.g. the node is no longer in the
-triggering state), the trigger stops firing automatically — the
-condition check fails.
-
----
 
 ## Step Graph Traversal
 
@@ -383,8 +364,8 @@ merge to main changes `.complex/`, `ox-cx-watcher` sees the new
 commits on its next tick, runs `cx log --since <cursor>` and
 `cx show` for each touched node, maps them into
 `EventType::Source` envelopes, and posts them to
-`/api/events/ingest`. A Linear or GitHub watcher would do the same
-through its own API.
+`/api/events/ingest`. A Linear or GitHub watcher performs the same
+role through its own API.
 
 The result is that there is exactly one code path for source events
 — the watcher ingest path — regardless of whether the change came
@@ -548,9 +529,9 @@ are pure projections — they update local state and nothing else. A
 single `schedule()` function runs after each event and is the only
 source of side-effects (API calls, dispatching, action execution).
 
-### Execution Phase State Machine
+### Execution Scheduler State
 
-Each execution tracks a `phase` that tells the scheduler what action
+Each execution tracks scheduler state that tells the herder what action
 (if any) is needed:
 
 ```rust
@@ -569,9 +550,9 @@ enum ExecPhase {
 }
 ```
 
-Event handlers set the phase:
+Event handlers set scheduler state:
 
-| Event | Phase transition |
+| Event | Scheduler state transition |
 |-------|-----------------|
 | `execution.created` | → `Ready { first_step, 1 }` |
 | `step.dispatched` | → `AwaitingStep` |
@@ -583,7 +564,7 @@ Event handlers set the phase:
 | `execution.escalated` | → `Done` |
 | `execution.cancelled` | → `Done` |
 
-During replay, the last event for each execution determines its phase.
+During replay, the last event for each execution determines its scheduler state.
 After replay, the scheduler runs once and picks up any execution that
 was mid-transition when the herder last stopped.
 
@@ -591,10 +572,10 @@ was mid-transition when the herder last stopped.
 
 ```rust
 async fn schedule(&mut self) {
-    // Phase 1: Evaluate pending triggers
+    // Pass 1: Evaluate pending triggers
     self.evaluate_pending_triggers().await;
 
-    // Phase 2: Process execution state machines (loop until stable)
+    // Pass 2: Process execution state machines (loop until stable)
     loop {
         let mut changed = false;
 
@@ -613,12 +594,12 @@ async fn schedule(&mut self) {
         if !changed { break; }
     }
 
-    // Phase 3: Dispatch — match Ready(runner step) to idle runners
+    // Pass 3: Dispatch - match Ready(runner step) to idle runners
     self.dispatch_ready_steps().await;
 }
 ```
 
-`process_execution` handles a single execution's current phase:
+`process_execution` handles a single execution's scheduler state:
 
 - **NeedsAdvance**: calls `engine.next_step()` to determine the next
   step via transition matching and visit counting. Sets `Ready` on
@@ -633,7 +614,7 @@ async fn schedule(&mut self) {
   `merge_to_main`). On success, stores output and sets `NeedsAdvance`.
   On failure, sets `NeedsFailure`. Emits step events for the action.
 
-- **Ready (runner step)**: skipped here — handled in the dispatch phase.
+- **Ready (runner step)**: skipped here and handled in the dispatch pass.
 
 - **AwaitingStep / Done**: no action needed.
 
@@ -677,7 +658,7 @@ async fn dispatch_ready_steps(&mut self) {
     for (exec_id, step, attempt) in ready {
         if let Some(runner_id) = self.find_idle_runner() {
             self.dispatch_step(&exec_id, &step, &runner_id, attempt).await;
-            // phase transitions to AwaitingStep when step.dispatched
+            // state transitions to AwaitingStep when step.dispatched
             // event arrives back through SSE
         }
     }
@@ -686,6 +667,6 @@ async fn dispatch_ready_steps(&mut self) {
 
 v1 uses simple first-idle runner selection. No affinity, no label
 matching, no priority queues. There is no separate pending queue — the
-`Ready` phase on the execution serves that purpose. An execution in
+`Ready` scheduler state on the execution serves that purpose. An execution in
 `Ready` that cannot be dispatched (no idle runner) simply stays in
 `Ready` until the next scheduling pass.

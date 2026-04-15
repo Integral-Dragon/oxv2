@@ -16,7 +16,7 @@ For what ox does (as opposed to how), see [prd/README.md](prd/README.md).
 
 ## Crate Layout
 
-Ox is a Cargo workspace with five binary crates and one library crate.
+Ox is a Cargo workspace with binary crates and one shared library crate.
 
 ```
 ox/
@@ -29,11 +29,10 @@ ox/
   ox-cx-watcher/      cx source watcher (reference event source)
 ```
 
-Watchers live in their own crates — one per source system. Only the
-cx watcher exists today. A deployment that uses Linear or GitHub
-instead of cx would install `ox-linear-watcher` or `ox-github-watcher`
-alongside the server; ox-server itself has no knowledge of any
-specific source system.
+Watchers live in their own crates, one per source system. The workspace
+includes `ox-cx-watcher` as the reference watcher. Deployments install
+the watcher binaries for the source systems they use; ox-server itself
+has no knowledge of any specific source system.
 
 ### ox-core
 
@@ -65,7 +64,7 @@ Modules:
 |--------|----------|
 | `main` | CLI arg parsing, server startup, graceful shutdown |
 | `db` | SQLite connection pool, event log append/read, schema migrations |
-| `events` | Event bus — append, broadcast to SSE subscribers, replay |
+| `events` | Event bus - append, batch ingest, cursor CAS, idempotency dedup, broadcast, replay |
 | `projections` | In-memory state rebuilt from the event log (pool, executions, secrets) |
 | `pool` | Runner pool management — registration, heartbeats, drain, staleness/mismatch detection |
 | `api` | Axum router, REST handlers, request/response types |
@@ -75,7 +74,6 @@ Modules:
 | `artifacts` | Artifact storage, chunk writes, fetch, streaming reads |
 | `pty_relay` | WebSocket relay for interactive PTY sessions (bridges runner ↔ client) |
 | `merge` | `merge_to_main` implementation |
-| `ingest` | Watcher batch ingest handler, cursor CAS, idempotency dedup |
 
 ### ox-herder
 
@@ -112,7 +110,7 @@ Modules:
 | `proxy` | API proxy — local listener, request/response interception, metric extraction |
 | `signals` | Post-exit signal collection (no_commits, dirty_workspace, etc.) |
 | `artifacts` | Implicit artifact collection (commits), declared artifact forwarding |
-| `confirm` | Branch push, confirm API call, two-phase completion |
+| `confirm` | Branch push, confirm API call, completion confirmation |
 
 ### ox-ctl
 
@@ -443,12 +441,12 @@ Two companion routes support watcher liveness and operator status:
 - `GET /api/watchers/{source}/cursor` — returns the opaque cursor
   string (or `null` on first boot) for a watcher to resume from.
 - `GET /api/watchers` — returns one row per known source for
-  `ox-ctl status` and future UIs.
+  `ox-ctl status` and status clients.
 
 ox-server treats cursors as opaque blobs throughout. A cx watcher writes
 a git sha; a github watcher writes a delivery id; the server never
 parses either. See [event-sources-design.md](event-sources-design.md)
-for the full module layout, HTTP shapes, and migration slices.
+for the watcher lifecycle and HTTP shapes.
 
 ---
 

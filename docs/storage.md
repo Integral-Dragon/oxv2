@@ -376,6 +376,5 @@ driver — log artifacts from long agent sessions can be several MB each.
 ### Retention
 
 Events are never deleted from the log — the log is the source of truth.
-Artifact content may be garbage-collected for old executions. A future
-`ox-ctl gc` command would delete artifact chunks for executions older
-than a threshold while preserving the event log and metadata.
+Artifact content may be garbage-collected for completed executions by
+deleting artifact chunks while preserving the event log and metadata.

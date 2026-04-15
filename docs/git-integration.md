@@ -3,7 +3,7 @@
 ox-server manages a non-bare git repository. Agents clone from it,
 work on branches, push back, and the merge step integrates branches
 into main. This document captures the design decisions and pitfalls
-discovered during implementation.
+that shape the implementation.
 
 ---
 
@@ -86,18 +86,10 @@ When main has diverged:
 
 ### Working Tree Checkout
 
-**Bug found:** The merge commit path originally didn't checkout the
-working tree after creating the merge commit. The ref updated but
-the files on disk stayed at the old state. The next merge attempt
-would see a "dirty worktree" and fail, creating an infinite loop:
-
-```
-review passes → merge succeeds (ref update only) → worktree stale →
-next merge fails "dirty worktree" → on_fail → implement → review →
-merge fails again → ...
-```
-
-**Fix:** Always `checkout_tree()` after creating a merge commit.
+The merge commit path always checks out the merged tree after creating
+the merge commit. Updating the ref without updating the working tree
+leaves the files on disk out of sync with `main`, which causes the
+dirty-worktree guard to reject subsequent merges.
 
 ### Dirty Worktree Check
 
@@ -161,7 +153,7 @@ On first boot (no cursor stored server-side for the `cx` source),
 instead of replaying the full `cx log` history. This prevents:
 
 - Re-triggering workflows for integrated/shadowed nodes
-- Firing stale `node.ready` events from historical transitions
+- Firing stale `node.ready` events from replayed source transitions
 - Creating duplicate executions for completed work
 
 Subsequent ticks use `cx log --json --since <cursor>` to catch
@@ -184,5 +176,4 @@ cursor and merge state may become inconsistent. Stop ox before
 making manual changes to main.
 
 **Branch cleanup:** Merged branches are not automatically deleted.
-They accumulate as refs. This is harmless but messy. A future
-improvement could delete branch refs after successful merge.
+They accumulate as refs. This is harmless but messy.

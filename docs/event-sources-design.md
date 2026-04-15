@@ -1,125 +1,91 @@
-# Event Sources — Implementation Design
+# Event Sources Design
 
-> **Status:** Implemented across five vertical slices, each shipped as
-> its own red/green commit pair. This document is the design of record
-> for the watcher boundary; it also preserves the pre-migration
-> "baseline" section as historical context for why the refactor was
-> structured the way it was. See the commit history for the code
-> that actually landed.
+Companion to [prd/event-sources.md](prd/event-sources.md). This
+document describes the watcher boundary, source-event data model,
+ingest transaction, trigger matching, and `ox-cx-watcher` reference
+implementation.
 
-Companion to [prd/event-sources.md](prd/event-sources.md). The PRD
-states the problem and the target shape (watchers push, server ingests,
-server stays source-agnostic). This document describes how the change
-lands in the tree: the data shapes, the module edits, the new crate,
-the HTTP surface, and the order of operations.
+Scope is **ingestion only**. Runtime steps may mutate external systems
+as workflow side effects; watchers observe those systems and turn their
+facts into Ox source events.
 
-Scope is **ingestion only**. Runner-side mutation (the ox-runner VM
-shelling out to `cx`) is out of scope and has its own follow-up PRD.
-
-There is no core "task" abstraction in this design. Ox has source
-events, workflow executions, steps, branches, and artifacts. A source
-event may be about a cx node, GitHub issue, Linear ticket, timer tick, or
-webhook payload. The source event triggers a workflow execution; after
-that, the execution's branch and artifacts are how steps share state.
+There is no core "task" abstraction. Ox has source events, workflow
+executions, steps, branches, and artifacts. A source event may be about
+a cx node, GitHub issue, Linear ticket, timer tick, or webhook payload.
+The source event can trigger a workflow execution; after that, the
+execution's branch and artifacts are how steps share state.
 
 ---
 
-## Baseline (historical — pre-migration)
-
-> The tree **had** one hardcoded source before this migration landed.
-> Kept for context on what the refactor replaced.
-
-- `ox-server/src/cx.rs` — shelled to `cx log --json --since <sha>`,
-  derived events, implemented at-least-once semantics. **Deleted.**
-- `ox-server/src/main.rs` — `cx_poll_loop()`, spawned at server
-  startup, 10s interval, read/wrote `CX_CURSOR_KEY = "cx_log_cursor"`
-  in the server KV table. **Deleted.**
-- `ox-core/src/events.rs` — `EventType::Cx{TaskReady, TaskClaimed,
-  TaskIntegrated, TaskShadowed, CommentAdded, PhaseComplete}`, each
-  with its own `*Data` struct. **Deleted.**
-- `ox-core/src/workflow.rs` — `TriggerDef { on, tag, state, workflow,
-  vars }`; `on` was a dotted event-type string like `"cx.task_ready"`.
-  **`source: Option<String>`** field added; triggers now fire on
-  `on = "node.ready"` / `source = "cx"`.
-- `ox-herder/src/herder.rs` — `evaluate_triggers_for_node_with_state()`:
-  matched on `trigger.on == event_type`, then `tag`, then dedup/state.
-  **Replaced** by `evaluate_triggers_for_source_event()`.
-- `ox-ctl/src/up.rs` — spawned `ox-server`, `ox-herder`, and
-  seguro-wrapped `ox-runner` instances. **Now** also spawns configured
-  watchers from `.ox/config.toml`'s `watchers = [...]` list.
-- `ox-core/src/config.rs` — `OxConfig { triggers, heartbeat_grace }`.
-  **Gained** a `watchers: Vec<String>` field.
-
-The engine below the ingestion point (dispatch, pools, retries,
-reviews, merges, artifacts, metrics) was already source-agnostic.
-Every change landed above the event-bus append call.
-
----
-
-## Target shape
+## Architecture
 
 ```
  ox-cx-watcher          POST /api/events/ingest          ox-server
- ox-linear-watcher ───────────────────────────────▶      (bus, triggers,
+ ox-linear-watcher -------------------------------->     (bus, triggers,
  ox-github-watcher      GET  /api/watchers/{src}/cursor   workflows,
-                   ◀───────────────────────────────       watcher_cursors)
+                   <--------------------------------      watcher_cursors)
 ```
 
-ox-server exposes watcher status, cursor, and ingest endpoints. Watchers
-are **stateless on disk when the source is replayable** — their cursors
-live on the server in a `watcher_cursors` table, and they fetch/advance
-them via HTTP. Non-replayable webhook sources need source-provided
-durable delivery or a watcher-owned durable inbox. Watchers are separate
-binaries launched by `ox-ctl up` from a `watchers = [...]` list in
-`.ox/config.toml`. The cx integration relocates to a new crate
-`ox-cx-watcher` and maps cx facts into source events.
+Watchers are separate binaries launched by `ox-ctl up` from the
+`watchers = [...]` list in `.ox/config.toml`. A watcher owns one source
+system, reads its native API or local state, maps source facts into
+`SourceEventData`, and posts batches to ox-server.
+
+ox-server stores watcher cursors, ingests source-event batches,
+broadcasts committed events over SSE, and stays source-agnostic. It
+does not shell out to `cx`, call Linear, call GitHub, or interpret
+source cursors.
+
+Replayable sources keep no watcher-local durable state. Their cursor
+lives on the server in `watcher_cursors`, keyed by source name.
+Non-replayable webhook sources need source-provided durable delivery or
+a watcher-owned durable inbox before posting to Ox.
 
 ---
 
-## Data model changes
+## Source Events
 
-### 1. `SourceEvent` replaces the `Cx*` family
-
-In `ox-core/src/events.rs`:
+Source events are stored on the bus as `EventType::Source` with a
+`SourceEventData` payload:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum EventType {
-    // ... existing non-cx variants unchanged ...
-    #[serde(rename = "source")]
-    Source,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceEventData {
-    pub source: String,           // "cx", "linear", "github"
-    pub kind: String,             // "node.ready", "issue.labeled", ...
-    pub subject_id: String,       // source-native correlation key
-    pub idempotency_key: String,  // dedup key
-    #[serde(default)]
+    pub source: String,
+    pub kind: String,
+    pub subject_id: String,
+    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    #[serde(default)]
-    pub data: serde_json::Value,  // free-form source payload
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
 }
 ```
 
-Wire form on the bus: a single `EventType::Source` with
-`SourceEventData` in the envelope's `data` field. Consumers inspect
-`data.source == "cx" && data.kind == "node.ready"` or whatever source
-and kind the trigger declares.
+Field semantics:
 
-Kinds are source-authored strings, not a closed Ox enum. Ox should not
-attempt to normalize cx nodes, GitHub issues, Linear tickets, timer
-ticks, or webhook payloads into a generic task lifecycle.
+| Field | Meaning |
+|-------|---------|
+| `source` | Watcher namespace, such as `cx`, `linear`, `github`, or `schedule` |
+| `kind` | Source-authored event kind, such as `node.ready`, `issue.labeled`, or `schedule.tick` |
+| `subject_id` | Source-native correlation key for what the event is about |
+| `idempotency_key` | Source-authored dedup key, unique within `(source, idempotency_key)` |
+| `tags` | Routing labels used by triggers |
+| `data` | Free-form source payload available to trigger var templates |
 
-### 2. `EventContext::Source`
+Kinds are source-authored strings, not a closed Ox enum. Ox does not
+normalize cx nodes, GitHub issues, Linear tickets, timer ticks, or
+webhook payloads into a generic lifecycle.
 
-`EventContext` in `ox-core/src/events.rs:283` gets one new variant:
+---
+
+## Trigger Context
+
+`EventContext::Source` exposes source-event fields to trigger variable
+templates:
 
 ```rust
 pub enum EventContext {
-    // ... existing ...
     Source {
         source: String,
         kind: String,
@@ -130,28 +96,26 @@ pub enum EventContext {
 }
 ```
 
-`resolve(path)` extends to walk `data` for anything under
-`event.data.*` via JSON pointer, and exposes top-level fields
-`event.source`, `event.kind`, `event.subject_id`, and `event.tags`.
+Resolvable paths:
 
-### 3. `TriggerDef` gets an optional `source`
+| Template path | Value |
+|---------------|-------|
+| `{event.source}` | Watcher namespace |
+| `{event.kind}` | Source-authored event kind |
+| `{event.subject_id}` | Source-native subject id |
+| `{event.tags}` | Comma-joined event tags |
+| `{event.data.<path>}` | Dotted walk through the source payload |
 
-In `ox-core/src/workflow.rs:203`:
+Leaf JSON strings, numbers, and booleans resolve to strings.
+Objects, arrays, nulls, and missing paths fail interpolation and
+produce a `trigger.failed` event.
 
-```rust
-pub struct TriggerDef {
-    pub on: String,
-    #[serde(default)]
-    pub source: Option<String>,   // new
-    pub tag: Option<String>,
-    pub state: Option<String>,
-    pub workflow: String,
-    pub poll_interval: Option<String>,
-    pub vars: HashMap<String, String>,
-}
-```
+---
 
-New syntax:
+## Trigger Syntax
+
+Triggers match source events by event kind, optional source filter, and
+optional tag filter:
 
 ```toml
 [[trigger]]
@@ -159,41 +123,30 @@ on       = "node.ready"
 source   = "cx"
 tag      = "workflow:code-task"
 workflow = "code-task"
+
 [trigger.vars]
 branch = "cx-{event.subject_id}"
-source_id = "{event.subject_id}"
+task_id = "{event.subject_id}"
+title = "{event.data.title}"
 ```
 
-No compatibility alias is required for this early tree. Existing
-`cx.task_ready` triggers should be updated to the source/kind syntax.
+`source` is optional. Omitting it lets one trigger match the same kind
+from multiple watchers. `tag` is optional. When present, the tag must
+appear in `SourceEventData.tags`.
 
-### 4. `OxConfig` learns `watchers`
+---
 
-In `ox-core/src/config.rs:234`:
+## Cursor Storage
 
-```rust
-pub struct OxConfig {
-    pub triggers: Vec<String>,
-    pub heartbeat_grace: u64,
-    #[serde(default)]
-    pub watchers: Vec<String>,   // new: ["cx"], ["linear", "github"], ...
-}
-```
-
-Merge semantics match `triggers`: additive across `.ox/config.toml`
-files in the search path, with de-dup on name.
-
-### 5. Server-side cursor + idempotency storage
-
-Two new SQLite tables in `ox-server/src/db.rs`:
+Watcher cursor state lives in SQLite:
 
 ```sql
 CREATE TABLE IF NOT EXISTS watcher_cursors (
-    source       TEXT PRIMARY KEY,   -- "cx", "linear", "github"
-    cursor       TEXT,                -- opaque blob; NULL before first write
-    updated_at   TEXT NOT NULL,       -- wall clock of last successful ingest
-    updated_seq  INTEGER,             -- bus seq of the last event appended
-    last_error   TEXT                 -- last CAS/parse failure, for status UX
+    source       TEXT PRIMARY KEY,
+    cursor       TEXT,
+    updated_at   TEXT NOT NULL,
+    updated_seq  INTEGER,
+    last_error   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS ingest_idempotency (
@@ -205,41 +158,29 @@ CREATE TABLE IF NOT EXISTS ingest_idempotency (
 );
 ```
 
-Both tables are written inside the **same transaction** as the
-`events` append. This is the whole point of the Kafka-style
-commit-with-batch shape: cursor advancement, event appends, and
-idempotency records are atomic. A crash mid-batch leaves none of it
-visible.
+`watcher_cursors.cursor` is opaque to the server. For cx it is a git
+sha. For GitHub it can be a delivery id. For Linear it can be a
+timestamp or source-native cursor.
 
-The primary-key conflict on `ingest_idempotency` implements per-event
-dedup — duplicates within a batch are dropped silently, the txn
-still commits, the cursor still advances. The key is `(source,
-idempotency_key)` so watchers do not need globally unique idempotency
-strings.
-
-`watcher_cursors` replaces the old `CX_CURSOR_KEY` KV row. The cursor
-value is opaque to the server — for cx it's a git sha, for github
-it'd be a webhook delivery id, for linear a timestamp. The server
-never parses it.
-
-A periodic prune of `ingest_idempotency` (age > 30 days) is deferred;
-the table grows slowly and deletion is safe.
+`ingest_idempotency` dedups events by `(source, idempotency_key)`.
+Duplicate events are skipped silently while the batch transaction still
+commits and the cursor still advances.
 
 ---
 
-## HTTP surface
+## HTTP Surface
 
-Three new routes in `ox-server/src/api.rs:19`:
+`ox-server/src/api.rs` exposes three watcher routes:
 
 ```rust
-.route("/api/watchers",                get(list_watchers))
-.route("/api/watchers/:source/cursor", get(get_watcher_cursor))
-.route("/api/events/ingest",           post(ingest_batch))
+.route("/api/watchers", get(list_watchers))
+.route("/api/watchers/{source}/cursor", get(get_watcher_cursor))
+.route("/api/events/ingest", post(ingest_batch))
 ```
 
 ### `GET /api/watchers`
 
-Returns rows from `watcher_cursors` for `ox-ctl status` and future UIs:
+Returns one row per known watcher cursor:
 
 ```json
 [
@@ -253,398 +194,222 @@ Returns rows from `watcher_cursors` for `ox-ctl status` and future UIs:
 ]
 ```
 
-The server treats `cursor` as opaque. It is returned only for operator
-inspection and reset/debug workflows.
+`ox-ctl status` uses this endpoint for watcher health. `last_error`
+stores the last cursor CAS failure or ingest error recorded by the
+server.
 
-### `GET /api/watchers/:source/cursor`
+### `GET /api/watchers/{source}/cursor`
 
-```rust
-async fn get_watcher_cursor(
-    State(state): State<AppState>,
-    Path(source): Path<String>,
-) -> Result<Json<CursorResponse>, ApiError> {
-    let row = state.bus.get_watcher_cursor(&source).await?;
-    Ok(Json(CursorResponse {
-        cursor:     row.as_ref().and_then(|r| r.cursor.clone()),
-        updated_at: row.as_ref().map(|r| r.updated_at),
-    }))
+Returns the last committed cursor for one watcher:
+
+```json
+{
+  "cursor": "d59b010abc...",
+  "updated_at": "2026-04-14T12:00:00Z"
 }
 ```
 
-Missing row returns `{ cursor: null, updated_at: null }` with 200 —
-the first-boot case. Watchers treat "no cursor" as a signal to
-snapshot current source state rather than replay from the beginning
-(see PRD §open-questions-1).
+For a source with no cursor row, the response is:
+
+```json
+{
+  "cursor": null,
+  "updated_at": null
+}
+```
+
+Watchers treat `cursor: null` as cold start and snapshot their current
+source state.
 
 ### `POST /api/events/ingest`
 
-```rust
-#[derive(Deserialize)]
-struct IngestBatch {
-    source: String,
-    cursor_before: Option<String>,
-    cursor_after:  String,
-    events: Vec<SourceEventData>,
-}
+Request:
 
-async fn ingest_batch(
-    State(state): State<AppState>,
-    Json(body): Json<IngestBatch>,
-) -> Result<StatusCode, ApiError> {
-    state.bus.ingest_batch(body).await
+```json
+{
+  "source": "cx",
+  "cursor_before": "d59b010abc...",
+  "cursor_after": "e0f42b7...",
+  "events": [
+    {
+      "source": "cx",
+      "kind": "node.ready",
+      "subject_id": "Q6cY",
+      "idempotency_key": "Q6cY:node.ready:e0f42b7",
+      "tags": ["workflow:code-task"],
+      "data": {
+        "node_id": "Q6cY",
+        "state": "ready",
+        "title": "Implement watcher ingest"
+      }
+    }
+  ]
 }
 ```
 
-The bus method runs one transaction:
+Response:
 
-1. `SELECT cursor FROM watcher_cursors WHERE source = ?`. Compare
-   against `cursor_before`. On mismatch → `ApiError::Conflict(409)`,
-   stash `last_error = "cas:expected X got Y"`, no other writes.
-2. For each event in `events`:
-   - `INSERT OR IGNORE INTO ingest_idempotency (idempotency_key, source, ...)`.
-   - If the insert was a no-op (duplicate), skip to next event.
-   - Otherwise, reserve the next seq and insert an `EventType::Source`
-     row into `events`.
-3. `INSERT OR REPLACE INTO watcher_cursors(source, cursor, updated_at,
-   updated_seq, last_error)` with `last_error = NULL` and
-   `updated_seq = last_appended_seq` (or the prior value if the
-   batch was empty / all-duplicates).
-4. Commit.
-
-The ingest path should not call the current single-event
-`EventBus::append()` inside the transaction. It needs a batch append
-primitive that locks the connection and sequence counter, inserts all
-rows and cursor/idempotency updates in one SQLite transaction, commits,
-then applies projections and broadcasts SSE for the committed events.
-Subscribers should never observe events that later roll back.
+```json
+{
+  "appended": 1,
+  "deduped": 0
+}
+```
 
 Error codes:
 
-| Code | Meaning                                                                 |
-|------|-------------------------------------------------------------------------|
-| 200  | Batch committed (cursor advanced; 0+ events appended)                   |
-| 400  | Malformed JSON, missing required fields, invalid cursor_after          |
-| 409  | `cursor_before` CAS mismatch — watcher must re-`GET` and retry          |
-| 500  | Disk failure, etc.                                                      |
+| Code | Meaning |
+|------|---------|
+| 200 | Batch committed |
+| 400 | Malformed request |
+| 409 | `cursor_before` does not match the stored cursor |
+| 500 | Storage or server failure |
 
-Watchers retry on 5xx with backoff; 409 is non-retryable at the
-batch level (the caller must refetch and rebuild the batch). The
-endpoints are unauthenticated on the loopback socket, matching the
-rest of the server today.
-
-An empty `events` array with `cursor_after != cursor_before` is a
-legitimate "I looked, found nothing, here's how far I got"; with
-`cursor_after == cursor_before` it's a liveness ping (updates
-`updated_at`, nothing else).
+On 409 the watcher re-fetches the cursor and rebuilds the batch. On
+5xx or network failure the watcher retries without advancing its
+in-memory cursor.
 
 ---
 
-## Trigger matching evolution
+## Ingest Transaction
 
-`ox-herder/src/herder.rs:941` — `evaluate_triggers_for_node_with_state()`
-today is called per-Cx-event. After the change, source events and Ox's
-own internal events feed the same trigger evaluation layer. For watcher
-events, the matching predicate changes from:
+`EventBus::ingest_batch()` performs one SQLite transaction:
 
-```rust
-if trigger.on != event_type { continue; }
-```
+1. Read `watcher_cursors[source]` and compare it to `cursor_before`.
+2. Record `last_error` and return 409 on cursor mismatch.
+3. Insert each event's `(source, idempotency_key)` into
+   `ingest_idempotency` with `INSERT OR IGNORE`.
+4. Append non-duplicate events as `EventType::Source` rows.
+5. Upsert `watcher_cursors[source] = cursor_after`, clear
+   `last_error`, and record `updated_seq`.
+6. Commit.
+7. Publish the new in-memory sequence counter.
+8. Apply projections and broadcast committed events to SSE subscribers.
 
-to (roughly):
+The in-memory sequence counter advances only after commit succeeds.
+Subscribers never observe events that later roll back.
 
-```rust
-let SourceEventData { source, kind, tags, .. } = parse(envelope)?;
-if trigger.on != kind { continue; }
-if let Some(ref want) = trigger.source {
-    if want != &source { continue; }
-}
-if let Some(ref tag_pattern) = trigger.tag {
-    if !tags.iter().any(|t| t == tag_pattern) { continue; }
-}
-```
-
-Dedup by `(origin, workflow)` stays exactly as today; `origin`
-becomes `ExecutionOrigin::Source { source, kind, subject_id }` (new
-variant) replacing `ExecutionOrigin::CxNode { node_id }`.
-
-`EventContext::Source` feeds `trigger.build_vars()` unchanged — the
-template resolver is the only place that looks inside the context, and
-its new field map is listed above.
-
-The same trigger matcher should also accept Ox internal events, such as
-`execution.completed`, `execution.escalated`, `step.confirmed`,
-`step.failed`, and `artifact.closed`. This is how adaptive orchestration
-works without making a running workflow non-deterministic: steps create
-side effects or Ox emits lifecycle facts; those facts trigger new
-workflow executions through the same deterministic trigger layer.
-
-Example:
-
-```toml
-[[trigger]]
-on = "execution.completed"
-workflow = "assign-work"
-
-[trigger.vars]
-completed_execution = "{event.execution_id}"
-completed_workflow = "{event.workflow}"
-```
-
-State suppression (`herder.rs:983` — skip if node is `integrated` or
-`shadowed`) is cx-specific and needs a rethink. For the cx watcher,
-the watcher itself can filter: don't POST `node.ready` for nodes
-already past `integrated`. For other sources the concept may not
-apply. In this design, the suppression check moves **into the cx
-watcher**, and the server-side matcher drops it entirely. This is a
-small behavior shift — worth calling out for review.
+An empty `events` array is valid. If `cursor_after != cursor_before`,
+the watcher records that it inspected the source and advanced its
+cursor. If `cursor_after == cursor_before`, the batch is a liveness
+ping that updates `updated_at`.
 
 ---
 
-## The `ox-cx-watcher` crate
+## Trigger Matching
 
-New workspace member, dropped into `Cargo.toml` alongside the existing
-six.
+The herder queues `EventType::Source` envelopes from SSE and evaluates
+them against loaded trigger definitions:
+
+```rust
+if trigger.on != event.kind {
+    continue;
+}
+if let Some(ref want_source) = trigger.source
+    && want_source != &event.source
+{
+    continue;
+}
+if let Some(ref tag_pattern) = trigger.tag
+    && !event.tags.iter().any(|t| t == tag_pattern)
+{
+    continue;
+}
+```
+
+Matching triggers create executions with:
+
+```rust
+ExecutionOrigin::Source {
+    source: event.source.clone(),
+    kind: event.kind.clone(),
+    subject_id: event.subject_id.clone(),
+}
+```
+
+Dedup is by `(origin, workflow)` with the herder's active-status rule:
+`running` and `escalated` executions block a duplicate auto-trigger.
+
+`EventContext::Source` feeds `trigger.build_vars()`. Missing event
+fields, var validation failures, and unknown workflow references append
+`trigger.failed`.
+
+Source-specific state suppression belongs in the watcher. For cx, the
+watcher does not emit `node.ready` for nodes it observes as shadowed or
+already integrated.
+
+---
+
+## `ox-cx-watcher`
+
+`ox-cx-watcher` is the reference watcher crate:
 
 ```
 ox-cx-watcher/
 ├── Cargo.toml
 └── src/
-    ├── main.rs        # clap arg parsing, loop driver, shutdown
-    ├── cx.rs          # MOVED from ox-server/src/cx.rs verbatim
-    ├── client.rs      # GET cursor + POST batch with retries
-    └── mapping.rs     # cx node → SourceEvent { node.ready, ... }
+    ├── main.rs        # clap args, tick loop, shutdown
+    ├── cx.rs          # cx CLI integration and parsers
+    ├── client.rs      # watcher HTTP client
+    └── mapping.rs     # cx facts -> SourceEventData
 ```
-
-Note: **no `cursor.rs`**. There is no local cursor file. The watcher
-is stateless on disk.
 
 CLI:
 
-```
-ox-cx-watcher --server http://127.0.0.1:PORT \
+```bash
+ox-cx-watcher --server http://127.0.0.1:4840 \
               --repo /path/to/repo \
-              [--interval 10s]
+              --interval-secs 10
 ```
 
-- **Cursor ownership**: server-side. On boot, `client.get_cursor("cx")`
-  returns the last committed sha (or `null`). Each tick the watcher
-  runs `cx log --since <cursor>`, builds a batch, and POSTs with
-  `cursor_before = <cursor>`, `cursor_after = <new head sha>`. On 200
-  it updates its in-memory cursor; on 409 it re-GETs and retries with
-  the fresh value; on 5xx/network it backs off and retries with the
-  same batch.
-- **Cold start**: cursor from server is `null` → snapshot current
-  `git rev-parse HEAD` and seed the current actionable state from
-  `cx list --json` / `cx show`, same as today's first-boot path in
-  `cx.rs:249`. This should emit source events for currently ready nodes
-  that carry workflow tags, not silently skip existing work. The first
-  ingest batch carries `cursor_before: null, cursor_after: <HEAD>`.
-- **Mapping**: cx node state `ready|claimed|integrated` →
-  `SourceEvent { source: "cx", kind: "node.{ready|claimed|done}",
-  subject_id: node_id, idempotency_key: format!("{node_id}:{state}:{hash}"),
-  tags: node.tags, data: node_snapshot }`. Comments become
-  `comment.added` with the comment id folded into the idempotency key.
-- **Retries**: exponential backoff on network/5xx failure, indefinite.
-  Never advance the in-memory cursor until the server returns 200.
-  At-least-once semantics are preserved because the server dedups on
-  idempotency key and guards cursor advancement with CAS.
-- **Buffering**: because checkpointing goes through the server, an
-  extended server outage blocks cursor advancement. The watcher keeps
-  its last-seen batch in memory and retries; memory use is bounded
-  by the size of the cx log since the last committed cursor. On
-  restart during an outage, all in-memory state is lost — but the
-  next boot will re-derive the same batch from cx since the server
-  cursor didn't advance. Lossless by construction.
+Startup:
 
-The state suppression previously in the herder moves into
-`mapping.rs`: the watcher skips events for nodes it observes as
-already-shadowed/integrated based on cx's own state.
+1. Fetch `GET /api/watchers/cx/cursor`.
+2. Use `cursor: null` as cold start.
+3. Use a non-null cursor as the lower bound for `cx log --since`.
 
-### Delete list (slice 5)
+Cold start:
 
-- `ox-server/src/cx.rs` — gone
-- `cx_poll_loop` in `ox-server/src/main.rs:165-209` — gone
-- `CX_CURSOR_KEY` in `main.rs:163` and its KV row — gone
-- `EventType::Cx*` variants — gone (after log compaction window)
-- `shell-out-to-cx` from anywhere under `ox-server/` — gone
-- `ExecutionOrigin::CxNode` — gone, replaced by `Source`
+1. Read `git rev-parse HEAD`.
+2. Run `cx list --json`.
+3. Emit source events for current actionable nodes.
+4. Post a batch with `cursor_before: null` and `cursor_after: <HEAD>`.
 
-Test: `rg '\bcx\b' ox-server/src` should return nothing but comments.
+Incremental tick:
+
+1. Run `cx log --json --since <cursor>`.
+2. Fetch current snapshots for touched nodes with `cx show`.
+3. Map node states and comments into `SourceEventData`.
+4. Post one batch with CAS.
+5. Advance the in-memory cursor only after a 200 response.
+
+Mapping:
+
+| cx fact | Source event |
+|---------|--------------|
+| ready node, not shadowed | `source = "cx", kind = "node.ready"` |
+| claimed node | `source = "cx", kind = "node.claimed"` |
+| integrated node | `source = "cx", kind = "node.done"` |
+| added comment | `source = "cx", kind = "comment.added"` |
+
+Node events carry node tags at the event level and a node snapshot in
+`data`. Comment events carry the comment tag in `tags` and comment
+metadata in `data`.
 
 ---
 
-## `ox-ctl up` integration
+## `ox-ctl up`
 
-`ox-ctl/src/up.rs:243` — `cmd_up()` — learns a new spawn step after
-the herder spawn at `up.rs:326`. Sketch:
+`ox-ctl up` launches watcher binaries from config:
 
-```rust
-let hot = load_hot_config(&repo)?;
-for name in &hot.config.watchers {
-    let bin = bins.watcher(name)?;   // looks up ox-<name>-watcher
-    let log = paths.logs.join(format!("{name}-watcher.log"));
-    spawn_detached(
-        &bin,
-        &[
-            "--server".into(), server_url.clone(),
-            "--repo".into(),   repo.to_string_lossy().into(),
-        ],
-        &log,
-    )?;
-    write_pid(&paths.pids, pid, &format!("{name}-watcher"))?;
-}
+```toml
+watchers = ["cx"]
 ```
 
-No `RunPaths.watchers` field is needed — watchers have no on-disk
-state. `resolve_binaries_in()` (`up.rs:108`) learns a generic
-`watcher(name)` lookup that finds `ox-{name}-watcher` in the same
-directory as `ox-server`; a missing binary is a hard error at
-`ox-ctl up` time with a clear message.
+For each watcher name, `ox-ctl` resolves a sibling binary named
+`ox-<name>-watcher`, passes `--server` and `--repo`, writes its process
+to the run pidfile, and logs to the run log directory.
 
-`ox-ctl down` reads the pidfile as today — no special casing needed
-since watchers are in it. `ox-ctl status` grows a Watchers section
-listing each configured watcher with: alive y/n, last-ingest-at,
-last-error — all sourced from a single `GET /api/watchers` endpoint
-on the server that reads the `watcher_cursors` table. No filesystem
-poking, no log tailing. The cursor value itself is available too,
-which makes "why hasn't this watcher moved?" a one-command answer.
-
----
-
-## Migration plan — slices
-
-The PRD lists five slices; here's how each lands as a red/green pair
-in the current tree.
-
-### Slice 1 — ingest endpoint + cursor storage (server-only, nothing calls it)
-
-- Red: unit tests in `ox-server/src/api.rs`:
-  1. `GET /api/watchers/cx/cursor` on an empty db returns `{cursor:
-     null}` + 200.
-  2. `POST /api/events/ingest` with `cursor_before: null,
-     cursor_after: "abc", events: [e1]` returns 200, appends one
-     `EventType::Source`, and updates the cursor.
-  3. Same POST replayed returns 200, the idempotency table suppresses
-     the event, cursor stays at `"abc"`.
-  4. POST with wrong `cursor_before` returns 409 and makes no changes.
-- Green:
-  - Add `EventType::Source` + `SourceEventData` to
-    `ox-core/src/events.rs`.
-  - Add `watcher_cursors` + `ingest_idempotency` tables + migration
-    in `ox-server/src/db.rs`.
-  - Add `bus.get_watcher_cursor()` and `bus.ingest_batch()` +
-    handlers + routes in `ox-server/src/{events,api}.rs`.
-- The cx poller still runs untouched. Tree is green, ships.
-
-### Slice 2 — generic trigger matching
-
-- Red: unit test in `ox-herder/src/herder.rs` — build a synthetic
-  `EventEnvelope { EventType::Source, data: SourceEventData { source:
-  "cx", kind: "node.ready", ... } }`, pass through
-  `evaluate_triggers_for_node_with_state()`, assert a matching trigger
-  fires an execution with the right `vars`.
-- Green:
-  - Add `EventContext::Source` + `resolve()` updates in
-    `ox-core/src/events.rs`.
-  - Add `source` field to `TriggerDef`.
-  - Extend matcher in `herder.rs` to dispatch `Source` envelopes;
-    add `ExecutionOrigin::Source`.
-  - Update cx triggers to `source = "cx", on = "node.ready"`.
-
-### Slice 3 — `ox-cx-watcher` crate, in parallel with in-server poller
-
-- Red: integration test in `ox-cx-watcher/tests/smoke.rs` — spin up an
-  in-memory ox-server, point watcher at a temp repo with a cx history,
-  expect the server to see the right `SourceEvent`s on the bus and
-  `watcher_cursors[cx]` to equal the repo HEAD.
-- Green:
-  - New crate `ox-cx-watcher`; move `cx.rs` logic into it
-    (copy, don't delete yet).
-  - Implement mapping + HTTP client (GET cursor on boot, POST batch
-    per tick with CAS retry on 409).
-  - Add to workspace `Cargo.toml`.
-- At this point the watcher can be tested against the ingest endpoint.
-  Do not run both the legacy cx poller and the watcher as live
-  trigger-producing paths for the same repo; their origins are different
-  and can double-fire workflows. If both must run temporarily, run the
-  watcher observe-only or disable trigger matching for one path.
-
-### Slice 4 — switchover
-
-- Red: integration test — run `ox-ctl up` in a fixture repo, assert
-  the `ox-cx-watcher` process appears in the pidfile and the server's
-  cx poller is not running.
-- Green:
-  - Add `watchers` to `OxConfig`; default ccstat config to `["cx"]`.
-  - `ox-ctl up` spawns watchers per the new config.
-  - Disable or delete `cx_poll_loop`.
-  - `ox-ctl status` shows the Watchers section.
-
-### Slice 5 — delete the legacy path
-
-- Red: `rg '\bcx\b' ox-server/src` returns only comments (enforced by
-  a test that greps).
-- Green:
-  - Delete `ox-server/src/cx.rs`, `cx_poll_loop`, and the
-    `CX_CURSOR_KEY` KV row (but **not** the `watcher_cursors` table —
-    that's the replacement and stays).
-  - Delete `EventType::Cx*` and their `*Data` structs; bump db
-    schema with a compaction pass that rewrites historical rows into
-    `EventType::Source` form (or: declare a one-time snapshot +
-    truncate, since the event log is recoverable from cx).
-  - Delete `ExecutionOrigin::CxNode`.
-  - Update ccstat's `triggers.toml`.
-
-Each slice is its own commit pair (red → green). This is still early, so
-the migration can favor clarity over broad backwards compatibility.
-
----
-
-## Open questions, resolved or deferred
-
-| PRD question                         | Resolution in this design                                                     |
-|--------------------------------------|--------------------------------------------------------------------------------|
-| 1. Cursor cold-start                 | Server returns `cursor: null` → watcher snapshots current source state and emits source events for currently actionable work. First batch carries `cursor_before: null`. |
-| 2. Idempotency granularity           | `(source, idempotency_key)` PK on `ingest_idempotency`, in the same txn as the event append + cursor update. |
-| 3. Watcher health surfacing          | Free from `watcher_cursors` (`updated_at`, `last_error`, current cursor). `ox-ctl status` calls a new `GET /api/watchers` endpoint. No local state files. |
-| 4. Multi-watcher-per-source          | `cursor_before` CAS resolves races: two watchers racing will see one 200 and one 409 per cycle. Consumer-group-of-one per source. |
-| 5. Server unavailability             | Watcher buffers the current tick's batch in memory and retries indefinitely; cursor cannot advance while the server is down. Lossless because a restart re-derives the same batch from cx. |
-| 6. Replayable source requirement     | Stateless watchers are safe when the source can replay from a server-side cursor. Non-replayable webhook sources need source-provided durable delivery or a watcher-owned durable inbox. |
-| 7. Runner → external mutations       | **Out of scope** (separate PRD).                                               |
-| 8. Trigger backwards compatibility   | Not a priority in this early tree. Update triggers to source/kind syntax directly. |
-
----
-
-## Points worth a second look before implementing
-
-1. **State-suppression move.** The herder currently drops triggers on
-   nodes that are `integrated` or `shadowed`. Moving this to the
-   watcher is cleaner (source-specific logic in the source-specific
-   binary), but it changes *where* the policy lives and could mask
-   bugs in the watcher's own state tracking. Alternative: keep a
-   generic "trigger-state-suppression" hook on the trigger matcher
-   that reads `event.data.state`. Worth deciding explicitly.
-
-2. **Event-log reset vs rewrite.** Rewriting historical `Cx*` rows
-   to `Source` form is non-trivial. Since this is an early tree, a
-   one-time event-log reset plus cx watcher resync is probably simpler
-   than preserving every historical row.
-
-3. **Execution origin reset.** `ExecutionOrigin::CxNode { node_id }`
-   → `ExecutionOrigin::Source { source, kind, subject_id }` changes
-   the serialized execution origin. Given the early stage, accept a
-   one-time reset rather than carrying compatibility aliases.
-
-4. **Trigger loops.** Adaptive orchestration happens through side
-   effects and events, which means loops are possible:
-   `assign-work -> node.ready -> code-task -> execution.completed ->
-   assign-work`. The trigger layer needs deterministic circuit breakers:
-   origin/workflow dedup, source-side state checks, visit/execution
-   limits, cooldowns or poll intervals where appropriate, and clear
-   event history for debugging why a workflow fired.
-
-5. **Config hot-reload of `watchers`.** `HotConfig` in
-   `ox-server/src/state.rs:23` reloads on SIGHUP. But watchers are
-   launched by `ox-ctl up`, not the server — so adding a watcher to
-   config requires `ox-ctl down && ox-ctl up`, not SIGHUP. Document
-   this, or teach `ox-ctl` a `reload-watchers` subcommand.
+`ox-ctl down` stops watchers through the same pidfile path as the
+server, herder, and runners. `ox-ctl status` renders watcher health
+from `GET /api/watchers`.
