@@ -571,6 +571,31 @@ mod tests {
         assert!(rt.compile_failure_signals().is_err());
     }
 
+    /// The shipped claude.toml must declare an `auth_failed` failure
+    /// signal with `retriable = false`. Without this, claude
+    /// auth/credential errors silently consume the entire retry budget
+    /// (~5s × max_retries) before escalating, instead of escalating
+    /// immediately — see cx tXwK.
+    #[test]
+    fn shipped_claude_runtime_declares_non_retriable_auth_failed_signal() {
+        let toml_str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../defaults/runtimes/claude.toml"
+        ));
+        let rt = RuntimeDef::from_toml(toml_str).expect("claude.toml must parse");
+        let auth = rt
+            .failure_signals
+            .iter()
+            .find(|s| s.name == "auth_failed")
+            .expect("claude.toml must declare an `auth_failed` failure signal");
+        assert!(
+            !auth.retriable,
+            "auth_failed must be retriable=false — retrying auth errors is pointless"
+        );
+        rt.compile_failure_signals()
+            .expect("claude.toml failure signals must compile");
+    }
+
     #[test]
     fn compile_failure_signals_returns_compiled_set() {
         let rt = RuntimeDef {

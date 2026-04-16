@@ -1,11 +1,11 @@
 {
   "id": "QLrT",
   "title": "slice 4: claude.toml ships auth_failed pattern + manual repro",
-  "state": "latent",
+  "state": "ready",
   "shadowed": false,
   "part": null,
   "created_at": "2026-04-16T23:22:25.752061252Z",
-  "updated_at": "2026-04-16T23:22:25.752061252Z",
+  "updated_at": "2026-04-16T23:44:08.335394127Z",
   "tags": [
     "bug"
   ],

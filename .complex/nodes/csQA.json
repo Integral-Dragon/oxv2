@@ -1,11 +1,11 @@
 {
   "id": "csQA",
   "title": "slice 3: workflow honors retriable=false signal → escalate immediately",
-  "state": "ready",
+  "state": "integrated",
   "shadowed": false,
   "part": null,
   "created_at": "2026-04-16T23:22:21.492593572Z",
-  "updated_at": "2026-04-16T23:35:13.601268460Z",
+  "updated_at": "2026-04-16T23:44:08.335393445Z",
   "tags": [
     "bug"
   ],
