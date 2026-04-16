@@ -53,3 +53,17 @@ to      = "{tmp_dir}/ox-prompt"
 [[runtime.files]]
 content = "{secret.claude_credentials}"
 to      = "{home}/.claude/.credentials.json"
+
+# Auth-failure detection. When claude exits ~1.2s into a step with
+# `"is_error":true,"error":"authentication_error"` (typical when
+# .credentials.json is missing/expired/invalid in the seguro
+# sandbox), retrying 4 more times changes nothing — escalate
+# immediately so a human can rotate credentials.
+#
+# Matches both the stream-json error field and the human-readable
+# variant so the rule survives whether claude was invoked with
+# `--output-format stream-json` or not.
+[[runtime.failure_signals]]
+name      = "auth_failed"
+pattern   = '"error":"authentication_error"|Invalid authentication credentials'
+retriable = false
