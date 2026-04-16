@@ -84,8 +84,17 @@ impl RuntimeDef {
     /// config load (initial + SIGHUP reload) so a malformed pattern is
     /// rejected before any step references it.
     pub fn compile_failure_signals(&self) -> Result<Vec<CompiledFailureSignal>, regex::Error> {
-        let _ = self;
-        todo!("compile failure_signals into Vec<CompiledFailureSignal>")
+        self.failure_signals
+            .iter()
+            .map(|s| {
+                Ok(CompiledFailureSignal {
+                    name: s.name.clone(),
+                    regex: regex::Regex::new(&s.pattern)?,
+                    retriable: s.retriable,
+                    tail_bytes: s.tail_bytes,
+                })
+            })
+            .collect()
     }
 }
 
