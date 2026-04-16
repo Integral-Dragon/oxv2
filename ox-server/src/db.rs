@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 
 /// Run all schema migrations.
@@ -13,13 +13,28 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     )
     .context("setting pragmas")?;
 
+    // Reject pre-unification event schemas. The canonical envelope is
+    // (seq, ts, source, kind, subject_id, data). If an older layout
+    // (with `event_type`) is present, refuse to start rather than
+    // silently recreate it alongside.
+    let existing_columns = events_table_columns(conn)?;
+    if !existing_columns.is_empty() && !existing_columns.iter().any(|c| c == "source") {
+        bail!(
+            "old ox event schema detected in events table (columns: {}). \
+             Run `ox-ctl reset` to wipe the database and start fresh.",
+            existing_columns.join(", ")
+        );
+    }
+
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS events (
-            seq        INTEGER PRIMARY KEY,
-            ts         TEXT    NOT NULL,
-            event_type TEXT    NOT NULL,
-            data       TEXT    NOT NULL
+            seq         INTEGER PRIMARY KEY,
+            ts          TEXT    NOT NULL,
+            source      TEXT    NOT NULL,
+            kind        TEXT    NOT NULL,
+            subject_id  TEXT    NOT NULL,
+            data        TEXT    NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS runners (
@@ -92,29 +107,36 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// One row from the events table, in the canonical envelope layout.
+pub type EventRow = (u64, String, String, String, String, String);
+
 /// Append an event to the log. Returns the assigned seq.
 pub fn append_event(
     conn: &Connection,
     seq: u64,
     ts: &str,
-    event_type: &str,
+    source: &str,
+    kind: &str,
+    subject_id: &str,
     data: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO events (seq, ts, event_type, data) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![seq, ts, event_type, data],
+        "INSERT INTO events (seq, ts, source, kind, subject_id, data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![seq, ts, source, kind, subject_id, data],
     )
     .context("appending event")?;
     Ok(())
 }
 
-/// Read all events after a given seq.
-pub fn read_events_after(
-    conn: &Connection,
-    after_seq: u64,
-) -> Result<Vec<(u64, String, String, String)>> {
+/// Read all events after a given seq. Each row is
+/// `(seq, ts, source, kind, subject_id, data)`.
+pub fn read_events_after(conn: &Connection, after_seq: u64) -> Result<Vec<EventRow>> {
     let mut stmt = conn
-        .prepare("SELECT seq, ts, event_type, data FROM events WHERE seq > ?1 ORDER BY seq ASC")
+        .prepare(
+            "SELECT seq, ts, source, kind, subject_id, data
+             FROM events WHERE seq > ?1 ORDER BY seq ASC",
+        )
         .context("preparing event query")?;
 
     let rows = stmt
@@ -124,6 +146,8 @@ pub fn read_events_after(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })
         .context("querying events")?;
@@ -133,6 +157,23 @@ pub fn read_events_after(
         results.push(row.context("reading event row")?);
     }
     Ok(results)
+}
+
+/// Return the column names currently declared on the `events` table,
+/// or an empty vec if the table does not yet exist. Used by `migrate`
+/// to reject pre-unification schemas.
+fn events_table_columns(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(events)")
+        .context("preparing table_info(events)")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("querying table_info(events)")?;
+    let mut cols = Vec::new();
+    for row in rows {
+        cols.push(row.context("reading table_info row")?);
+    }
+    Ok(cols)
 }
 
 /// Update runner heartbeat timestamp and current step.
@@ -188,8 +229,26 @@ mod tests {
     #[test]
     fn append_and_read() {
         let conn = test_conn();
-        append_event(&conn, 1, "2026-01-01T00:00:00Z", "test.event", r#"{"a":1}"#).unwrap();
-        append_event(&conn, 2, "2026-01-01T00:00:01Z", "test.event", r#"{"a":2}"#).unwrap();
+        append_event(
+            &conn,
+            1,
+            "2026-01-01T00:00:00Z",
+            "ox",
+            "test.event",
+            "subj-1",
+            r#"{"a":1}"#,
+        )
+        .unwrap();
+        append_event(
+            &conn,
+            2,
+            "2026-01-01T00:00:01Z",
+            "ox",
+            "test.event",
+            "subj-2",
+            r#"{"a":2}"#,
+        )
+        .unwrap();
 
         let events = read_events_after(&conn, 0).unwrap();
         assert_eq!(events.len(), 2);
@@ -199,6 +258,26 @@ mod tests {
         let events = read_events_after(&conn, 1).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, 2);
+    }
+
+    /// Startup on an old-schema DB must refuse with a clear message.
+    #[test]
+    fn migrate_rejects_old_event_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (
+                seq        INTEGER PRIMARY KEY,
+                ts         TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                data       TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        let err = migrate(&conn).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("old ox event schema"), "got: {msg}");
+        assert!(msg.contains("ox-ctl reset"), "got: {msg}");
     }
 
     #[test]

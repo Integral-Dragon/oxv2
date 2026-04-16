@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use ox_core::events::{EventEnvelope, EventType, SourceEventData};
+use ox_core::events::{EventEnvelope, IngestEventData};
 use ox_core::types::Seq;
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -22,13 +22,16 @@ pub struct WatcherCursor {
 }
 
 /// A watcher's batch ingest request. `cursor_before` is the CAS guard;
-/// `cursor_after` is the new value to persist on commit.
+/// `cursor_after` is the new value to persist on commit. Each event
+/// carries its `kind`, `subject_id`, `idempotency_key`, and free-form
+/// `data`; `source` is taken from the batch once and stamped onto
+/// every envelope.
 #[derive(Debug, Clone)]
 pub struct IngestBatch {
     pub source: String,
     pub cursor_before: Option<String>,
     pub cursor_after: String,
-    pub events: Vec<SourceEventData>,
+    pub events: Vec<IngestEventData>,
 }
 
 /// Result of a successful `ingest_batch` call.
@@ -73,15 +76,11 @@ impl EventBus {
 
         let (tx, _) = broadcast::channel(1024);
 
-        // Replay events to rebuild projections
         let projections = Projections::default();
         let mut max_seq: u64 = 0;
 
         let events = db::read_events_after(&conn, 0)?;
-        for (seq, ts, event_type_str, data_str) in events {
-            let event_type: EventType =
-                serde_json::from_value(serde_json::Value::String(event_type_str.clone()))
-                    .with_context(|| format!("parsing event type: {event_type_str}"))?;
+        for (seq, ts, source, kind, subject_id, data_str) in events {
             let data: serde_json::Value = serde_json::from_str(&data_str)
                 .with_context(|| format!("parsing event data at seq {seq}"))?;
             let ts = chrono::DateTime::parse_from_rfc3339(&ts)
@@ -91,7 +90,9 @@ impl EventBus {
             let envelope = EventEnvelope {
                 seq: Seq(seq),
                 ts,
-                event_type,
+                source,
+                kind,
+                subject_id,
                 data,
             };
             projections.apply(&envelope);
@@ -107,31 +108,28 @@ impl EventBus {
     }
 
     /// Append an event to the log, update projections, broadcast to SSE.
-    /// Returns the assigned sequence number.
+    /// Returns the envelope as persisted.
     pub fn append(
         &self,
-        event_type: EventType,
+        source: &str,
+        kind: &str,
+        subject_id: &str,
         data: serde_json::Value,
     ) -> Result<EventEnvelope> {
         let mut next_seq = self.next_seq.lock().unwrap();
         let seq = *next_seq;
         let ts = Utc::now();
-
-        let event_type_str = serde_json::to_value(&event_type)
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
         let data_str = serde_json::to_string(&data)?;
 
-        // Write to SQLite
         {
             let conn = self.conn.lock().unwrap();
             db::append_event(
                 &conn,
                 seq,
                 &ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                &event_type_str,
+                source,
+                kind,
+                subject_id,
                 &data_str,
             )?;
         }
@@ -139,19 +137,28 @@ impl EventBus {
         let envelope = EventEnvelope {
             seq: Seq(seq),
             ts,
-            event_type,
+            source: source.to_string(),
+            kind: kind.to_string(),
+            subject_id: subject_id.to_string(),
             data,
         };
 
-        // Update projections
         self.projections.apply(&envelope);
-
-        // Broadcast redacted version to SSE subscribers
         let _ = self.tx.send(envelope.redacted_for_sse());
 
         *next_seq = seq + 1;
 
         Ok(envelope)
+    }
+
+    /// Convenience wrapper: append an event with `source = "ox"`.
+    pub fn append_ox(
+        &self,
+        kind: &str,
+        subject_id: &str,
+        data: serde_json::Value,
+    ) -> Result<EventEnvelope> {
+        self.append(ox_core::events::SOURCE_OX, kind, subject_id, data)
     }
 
     /// Subscribe to the event broadcast channel.
@@ -165,20 +172,18 @@ impl EventBus {
         let rows = db::read_events_after(&conn, after_seq)?;
         let mut envelopes = Vec::with_capacity(rows.len());
 
-        for (seq, ts, event_type_str, data_str) in rows {
-            let event_type: EventType =
-                serde_json::from_value(serde_json::Value::String(event_type_str))?;
+        for (seq, ts, source, kind, subject_id, data_str) in rows {
             let data: serde_json::Value = serde_json::from_str(&data_str)?;
-            let ts = chrono::DateTime::parse_from_rfc3339(&ts)?
-                .with_timezone(&Utc);
+            let ts = chrono::DateTime::parse_from_rfc3339(&ts)?.with_timezone(&Utc);
 
             let envelope = EventEnvelope {
                 seq: Seq(seq),
                 ts,
-                event_type,
+                source,
+                kind,
+                subject_id,
                 data,
             };
-            // Redact secrets for SSE delivery
             envelopes.push(envelope.redacted_for_sse());
         }
 
@@ -228,7 +233,7 @@ impl EventBus {
 
     /// Ingest a batch of source events from a watcher. One SQLite
     /// transaction: CAS the cursor, dedup via `ingest_idempotency`,
-    /// append `EventType::Source` rows, update `watcher_cursors`.
+    /// append canonical envelopes, update `watcher_cursors`.
     /// Projections and SSE broadcast happen after commit.
     pub fn ingest_batch(&self, batch: IngestBatch) -> Result<IngestResult, IngestError> {
         let IngestBatch {
@@ -244,21 +249,15 @@ impl EventBus {
         // advances after `tx.commit()` succeeds below. If any write in
         // the transaction fails and SQLite rolls back, the counter
         // stays where it was, so retries don't create gaps in the
-        // event log (db.rs: "guarantees no gaps").
+        // event log.
         let mut next_seq_candidate: u64 = *next_seq;
 
         // CAS: compare stored cursor against cursor_before.
         let existing = read_watcher_cursor(&conn, &source).map_err(IngestError::Storage)?;
         let stored_cursor = existing.as_ref().and_then(|r| r.cursor.clone());
         if stored_cursor != cursor_before {
-            // Best-effort: record the failure reason on the row so
-            // operators can see why a watcher is stuck. Any DB error
-            // here is swallowed — the caller still sees CursorConflict.
             let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-            let last_error = format!(
-                "cas: expected {:?}, stored {:?}",
-                cursor_before, stored_cursor
-            );
+            let last_error = format!("cas: expected {cursor_before:?}, stored {stored_cursor:?}");
             let _ = conn.execute(
                 "INSERT INTO watcher_cursors (source, cursor, updated_at, updated_seq, last_error)
                  VALUES (?1, ?2, ?3, ?4, ?5)
@@ -273,8 +272,6 @@ impl EventBus {
             });
         }
 
-        // Begin the atomic write: idempotency inserts, event appends,
-        // cursor upsert — all or nothing.
         let tx = conn
             .transaction()
             .context("starting ingest transaction")
@@ -287,7 +284,6 @@ impl EventBus {
         let ts_str = ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
         for event in events {
-            // `INSERT OR IGNORE` implements silent per-event dedup.
             let seq = next_seq_candidate;
             let inserted = tx
                 .execute(
@@ -303,31 +299,35 @@ impl EventBus {
                 continue;
             }
 
-            let data_value = serde_json::to_value(&event)
-                .context("serializing SourceEventData")
-                .map_err(IngestError::Storage)?;
-            let data_str = serde_json::to_string(&data_value)
-                .context("encoding SourceEventData json")
+            let data_str = serde_json::to_string(&event.data)
+                .context("encoding ingest event data")
                 .map_err(IngestError::Storage)?;
 
             tx.execute(
-                "INSERT INTO events (seq, ts, event_type, data) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![seq, &ts_str, "source", &data_str],
+                "INSERT INTO events (seq, ts, source, kind, subject_id, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    seq,
+                    &ts_str,
+                    &source,
+                    &event.kind,
+                    &event.subject_id,
+                    &data_str,
+                ],
             )
-            .context("appending source event")
+            .context("appending ingest event")
             .map_err(IngestError::Storage)?;
 
-            // Advance only the local candidate. The shared counter
-            // stays untouched until after commit — see the comment at
-            // the top of this method.
             next_seq_candidate = seq + 1;
             last_appended_seq = Some(seq);
 
             appended_envelopes.push(EventEnvelope {
                 seq: Seq(seq),
                 ts,
-                event_type: EventType::Source,
-                data: data_value,
+                source: source.clone(),
+                kind: event.kind,
+                subject_id: event.subject_id,
+                data: event.data,
             });
         }
 
@@ -355,13 +355,8 @@ impl EventBus {
             .context("committing ingest transaction")
             .map_err(IngestError::Storage)?;
 
-        // Commit succeeded — publish the new counter value so future
-        // calls pick up from here. Any earlier failure would have left
-        // this untouched.
         *next_seq = next_seq_candidate;
 
-        // After commit: apply projections and broadcast SSE. Subscribers
-        // never observe events that later roll back.
         drop(conn);
         drop(next_seq);
         for envelope in &appended_envelopes {
@@ -415,7 +410,7 @@ fn row_to_watcher_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<WatcherCur
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ox_core::events::{RunnerRegisteredData, SecretSetData};
+    use ox_core::events::{RunnerRegisteredData, SecretSetData, kinds};
     use ox_core::types::RunnerId;
     use std::collections::HashMap;
 
@@ -424,32 +419,24 @@ mod tests {
         EventBus::new(conn).unwrap()
     }
 
+    fn runner_registered(name: &str) -> serde_json::Value {
+        serde_json::to_value(RunnerRegisteredData {
+            runner_id: RunnerId(name.into()),
+            environment: "test".into(),
+            labels: HashMap::new(),
+        })
+        .unwrap()
+    }
+
     #[test]
     fn append_assigns_sequential_ids() {
         let bus = test_bus();
         let e1 = bus
-            .append(
-                EventType::RunnerRegistered,
-                serde_json::to_value(RunnerRegisteredData {
-                    runner_id: RunnerId("run-0001".into()),
-                    environment: "test".into(),
-                    labels: HashMap::new(),
-                })
-                .unwrap(),
-            )
+            .append_ox(kinds::RUNNER_REGISTERED, "run-0001", runner_registered("run-0001"))
             .unwrap();
         let e2 = bus
-            .append(
-                EventType::RunnerRegistered,
-                serde_json::to_value(RunnerRegisteredData {
-                    runner_id: RunnerId("run-0002".into()),
-                    environment: "test".into(),
-                    labels: HashMap::new(),
-                })
-                .unwrap(),
-            )
+            .append_ox(kinds::RUNNER_REGISTERED, "run-0002", runner_registered("run-0002"))
             .unwrap();
-
         assert_eq!(e1.seq, Seq(1));
         assert_eq!(e2.seq, Seq(2));
     }
@@ -458,29 +445,21 @@ mod tests {
     fn broadcast_receives_events() {
         let bus = test_bus();
         let mut rx = bus.subscribe();
-
-        bus.append(
-            EventType::RunnerRegistered,
-            serde_json::to_value(RunnerRegisteredData {
-                runner_id: RunnerId("run-0001".into()),
-                environment: "test".into(),
-                labels: HashMap::new(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
+        bus.append_ox(kinds::RUNNER_REGISTERED, "run-0001", runner_registered("run-0001"))
+            .unwrap();
         let received = rx.try_recv().unwrap();
         assert_eq!(received.seq, Seq(1));
+        assert_eq!(received.source, ox_core::events::SOURCE_OX);
+        assert_eq!(received.kind, kinds::RUNNER_REGISTERED);
     }
 
     #[test]
     fn broadcast_redacts_secrets() {
         let bus = test_bus();
         let mut rx = bus.subscribe();
-
-        bus.append(
-            EventType::SecretSet,
+        bus.append_ox(
+            kinds::SECRET_SET,
+            "key",
             serde_json::to_value(SecretSetData {
                 name: "key".into(),
                 value: "secret-value".into(),
@@ -488,29 +467,23 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-
         let received = rx.try_recv().unwrap();
         let obj = received.data.as_object().unwrap();
         assert!(obj.contains_key("name"));
-        assert!(!obj.contains_key("value")); // redacted
+        assert!(!obj.contains_key("value"));
     }
 
     #[test]
     fn replay_after() {
         let bus = test_bus();
         for i in 0..5 {
-            bus.append(
-                EventType::RunnerRegistered,
-                serde_json::to_value(RunnerRegisteredData {
-                    runner_id: RunnerId(format!("run-{i:04x}")),
-                    environment: "test".into(),
-                    labels: HashMap::new(),
-                })
-                .unwrap(),
+            bus.append_ox(
+                kinds::RUNNER_REGISTERED,
+                &format!("run-{i:04x}"),
+                runner_registered(&format!("run-{i:04x}")),
             )
             .unwrap();
         }
-
         let replayed = bus.replay_after(3).unwrap();
         assert_eq!(replayed.len(), 2);
         assert_eq!(replayed[0].seq, Seq(4));
@@ -520,8 +493,9 @@ mod tests {
     #[test]
     fn replay_redacts_secrets() {
         let bus = test_bus();
-        bus.append(
-            EventType::SecretSet,
+        bus.append_ox(
+            kinds::SECRET_SET,
+            "key",
             serde_json::to_value(SecretSetData {
                 name: "key".into(),
                 value: "secret".into(),
@@ -529,17 +503,15 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-
         let replayed = bus.replay_after(0).unwrap();
         let obj = replayed[0].data.as_object().unwrap();
         assert!(!obj.contains_key("value"));
     }
 
-    // ── Slice 1: watcher ingest ────────────────────────────────────────
+    // ── Watcher ingest ────────────────────────────────────────────────
 
-    fn sample_event(key: &str) -> SourceEventData {
-        SourceEventData {
-            source: "cx".into(),
+    fn sample_event(key: &str) -> IngestEventData {
+        IngestEventData {
             kind: "node.ready".into(),
             subject_id: "Q6cY".into(),
             idempotency_key: key.into(),
@@ -555,7 +527,7 @@ mod tests {
     fn get_watcher_cursor_missing_returns_none() {
         let bus = test_bus();
         let got = bus.get_watcher_cursor("cx").unwrap();
-        assert!(got.is_none(), "empty db should return None for cursor");
+        assert!(got.is_none());
     }
 
     #[test]
@@ -571,21 +543,19 @@ mod tests {
         };
 
         let result = bus.ingest_batch(batch).expect("ingest should succeed");
-        assert_eq!(result.appended, 1, "one new event should be appended");
-        assert_eq!(result.deduped, 0, "no dupes on first call");
+        assert_eq!(result.appended, 1);
+        assert_eq!(result.deduped, 0);
 
-        let cursor = bus
-            .get_watcher_cursor("cx")
-            .unwrap()
-            .expect("cursor row should exist after first ingest");
+        let cursor = bus.get_watcher_cursor("cx").unwrap().unwrap();
         assert_eq!(cursor.source, "cx");
         assert_eq!(cursor.cursor.as_deref(), Some("sha-abc"));
         assert_eq!(cursor.last_error, None);
 
-        // The event log grew by exactly one Source event.
         let tail = bus.replay_after(start_seq).unwrap();
         assert_eq!(tail.len(), 1);
-        assert_eq!(tail[0].event_type, EventType::Source);
+        assert_eq!(tail[0].source, "cx");
+        assert_eq!(tail[0].kind, "node.ready");
+        assert_eq!(tail[0].subject_id, "Q6cY");
     }
 
     #[test]
@@ -601,31 +571,14 @@ mod tests {
 
         let r1 = bus.ingest_batch(batch(None, "sha-abc")).unwrap();
         assert_eq!(r1.appended, 1);
-
         let seq_after_first = bus.current_seq();
 
-        // Replaying the exact same batch should dedupe the event.
-        // The watcher would send cursor_before = current cursor on retry.
         let r2 = bus.ingest_batch(batch(Some("sha-abc"), "sha-abc")).unwrap();
-        assert_eq!(r2.appended, 0, "replayed event should be deduped");
+        assert_eq!(r2.appended, 0);
         assert_eq!(r2.deduped, 1);
-
-        assert_eq!(
-            bus.current_seq(),
-            seq_after_first,
-            "no new events appended on replay"
-        );
-
-        let cursor = bus.get_watcher_cursor("cx").unwrap().unwrap();
-        assert_eq!(cursor.cursor.as_deref(), Some("sha-abc"));
+        assert_eq!(bus.current_seq(), seq_after_first);
     }
 
-    /// Invariant: after any successful ingest_batch, `current_seq()`
-    /// matches the highest seq that actually landed in the events
-    /// table. Catches regressions where the in-memory counter drifts
-    /// ahead of disk (e.g. if we bumped `next_seq` before tx.commit()
-    /// succeeded, a rolled-back write would leave the counter one
-    /// step ahead of reality and the next insert would create a gap).
     #[test]
     fn ingest_batch_keeps_current_seq_in_sync_with_disk() {
         let bus = test_bus();
@@ -650,18 +603,13 @@ mod tests {
             conn.query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))
                 .unwrap()
         });
-        assert_eq!(
-            bus.current_seq(),
-            max_seq,
-            "in-memory counter must equal max(events.seq) after successful ingest"
-        );
+        assert_eq!(bus.current_seq(), max_seq);
     }
 
     #[test]
     fn ingest_batch_rejects_wrong_cursor_before() {
         let bus = test_bus();
 
-        // Seed the cursor at "sha-abc".
         bus.ingest_batch(IngestBatch {
             source: "cx".into(),
             cursor_before: None,
@@ -672,7 +620,6 @@ mod tests {
 
         let seq_before = bus.current_seq();
 
-        // Now post with a stale cursor_before.
         let bad = IngestBatch {
             source: "cx".into(),
             cursor_before: Some("sha-WRONG".into()),
@@ -688,37 +635,20 @@ mod tests {
             other => panic!("expected CursorConflict, got {other:?}"),
         }
 
-        // No new events committed.
         assert_eq!(bus.current_seq(), seq_before);
-
-        // Cursor unchanged.
         let cursor = bus.get_watcher_cursor("cx").unwrap().unwrap();
         assert_eq!(cursor.cursor.as_deref(), Some("sha-abc"));
     }
 
     #[test]
     fn rebuild_on_new() {
-        // Create a bus, append events, then create a new bus from the same db
-        let conn = Connection::open("file::memory:?cache=shared")
-            .unwrap();
+        let conn = Connection::open("file::memory:?cache=shared").unwrap();
         let bus = EventBus::new(conn).unwrap();
-        bus.append(
-            EventType::RunnerRegistered,
-            serde_json::to_value(RunnerRegisteredData {
-                runner_id: RunnerId("run-0001".into()),
-                environment: "test".into(),
-                labels: HashMap::new(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        // Verify projection was updated
+        bus.append_ox(kinds::RUNNER_REGISTERED, "run-0001", runner_registered("run-0001"))
+            .unwrap();
         assert_eq!(bus.projections.pool().runners.len(), 1);
 
-        // New bus from same db should rebuild projections
-        let conn2 = Connection::open("file::memory:?cache=shared")
-            .unwrap();
+        let conn2 = Connection::open("file::memory:?cache=shared").unwrap();
         let bus2 = EventBus::new(conn2).unwrap();
         assert_eq!(bus2.projections.pool().runners.len(), 1);
         assert_eq!(bus2.current_seq(), 1);

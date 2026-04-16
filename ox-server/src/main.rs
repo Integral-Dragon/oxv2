@@ -13,7 +13,6 @@ mod state;
 use anyhow::Result;
 use axum::Router;
 use clap::Parser;
-use ox_core::events::*;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -89,7 +88,7 @@ async fn main() -> Result<()> {
     // Emit server.ready — signals that migrations and projections are complete.
     state
         .bus
-        .append(EventType::ServerReady, serde_json::json!({}))
+        .append_ox(ox_core::events::kinds::SERVER_READY, "", serde_json::json!({}))
         .expect("failed to emit server.ready");
 
     // Event ingestion is out-of-process — watcher binaries launched

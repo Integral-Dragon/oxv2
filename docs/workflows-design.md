@@ -12,27 +12,25 @@ For the workflow model (what workflows are), see
 
 ## Trigger Evaluation
 
-Triggers create executions. The herder evaluates triggers when source
-events arrive on the SSE stream.
+Triggers create executions. The herder evaluates triggers when any
+event arrives on the SSE stream — both watcher source events and
+ox-internal events feed the same matcher.
 
 ### Flow
 
 ```
-EventType::Source arrives (SourceEventData { source, kind, subject_id, data })
+EventEnvelope arrives (source, kind, subject_id, data)
   │
   ▼
 herder: for each trigger in loaded trigger files:
   │
-  ├─ does trigger.on match the event's `kind`?
-  ├─ if trigger.source is set, does it match the event's `source`?
-  ├─ does every [trigger.where] predicate match the event context?
+  ├─ does trigger.on match envelope.kind?
+  ├─ if trigger.source is set, does it match envelope.source?
+  ├─ does every [trigger.where] predicate match the envelope?
+  │  ({event.source}, {event.kind}, {event.subject_id},
+  │   {event.data.*} all resolve against the envelope directly)
   │
-  ├─ build EventContext::Source from the envelope
-  │  (source, kind, subject_id, data — all available as
-  │   {event.source}, {event.kind}, {event.subject_id},
-  │   {event.data.*})
-  │
-  ├─ call trigger.build_vars(&ctx):
+  ├─ call trigger.build_vars(envelope):
   │  ├─ interpolate each [trigger.vars] template
   │  │  against {event.X} / {event.data.X} fields
   │  ├─ on MissingEventField → post trigger.failed, continue
@@ -40,14 +38,14 @@ herder: for each trigger in loaded trigger files:
   │
   ├─ dedup check: is_origin_active(
   │     existing executions,
-  │     origin = Source { source, kind, subject_id },
+  │     origin = Event { source, kind, subject_id, seq },
   │     workflow = trigger.workflow,
   │     is_active = |s| running or escalated
-  │  )?
+  │  )?  // seq ignored for dedup comparison
   │
   ├─ if all pass:
   │    POST /api/executions
-  │    { workflow, vars, origin: Source{..}, trigger: <kind> }
+  │    { workflow, vars, origin: Event{..}, trigger: <kind> }
   │
   └─ if dedup blocks or build_vars fails: skip (event emitted on failure)
 ```
@@ -62,11 +60,13 @@ any source's lifecycle — it matches what the watcher chose to ingest.
 ### Dedup Rules
 
 A trigger is suppressed if there is already an active execution with
-the same `(origin, workflow)` pair, where `origin` is typed
-(`ExecutionOrigin::Source | Execution | Manual`) and compared
-structurally. For source events the dedup key is
-`(source, kind, subject_id)` — the same subject firing the same kind
-of event does not double-start a workflow while one is already live.
+the same `(origin, workflow)` pair. `origin` is typed
+(`ExecutionOrigin::Event | Manual`) and compared via
+`origins_match_for_dedup`, which matches on the `(source, kind,
+subject_id)` triplet and ignores the firing `seq`. The same subject
+firing the same kind of event does not double-start a workflow while
+one is already live, even if the retried post has a different
+sequence number.
 
 The herder's `is_origin_active` predicate uses the running-or-escalated
 liveness rule:
@@ -374,10 +374,10 @@ events itself — that is a watcher's job.
 Each source watcher observes its own surface independently. When a
 merge to main changes `.complex/`, `ox-cx-watcher` sees the new
 commits on its next tick, runs `cx log --since <cursor>` and
-`cx show` for each touched node, maps them into
-`EventType::Source` envelopes, and posts them to
-`/api/events/ingest`. A Linear or GitHub watcher performs the same
-role through its own API.
+`cx show` for each touched node, maps them into `IngestEventData`
+records, and posts a batch to `/api/events/ingest` with
+`source = "cx"`. A Linear or GitHub watcher performs the same role
+through its own API.
 
 The result is that there is exactly one code path for source events
 — the watcher ingest path — regardless of whether the change came

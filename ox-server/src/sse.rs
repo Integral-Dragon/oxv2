@@ -31,14 +31,10 @@ async fn sse_handler(
         if let Ok(replayed) = state.bus.replay_after(after_seq) {
             for envelope in replayed {
                 let data = serde_json::to_string(&envelope).unwrap_or_default();
-                let event_type = serde_json::to_value(&envelope.event_type)
-                    .unwrap()
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
+                let event_name = envelope.kind.clone();
                 yield Ok(Event::default()
                     .id(envelope.seq.0.to_string())
-                    .event(event_type)
+                    .event(event_name)
                     .data(data));
             }
         }
@@ -48,14 +44,10 @@ async fn sse_handler(
             match rx.recv().await {
                 Ok(envelope) => {
                     let data = serde_json::to_string(&envelope).unwrap_or_default();
-                    let event_type = serde_json::to_value(&envelope.event_type)
-                        .unwrap()
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .to_string();
+                    let event_name = envelope.kind.clone();
                     yield Ok(Event::default()
                         .id(envelope.seq.0.to_string())
-                        .event(event_type)
+                        .event(event_name)
                         .data(data));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

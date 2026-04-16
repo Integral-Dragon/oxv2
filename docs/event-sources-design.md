@@ -29,7 +29,8 @@ execution's branch and artifacts are how steps share state.
 Watchers are separate binaries launched by `ox-ctl up` from the
 `watchers = [...]` list in `.ox/config.toml`. A watcher owns one source
 system, reads its native API or local state, maps source facts into
-`SourceEventData`, and posts batches to ox-server.
+`IngestEventData`, and posts batches (with the batch-level `source`
+name) to ox-server.
 
 ox-server stores watcher cursors, ingests source-event batches,
 broadcasts committed events over SSE, and stays source-agnostic. It
@@ -45,17 +46,26 @@ a watcher-owned durable inbox before posting to Ox.
 
 ## Source Events
 
-Source events are stored on the bus as `EventType::Source` with a
-`SourceEventData` payload:
+Source events land on the canonical event bus — the same envelope Ox
+uses for every internal event. A watcher posts `IngestEventData`
+records and ox-server stamps `source = batch.source` onto each one:
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SourceEventData {
-    pub source: String,
+// Canonical envelope (ox_core::events)
+pub struct EventEnvelope {
+    pub seq: Seq,
+    pub ts: DateTime<Utc>,
+    pub source: String,       // "cx", "linear", "github", "schedule", ...
+    pub kind: String,
+    pub subject_id: String,
+    pub data: serde_json::Value,
+}
+
+// What the watcher submits (per event, inside an IngestBatch)
+pub struct IngestEventData {
     pub kind: String,
     pub subject_id: String,
     pub idempotency_key: String,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
 }
 ```
@@ -64,10 +74,10 @@ Field semantics:
 
 | Field | Meaning |
 |-------|---------|
-| `source` | Watcher namespace, such as `cx`, `linear`, `github`, or `schedule` |
+| `source` | Watcher namespace, such as `cx`, `linear`, `github`, or `schedule` (set on the batch, not per event) |
 | `kind` | Source-authored event kind, such as `node.ready`, `issue.labeled`, or `schedule.tick` |
 | `subject_id` | Source-native correlation key for what the event is about |
-| `idempotency_key` | Source-authored dedup key, unique within `(source, idempotency_key)` |
+| `idempotency_key` | Source-authored dedup key, unique within `(source, idempotency_key)`; lives in the `ingest_idempotency` table, not on the canonical envelope |
 | `data` | Free-form source payload available to trigger var templates |
 
 Kinds are source-authored strings, not a closed Ox enum. Ox does not
@@ -78,19 +88,10 @@ webhook payloads into a generic lifecycle.
 
 ## Trigger Context
 
-`EventContext::Source` exposes source-event fields to trigger variable
-templates:
-
-```rust
-pub enum EventContext {
-    Source {
-        source: String,
-        kind: String,
-        subject_id: String,
-        data: serde_json::Value,
-    },
-}
-```
+Triggers resolve `{event.*}` paths directly against the canonical
+envelope — the same `EventEnvelope` the bus stores. There is no
+separate "source event context" type: an ox-internal event and a
+watcher source event answer the same resolver.
 
 Resolvable paths:
 
@@ -277,7 +278,8 @@ in-memory cursor.
 2. Record `last_error` and return 409 on cursor mismatch.
 3. Insert each event's `(source, idempotency_key)` into
    `ingest_idempotency` with `INSERT OR IGNORE`.
-4. Append non-duplicate events as `EventType::Source` rows.
+4. Append non-duplicate events as canonical envelope rows stamped
+   with `source = batch.source`.
 5. Upsert `watcher_cursors[source] = cursor_after`, clear
    `last_error`, and record `updated_seq`.
 6. Commit.
@@ -296,21 +298,19 @@ ping that updates `updated_at`.
 
 ## Trigger Matching
 
-The herder queues `EventType::Source` envelopes from SSE and evaluates
-them against loaded trigger definitions:
+The herder queues every envelope it observes on SSE (in live mode)
+and matches each against loaded triggers:
 
 ```rust
-if trigger.on != event.kind {
+if trigger.on != envelope.kind {
     continue;
 }
 if let Some(ref want_source) = trigger.source
-    && want_source != &event.source
+    && want_source != &envelope.source
 {
     continue;
 }
-
-let ctx = EventContext::Source { source, kind, subject_id, data };
-if !trigger.matches_where(&ctx) {
+if !trigger.matches_where(envelope) {
     continue;
 }
 ```
@@ -318,19 +318,29 @@ if !trigger.matches_where(&ctx) {
 Matching triggers create executions with:
 
 ```rust
-ExecutionOrigin::Source {
-    source: event.source.clone(),
-    kind: event.kind.clone(),
-    subject_id: event.subject_id.clone(),
+ExecutionOrigin::Event {
+    source: envelope.source.clone(),
+    kind: envelope.kind.clone(),
+    subject_id: envelope.subject_id.clone(),
+    seq: envelope.seq,
 }
 ```
 
-Dedup is by `(origin, workflow)` with the herder's active-status rule:
-`running` and `escalated` executions block a duplicate auto-trigger.
+Dedup is by `(origin, workflow)` via `origins_match_for_dedup`, which
+compares the `(source, kind, subject_id)` triplet and ignores the
+firing seq. `running` and `escalated` executions block a duplicate
+auto-trigger.
 
-`EventContext::Source` feeds `trigger.build_vars()`. Missing event
-fields, var validation failures, and unknown workflow references append
-`trigger.failed`.
+`trigger.build_vars()` resolves `{event.*}` paths against the
+envelope. Missing event fields, var validation failures, and unknown
+workflow references append `trigger.failed`.
+
+Matching runs on every envelope, so ox-internal events are
+triggerable by the same mechanism as watcher events. A workflow that
+should fire when another execution finishes declares
+`on = "execution.completed"` (with an optional `source = "ox"`
+filter). The bus and the matcher do not distinguish "source events"
+from "ox events" — both are canonical envelopes.
 
 Source-specific state suppression belongs in the watcher. For cx, the
 watcher does not emit `node.ready` for nodes it observes as shadowed or
@@ -349,7 +359,7 @@ ox-cx-watcher/
     ├── main.rs        # clap args, tick loop, shutdown
     ├── cx.rs          # cx CLI integration and parsers
     ├── client.rs      # watcher HTTP client
-    └── mapping.rs     # cx facts -> SourceEventData
+    └── mapping.rs     # cx facts -> IngestEventData
 ```
 
 CLI:
@@ -377,7 +387,7 @@ Incremental tick:
 
 1. Run `cx log --json --since <cursor>`.
 2. Fetch current snapshots for touched nodes with `cx show`.
-3. Map node states and comments into `SourceEventData`.
+3. Map node states and comments into `IngestEventData`.
 4. Post one batch with CAS.
 5. Advance the in-memory cursor only after a 200 response.
 

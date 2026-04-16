@@ -1,4 +1,4 @@
-use crate::events::EventContext;
+use crate::events::EventEnvelope;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -234,23 +234,26 @@ pub enum TriggerError {
 
 impl TriggerDef {
     /// Return true when every `[trigger.where]` predicate matches the
-    /// firing event context.
-    pub fn matches_where(&self, ctx: &EventContext) -> bool {
+    /// firing event envelope.
+    pub fn matches_where(&self, envelope: &EventEnvelope) -> bool {
         self.where_.iter().all(|(path, cond)| {
             let event_path = format!("event.{path}");
-            cond.matches(ctx.resolve_value(&event_path))
+            cond.matches(envelope.resolve_value(&event_path))
         })
     }
 
-    /// Resolve the trigger's `[trigger.vars]` block against an event context,
+    /// Resolve the trigger's `[trigger.vars]` block against an event envelope,
     /// returning the map of workflow vars to pass to `create_execution`.
     ///
     /// Each value is a template that may reference `{event.X}` fields from
     /// the firing event. Unknown fields produce `TriggerError::MissingEventField`.
-    pub fn build_vars(&self, ctx: &EventContext) -> Result<HashMap<String, String>, TriggerError> {
+    pub fn build_vars(
+        &self,
+        envelope: &EventEnvelope,
+    ) -> Result<HashMap<String, String>, TriggerError> {
         let mut out = HashMap::with_capacity(self.vars.len());
         for (name, template) in &self.vars {
-            out.insert(name.clone(), interpolate_event_template(template, ctx)?);
+            out.insert(name.clone(), interpolate_event_template(template, envelope)?);
         }
         Ok(out)
     }
@@ -293,16 +296,19 @@ impl TriggerWhere {
     }
 }
 
-/// Interpolate `{event.X}` references in a template against the given context.
+/// Interpolate `{event.X}` references in a template against the given envelope.
 /// Literal text and non-event braces are passed through unchanged.
-fn interpolate_event_template(template: &str, ctx: &EventContext) -> Result<String, TriggerError> {
+fn interpolate_event_template(
+    template: &str,
+    envelope: &EventEnvelope,
+) -> Result<String, TriggerError> {
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '{' {
             let path: String = chars.by_ref().take_while(|&c| c != '}').collect();
             if path.starts_with("event.") {
-                match ctx.resolve(&path) {
+                match envelope.resolve(&path) {
                     Some(value) => out.push_str(&value),
                     None => return Err(TriggerError::MissingEventField { path }),
                 }
@@ -946,30 +952,35 @@ branch = "{event.subject_id}"
             t.vars.get("branch").map(String::as_str),
             Some("{event.subject_id}")
         );
-        assert!(t.matches_where(&EventContext::Source {
-            source: "cx".into(),
-            kind: "node.ready".into(),
-            subject_id: "Q6cY".into(),
-            data: serde_json::json!({ "tags": ["workflow:consultation"] }),
-        }));
-        assert!(!t.matches_where(&EventContext::Source {
-            source: "cx".into(),
-            kind: "node.ready".into(),
-            subject_id: "Q6cY".into(),
-            data: serde_json::json!({ "tags": ["workflow:other"] }),
-        }));
+        assert!(t.matches_where(&sample_envelope(
+            "Q6cY",
+            serde_json::json!({ "tags": ["workflow:consultation"] }),
+        )));
+        assert!(!t.matches_where(&sample_envelope(
+            "Q6cY",
+            serde_json::json!({ "tags": ["workflow:other"] }),
+        )));
     }
 
-    fn sample_source_ctx(subject: &str) -> EventContext {
-        EventContext::Source {
+    fn sample_envelope(subject: &str, data: serde_json::Value) -> EventEnvelope {
+        EventEnvelope {
+            seq: crate::types::Seq(1),
+            ts: chrono::Utc::now(),
             source: "cx".into(),
             kind: "node.ready".into(),
             subject_id: subject.into(),
-            data: serde_json::json!({
+            data,
+        }
+    }
+
+    fn sample_source_ctx(subject: &str) -> EventEnvelope {
+        sample_envelope(
+            subject,
+            serde_json::json!({
                 "tags": ["workflow:code-task"],
                 "state": "ready"
             }),
-        }
+        )
     }
 
     #[test]

@@ -422,26 +422,9 @@ const ORIGIN_DISPLAY_WIDTH: usize = 24;
 fn format_origin(origin: &ox_core::events::ExecutionOrigin) -> String {
     use ox_core::events::ExecutionOrigin::*;
     let raw = match origin {
-        Source {
-            source,
-            subject_id,
-            ..
+        Event {
+            source, subject_id, ..
         } => format!("{source}:{subject_id}"),
-        Execution {
-            parent_execution_id,
-            parent_step,
-            ..
-        } => {
-            // Execution IDs have shape `e-{epoch}-{seq}`; the seq suffix
-            // is locally unique and short enough for a narrow column.
-            // The full ID is still in the ID column next to ORIGIN.
-            let id = &parent_execution_id.0;
-            let short = id.rsplit('-').next().unwrap_or(id);
-            match parent_step {
-                Some(step) => format!("exec:{short}/{step}"),
-                None => format!("exec:{short}"),
-            }
-        }
         Manual { user: Some(u) } => format!("manual:{u}"),
         Manual { user: None } => "manual".to_string(),
     };
@@ -701,24 +684,19 @@ fn event_summary(data: &str) -> String {
         Ok(v) => v,
         Err(_) => return String::new(),
     };
-    let d = v.get("data").unwrap_or(&v);
-
-    // Source events carry source/kind/subject_id rather than the
-    // execution-centric fields below.
-    if let Some(src) = d.get("source").and_then(|v| v.as_str()) {
-        let kind = d.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        let subj = d.get("subject_id").and_then(|v| v.as_str()).unwrap_or("");
-        let mut s = if kind.is_empty() {
-            src.to_string()
+    // Non-ox events render as "source subject_id" — the kind already
+    // shows in the TYPE column so don't repeat it.
+    let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("");
+    if !source.is_empty() && source != ox_core::events::SOURCE_OX {
+        let subj = v.get("subject_id").and_then(|x| x.as_str()).unwrap_or("");
+        return if subj.is_empty() {
+            source.to_string()
         } else {
-            format!("{src}/{kind}")
+            format!("{source} {subj}")
         };
-        if !subj.is_empty() {
-            s.push(' ');
-            s.push_str(subj);
-        }
-        return s;
     }
+
+    let d = v.get("data").unwrap_or(&v);
 
     // Build a brief summary from common fields
     let mut parts = vec![];
@@ -1286,27 +1264,29 @@ async fn cmd_config_check(client: &OxClient, json: bool) -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
-    use ox_core::events::{ChildKind, ExecutionOrigin};
-    use ox_core::types::ExecutionId;
+    use ox_core::events::ExecutionOrigin;
+    use ox_core::types::Seq;
 
     #[test]
     fn event_summary_source_event() {
-        let data = r#"{"data":{"source":"cx","kind":"node.ready","subject_id":"aJuO","idempotency_key":"k1"}}"#;
-        assert_eq!(event_summary(data), "cx/node.ready aJuO");
+        // Canonical envelope: source/kind/subject_id live at the top level.
+        let data = r#"{"seq":1,"ts":"2026-01-01T00:00:00Z","source":"cx","kind":"node.ready","subject_id":"aJuO","data":{"tags":["workflow:code-task"]}}"#;
+        assert_eq!(event_summary(data), "cx aJuO");
     }
 
     #[test]
     fn event_summary_step_done() {
-        let data = r#"{"data":{"execution_id":"e-1","step":"propose","output":"proposed"}}"#;
+        let data = r#"{"seq":1,"ts":"2026-01-01T00:00:00Z","source":"ox","kind":"step.done","subject_id":"e-1","data":{"execution_id":"e-1","step":"propose","output":"proposed"}}"#;
         assert_eq!(event_summary(data), "e-1 propose output=proposed");
     }
 
     #[test]
-    fn format_origin_source_cx_node() {
-        let o = ExecutionOrigin::Source {
+    fn format_origin_event_cx_node() {
+        let o = ExecutionOrigin::Event {
             source: "cx".into(),
             kind: "node.ready".into(),
             subject_id: "aJuO".into(),
+            seq: Seq(42),
         };
         assert_eq!(format_origin(&o), "cx:aJuO");
     }
@@ -1326,35 +1306,14 @@ mod tests {
     }
 
     #[test]
-    fn format_origin_execution_with_step() {
-        let o = ExecutionOrigin::Execution {
-            parent_execution_id: ExecutionId("e-1744364800-42".into()),
-            parent_step: Some("review-plan".into()),
-            kind: ChildKind::StepCompleted,
-        };
-        // seq suffix (after the last dash) + step
-        assert_eq!(format_origin(&o), "exec:42/review-plan");
-    }
-
-    #[test]
-    fn format_origin_execution_without_step() {
-        let o = ExecutionOrigin::Execution {
-            parent_execution_id: ExecutionId("e-1744364800-42".into()),
-            parent_step: None,
-            kind: ChildKind::Escalated,
-        };
-        assert_eq!(format_origin(&o), "exec:42");
-    }
-
-    #[test]
     fn format_origin_truncates_long_values_with_ellipsis() {
-        let o = ExecutionOrigin::Source {
+        let o = ExecutionOrigin::Event {
             source: "cx".into(),
             kind: "node.ready".into(),
             subject_id: "thisIsAReallyLongNodeIdentifierForcingTruncation".into(),
+            seq: Seq(1),
         };
         let s = format_origin(&o);
-        // Max width is 24, ellipsis '…' counts as 1 char.
         assert!(s.chars().count() <= 24, "got {:?}", s);
         assert!(s.ends_with('…'), "got {:?}", s);
         assert!(s.starts_with("cx:"), "got {:?}", s);

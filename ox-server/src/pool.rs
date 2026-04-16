@@ -22,8 +22,12 @@ pub fn register(bus: &EventBus, environment: String, labels: HashMap<String, Str
         environment,
         labels,
     };
-    bus.append(EventType::RunnerRegistered, serde_json::to_value(data).unwrap())
-        .unwrap();
+    bus.append_ox(
+        kinds::RUNNER_REGISTERED,
+        &runner_id.0,
+        serde_json::to_value(data).unwrap(),
+    )
+    .unwrap();
 
     let ts = Utc::now().to_rfc3339();
     bus.with_conn(|conn| {
@@ -53,8 +57,12 @@ pub fn drain(bus: &EventBus, runner_id: &str, reason: &str) {
         runner_id: RunnerId(runner_id.to_string()),
         reason: reason.to_string(),
     };
-    bus.append(EventType::RunnerDrained, serde_json::to_value(data).unwrap())
-        .unwrap();
+    bus.append_ox(
+        kinds::RUNNER_DRAINED,
+        runner_id,
+        serde_json::to_value(data).unwrap(),
+    )
+    .unwrap();
 
     bus.with_conn(|conn| {
         let _ = db::remove_runner(conn, runner_id);
@@ -175,8 +183,9 @@ pub async fn check_loop(bus: &EventBus, grace_secs: u64) {
                     step: orphan_step,
                     attempt: orphan_attempt,
                 };
-                if let Err(e) = bus.append(
-                    EventType::RunnerHeartbeatMissed,
+                if let Err(e) = bus.append_ox(
+                    kinds::RUNNER_HEARTBEAT_MISSED,
+                    runner_id,
                     serde_json::to_value(data).unwrap(),
                 ) {
                     tracing::error!(err = %e, "failed to emit heartbeat_missed");
@@ -230,6 +239,7 @@ pub async fn check_loop(bus: &EventBus, grace_secs: u64) {
                     "step timeout exceeded"
                 );
 
+                let subject = step_id.execution_id.0.clone();
                 let data = StepTimeoutData {
                     execution_id: step_id.execution_id.clone(),
                     step: step_id.step.clone(),
@@ -237,8 +247,9 @@ pub async fn check_loop(bus: &EventBus, grace_secs: u64) {
                     timeout_secs,
                     runner_id: runner.id.clone(),
                 };
-                if let Err(e) = bus.append(
-                    EventType::StepTimeout,
+                if let Err(e) = bus.append_ox(
+                    kinds::STEP_TIMEOUT,
+                    &subject,
                     serde_json::to_value(data).unwrap(),
                 ) {
                     tracing::error!(err = %e, "failed to emit step.timeout");

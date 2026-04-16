@@ -10,7 +10,7 @@
 //! 2. Every tick: if cursor is `None`, snapshot current cx state and
 //!    POST a cold-start batch. Otherwise run `cx log --since <cursor>`,
 //!    fetch each touched node's current snapshot, map both node
-//!    snapshots and comment entries into `SourceEventData`, and POST
+//!    snapshots and comment entries into `IngestEventData`, and POST
 //!    one batch with the old cursor as `cursor_before` and the new
 //!    HEAD as `cursor_after`.
 //! 3. On 200, update the in-memory cursor.
@@ -19,7 +19,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use ox_core::events::SourceEventData;
+use ox_core::events::IngestEventData;
 use ox_cx_watcher::client::{IngestBody, IngestOutcome, WatcherClient};
 use ox_cx_watcher::{cx, mapping};
 use std::path::{Path, PathBuf};
@@ -165,7 +165,7 @@ async fn build_cold_start_batch(repo: &Path) -> Result<Option<IngestBody>> {
     .await
     .context("cold-start snapshot task")??;
 
-    let mut events: Vec<SourceEventData> = Vec::new();
+    let mut events: Vec<IngestEventData> = Vec::new();
     for node in snap.nodes.values() {
         if let Some(ev) = mapping::snapshot_to_event(node, &head) {
             events.push(ev);
@@ -214,7 +214,7 @@ async fn build_incremental_batch(
         return Ok(None);
     };
 
-    let mut events: Vec<SourceEventData> = Vec::new();
+    let mut events: Vec<IngestEventData> = Vec::new();
     for snap in &snapshots {
         if let Some(ev) = mapping::snapshot_to_event(snap, &latest_hash) {
             events.push(ev);

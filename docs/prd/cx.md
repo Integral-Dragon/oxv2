@@ -71,20 +71,21 @@ Every tick (10s by default):
 2. Run `cx log --json --since <cursor>` in the repo. The latest
    commit SHA becomes the next cursor.
 3. For every touched node, run `cx show <id> --json` to get the
-   current canonical state, then map that snapshot into a
-   `SourceEventData`:
+   current canonical state, then map that snapshot into an
+   `IngestEventData` record:
 
-   | cx state | source kind |
-   |----------|-------------|
+   | cx state | event kind |
+   |----------|------------|
    | `ready` | `node.ready` |
    | `claimed` | `node.claimed` |
    | `integrated` | `node.done` |
    | `latent` | *(no event)* |
 
-   Each event carries `source = "cx"`, `subject_id = <node_id>`, the
-   node's tags, and the full node snapshot JSON as `data`. The
-   idempotency key is `<node_id>:<kind>:<short_sha>` so the same state
-   transition observed in multiple ticks dedups server-side.
+   Each record carries `subject_id = <node_id>`, the node's tags, and
+   the full node snapshot JSON as `data`. The idempotency key is
+   `<node_id>:<kind>:<short_sha>` so the same state transition
+   observed in multiple ticks dedups server-side. `source = "cx"` is
+   set once on the enclosing `IngestBatch`.
 4. New comments are mapped into `kind = "comment.added"` events with
    a stable idempotency key based on the comment author, tag, and
    parent node SHA.
@@ -210,9 +211,9 @@ context of a task they have been assigned.
 
 ## Events
 
-All cx facts reach ox-server as `EventType::Source` envelopes
-authored by `ox-cx-watcher`. Triggers match on `source = "cx"` and
-the watcher-native kinds listed below.
+All cx facts reach ox-server as canonical event envelopes authored
+by `ox-cx-watcher` and stamped with `source = "cx"`. Triggers match
+on `source = "cx"` and the watcher-native kinds listed below.
 
 All events follow the common envelope defined in [events.md](events.md).
 

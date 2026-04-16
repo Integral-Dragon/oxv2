@@ -4,79 +4,84 @@ use std::collections::HashMap;
 
 use crate::types::{ExecutionId, RunnerId, Seq};
 
-/// Common envelope for all events in the log.
+// ── Canonical envelope ──────────────────────────────────────────────
+
+/// Canonical event envelope. Every event in the log — whether emitted
+/// by Ox internally or ingested from a watcher — has this shape.
+///
+/// - `source`: identifier of the emitter (`"ox"`, `"cx"`, `"github"`, ...).
+/// - `kind`: the event kind string (e.g. `"execution.completed"`,
+///   `"node.ready"`). Plain string on the wire, grep-able, extensible
+///   without recompiling downstream consumers.
+/// - `subject_id`: the source-native correlation key — what the event
+///   is about. Empty string for events with no meaningful subject
+///   (e.g. `server.ready`).
+/// - `data`: free-form kind-specific payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub seq: Seq,
     pub ts: DateTime<Utc>,
-    pub event_type: EventType,
+    pub source: String,
+    pub kind: String,
+    pub subject_id: String,
     pub data: serde_json::Value,
 }
 
-/// All event types in the system.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EventType {
-    // Server
-    #[serde(rename = "server.ready")]
-    ServerReady,
-    // Runner
-    #[serde(rename = "runner.registered")]
-    RunnerRegistered,
-    #[serde(rename = "runner.drained")]
-    RunnerDrained,
-    #[serde(rename = "runner.heartbeat_missed")]
-    RunnerHeartbeatMissed,
-    // Triggers
-    #[serde(rename = "trigger.failed")]
-    TriggerFailed,
-    // Execution
-    #[serde(rename = "execution.created")]
-    ExecutionCreated,
-    #[serde(rename = "execution.completed")]
-    ExecutionCompleted,
-    #[serde(rename = "execution.escalated")]
-    ExecutionEscalated,
-    #[serde(rename = "execution.cancelled")]
-    ExecutionCancelled,
-    // Step
-    #[serde(rename = "step.dispatched")]
-    StepDispatched,
-    #[serde(rename = "step.running")]
-    StepRunning,
-    #[serde(rename = "step.done")]
-    StepDone,
-    #[serde(rename = "step.signals")]
-    StepSignals,
-    #[serde(rename = "step.confirmed")]
-    StepConfirmed,
-    #[serde(rename = "step.failed")]
-    StepFailed,
-    #[serde(rename = "step.advanced")]
-    StepAdvanced,
-    #[serde(rename = "step.timeout")]
-    StepTimeout,
-    #[serde(rename = "step.retrying")]
-    StepRetrying,
-    // Artifact
-    #[serde(rename = "artifact.declared")]
-    ArtifactDeclared,
-    #[serde(rename = "artifact.closed")]
-    ArtifactClosed,
-    // Secrets
-    #[serde(rename = "secret.set")]
-    SecretSet,
-    #[serde(rename = "secret.deleted")]
-    SecretDeleted,
-    // Source events from watcher plugins.
-    #[serde(rename = "source")]
-    Source,
-    // Git
-    #[serde(rename = "git.branch_pushed")]
-    GitBranchPushed,
-    #[serde(rename = "git.merged")]
-    GitMerged,
-    #[serde(rename = "git.merge_failed")]
-    GitMergeFailed,
+/// Source identifier stamped on every event emitted internally by Ox.
+pub const SOURCE_OX: &str = "ox";
+
+/// Event kinds. Plain string constants so every emit site is grep-able
+/// and a new kind costs one `pub const` — not an enum variant plus
+/// serde rename plus projection arm.
+pub mod kinds {
+    pub const SERVER_READY: &str = "server.ready";
+
+    pub const RUNNER_REGISTERED: &str = "runner.registered";
+    pub const RUNNER_DRAINED: &str = "runner.drained";
+    pub const RUNNER_HEARTBEAT_MISSED: &str = "runner.heartbeat_missed";
+
+    pub const TRIGGER_FAILED: &str = "trigger.failed";
+
+    pub const EXECUTION_CREATED: &str = "execution.created";
+    pub const EXECUTION_COMPLETED: &str = "execution.completed";
+    pub const EXECUTION_ESCALATED: &str = "execution.escalated";
+    pub const EXECUTION_CANCELLED: &str = "execution.cancelled";
+
+    pub const STEP_DISPATCHED: &str = "step.dispatched";
+    pub const STEP_RUNNING: &str = "step.running";
+    pub const STEP_DONE: &str = "step.done";
+    pub const STEP_SIGNALS: &str = "step.signals";
+    pub const STEP_CONFIRMED: &str = "step.confirmed";
+    pub const STEP_FAILED: &str = "step.failed";
+    pub const STEP_ADVANCED: &str = "step.advanced";
+    pub const STEP_TIMEOUT: &str = "step.timeout";
+    pub const STEP_RETRYING: &str = "step.retrying";
+
+    pub const ARTIFACT_DECLARED: &str = "artifact.declared";
+    pub const ARTIFACT_CLOSED: &str = "artifact.closed";
+
+    pub const SECRET_SET: &str = "secret.set";
+    pub const SECRET_DELETED: &str = "secret.deleted";
+
+    pub const GIT_BRANCH_PUSHED: &str = "git.branch_pushed";
+    pub const GIT_MERGED: &str = "git.merged";
+    pub const GIT_MERGE_FAILED: &str = "git.merge_failed";
+}
+
+// ── Ingest path ─────────────────────────────────────────────────────
+
+/// One event in a watcher ingest batch. The server combines
+/// `batch.source` with each `IngestEventData` to produce the canonical
+/// `EventEnvelope`. `idempotency_key` is storage/ingest mechanics and
+/// is not persisted on the envelope — it lands in the
+/// `ingest_idempotency` table alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestEventData {
+    pub kind: String,
+    pub subject_id: String,
+    pub idempotency_key: String,
+    #[serde(default)]
+    pub data: serde_json::Value,
 }
 
 // ── Event data structs ──────────────────────────────────────────────
@@ -115,12 +120,7 @@ pub struct ExecutionCreatedData {
     pub trigger: String,
     #[serde(default)]
     pub vars: HashMap<String, String>,
-    /// Origin of this execution — always set on newly-written events.
-    /// Still typed `Option` to round-trip through pre-slice-5 event logs
-    /// that may have lacked the field; projection code treats `None` as
-    /// `ExecutionOrigin::Manual`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<ExecutionOrigin>,
+    pub origin: ExecutionOrigin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,74 +257,134 @@ pub struct SecretDeletedData {
     pub name: String,
 }
 
-/// Payload for `EventType::Source` — a fact observed by a watcher
-/// plugin. The server stores the envelope verbatim; triggers match on
-/// `source`, `kind`, and generic fields exposed through `data`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SourceEventData {
-    /// Watcher identifier — `cx`, `linear`, `github`, `schedule`, etc.
-    pub source: String,
-    /// Source-native event kind — `node.ready`, `issue.labeled`, ...
-    pub kind: String,
-    /// Source-native correlation key for what the event is about.
-    pub subject_id: String,
-    /// Dedup key. `(source, idempotency_key)` is the dedup boundary on
-    /// ingest; duplicates are dropped silently.
-    pub idempotency_key: String,
-    /// Free-form source payload available to trigger var templates.
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub data: serde_json::Value,
-}
+// ── ExecutionOrigin ─────────────────────────────────────────────────
 
-/// Trigger-firing event context. Exposes the subset of event payload fields
-/// that can be referenced as `{event.X}` inside a `[trigger.vars]` block.
-#[derive(Debug, Clone)]
-pub enum EventContext {
-    /// A source event emitted by a watcher. `data` is the free-form
-    /// payload; `event.data.<key>` paths resolve into it.
-    Source {
+/// Identity of what caused an execution to be created.
+///
+/// `Event` carries the canonical envelope triplet `(source, kind,
+/// subject_id)` plus the firing event's `seq` as a backreference. The
+/// seq is informational — dedup matches on the triplet only via
+/// [`origins_match_for_dedup`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExecutionOrigin {
+    /// Direct API call or CLI trigger with no event context.
+    Manual {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+    },
+    /// Fired from an event on the bus. The tuple `(source, kind,
+    /// subject_id)` identifies *what* the execution is about. `seq`
+    /// points at the firing envelope for audit.
+    Event {
         source: String,
         kind: String,
         subject_id: String,
-        data: serde_json::Value,
+        seq: Seq,
     },
 }
 
-impl EventContext {
-    /// Resolve a dotted path like `event.subject_id` to its string value.
-    /// Returns `None` if the path is not defined for this variant.
+impl Default for ExecutionOrigin {
+    fn default() -> Self {
+        Self::Manual { user: None }
+    }
+}
+
+/// Structural match for trigger-dedup semantics. Two `Event` origins
+/// are considered the same subject if their `(source, kind,
+/// subject_id)` triplets match — the firing `seq` is ignored because a
+/// retried watcher post would otherwise appear as a new subject.
+/// `Manual` origins never dedup against anything.
+pub fn origins_match_for_dedup(a: &ExecutionOrigin, b: &ExecutionOrigin) -> bool {
+    match (a, b) {
+        (
+            ExecutionOrigin::Event {
+                source: sa,
+                kind: ka,
+                subject_id: ia,
+                ..
+            },
+            ExecutionOrigin::Event {
+                source: sb,
+                kind: kb,
+                subject_id: ib,
+                ..
+            },
+        ) => sa == sb && ka == kb && ia == ib,
+        _ => false,
+    }
+}
+
+/// Dedup predicate. Returns `true` if any element of `existing` has an
+/// origin that matches `origin` for dedup purposes, its workflow is
+/// `workflow`, and its status is considered active.
+///
+/// The `is_active` callback is supplied by the caller because the
+/// herder and the API handler use different liveness rules (the API
+/// blocks on `running` only; the herder blocks on `running|escalated`).
+pub fn is_origin_active<'a, I>(
+    existing: I,
+    origin: &ExecutionOrigin,
+    workflow: &str,
+    is_active: impl Fn(&str) -> bool,
+) -> bool
+where
+    I: IntoIterator<Item = (&'a ExecutionOrigin, &'a str, &'a str)>,
+{
+    existing
+        .into_iter()
+        .any(|(o, w, s)| origins_match_for_dedup(o, origin) && w == workflow && is_active(s))
+}
+
+// ── Envelope helpers ────────────────────────────────────────────────
+
+impl EventEnvelope {
+    /// Resolve `event.<path>` to a string value. `None` when the
+    /// leaf is missing or not a scalar.
     ///
-    /// For `Source` contexts, the resolvable fields are:
-    /// - `event.source` / `event.kind` / `event.subject_id`
-    /// - `event.data.<key>...` — dotted walk into the JSON payload
+    /// Supported roots: `event.source`, `event.kind`,
+    /// `event.subject_id`, `event.data.<key>...`.
     pub fn resolve(&self, path: &str) -> Option<String> {
         self.resolve_value(path).and_then(value_to_string)
     }
 
-    /// Resolve a dotted path like `event.data.tags` to its JSON value.
+    /// Resolve `event.<path>` to a raw `serde_json::Value`. Used by
+    /// `[trigger.where]` predicates that need to walk into arrays.
     pub fn resolve_value(&self, path: &str) -> Option<serde_json::Value> {
         let field = path.strip_prefix("event.")?;
-        match self {
-            Self::Source {
-                source,
-                kind,
-                subject_id,
+        match field {
+            "source" => Some(serde_json::Value::String(self.source.clone())),
+            "kind" => Some(serde_json::Value::String(self.kind.clone())),
+            "subject_id" => Some(serde_json::Value::String(self.subject_id.clone())),
+            rest => rest
+                .strip_prefix("data.")
+                .and_then(|p| resolve_json_value(&self.data, p)),
+        }
+    }
+
+    /// Return a copy suitable for SSE broadcast — secret values stripped.
+    pub fn redacted_for_sse(&self) -> Self {
+        if self.source == SOURCE_OX && self.kind == kinds::SECRET_SET {
+            let mut data = self.data.clone();
+            if let Some(obj) = data.as_object_mut() {
+                obj.remove("value");
+            }
+            Self {
+                seq: self.seq,
+                ts: self.ts,
+                source: self.source.clone(),
+                kind: self.kind.clone(),
+                subject_id: self.subject_id.clone(),
                 data,
-            } => match field {
-                "source" => Some(serde_json::Value::String(source.clone())),
-                "kind" => Some(serde_json::Value::String(kind.clone())),
-                "subject_id" => Some(serde_json::Value::String(subject_id.clone())),
-                rest => rest
-                    .strip_prefix("data.")
-                    .and_then(|p| resolve_json_value(data, p)),
-            },
+            }
+        } else {
+            self.clone()
         }
     }
 }
 
-/// Walk a dotted path into a JSON value, coercing leaf scalars to
-/// strings. Returns `None` if any segment is missing or the leaf is an
-/// object/array/null.
+/// Walk a dotted path into a JSON value. Returns `None` if any
+/// segment is missing.
 fn resolve_json_value(root: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     let mut cur = root;
     for seg in path.split('.') {
@@ -340,68 +400,6 @@ fn value_to_string(value: serde_json::Value) -> Option<String> {
         serde_json::Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
-}
-
-/// Identity of the event that caused an execution to be created.
-///
-/// Persisted on `execution.created`. The dedup key for trigger evaluation is
-/// `(workflow, origin)` — structural equality per variant. Every execution
-/// has exactly one origin; there is no propagation up an ancestor chain.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ExecutionOrigin {
-    /// Fired from a watcher-authored source event. The dedup tuple is
-    /// `(source, kind, subject_id)` — a second event with the same
-    /// tuple while the first execution is live is suppressed.
-    Source {
-        source: String,
-        kind: String,
-        subject_id: String,
-    },
-    /// Chained from a prior execution via a workflow or step event trigger.
-    /// v1 does not wire the workflow-chaining path; the variant exists so
-    /// the data model is stable.
-    Execution {
-        parent_execution_id: ExecutionId,
-        parent_step: Option<String>,
-        kind: ChildKind,
-    },
-    /// Direct API call or CLI trigger with no event context.
-    Manual {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        user: Option<String>,
-    },
-}
-
-/// What child-triggering workflow event produced an `Execution` origin.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChildKind {
-    Escalated,
-    Completed,
-    StepCompleted,
-    StepFailed,
-}
-
-/// Structural dedup predicate. Returns `true` if any element of `existing`
-/// has the same `(origin, workflow)` pair and its status is considered
-/// active for blocking purposes.
-///
-/// The `is_active` callback is supplied by the caller because the herder
-/// and the API handler use different status liveness rules (the API blocks
-/// on `running` only; the herder blocks on `running|escalated`).
-pub fn is_origin_active<'a, I>(
-    existing: I,
-    origin: &ExecutionOrigin,
-    workflow: &str,
-    is_active: impl Fn(&str) -> bool,
-) -> bool
-where
-    I: IntoIterator<Item = (&'a ExecutionOrigin, &'a str, &'a str)>,
-{
-    existing
-        .into_iter()
-        .any(|(o, w, s)| o == origin && w == workflow && is_active(s))
 }
 
 // ── Trigger failure events ─────────────────────────────────────────
@@ -447,7 +445,6 @@ impl TriggerFailedData {
         }
     }
 
-    /// Build a failure record from a missing-field interpolation error.
     pub fn from_missing_field(
         source_seq: Seq,
         on: &str,
@@ -462,7 +459,6 @@ impl TriggerFailedData {
         )
     }
 
-    /// Build a failure record from a `WorkflowDef::validate_vars` error.
     pub fn from_validation_error(
         source_seq: Seq,
         on: &str,
@@ -477,7 +473,6 @@ impl TriggerFailedData {
         )
     }
 
-    /// Build a failure record when the trigger's workflow doesn't exist.
     pub fn for_unknown_workflow(source_seq: Seq, on: &str, workflow: &str) -> Self {
         Self::new(
             source_seq,
@@ -512,55 +507,34 @@ pub struct GitMergeFailedData {
     pub execution_id: ExecutionId,
 }
 
-// ── Redaction ��──────────────────────────────────────────────────────
-
-impl EventEnvelope {
-    /// Return a copy suitable for SSE broadcast — secret values stripped.
-    pub fn redacted_for_sse(&self) -> Self {
-        if self.event_type == EventType::SecretSet {
-            let mut data = self.data.clone();
-            if let Some(obj) = data.as_object_mut() {
-                obj.remove("value");
-            }
-            Self {
-                seq: self.seq,
-                ts: self.ts,
-                event_type: self.event_type.clone(),
-                data,
-            }
-        } else {
-            self.clone()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn event_type_serde() {
-        let t = EventType::StepConfirmed;
-        let json = serde_json::to_string(&t).unwrap();
-        assert_eq!(json, "\"step.confirmed\"");
-        let back: EventType = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, EventType::StepConfirmed);
+    fn envelope(source: &str, kind: &str, subject_id: &str, data: serde_json::Value) -> EventEnvelope {
+        EventEnvelope {
+            seq: Seq(1),
+            ts: Utc::now(),
+            source: source.into(),
+            kind: kind.into(),
+            subject_id: subject_id.into(),
+            data,
+        }
     }
 
     #[test]
     fn secret_set_redaction() {
-        let envelope = EventEnvelope {
-            seq: Seq(1),
-            ts: Utc::now(),
-            event_type: EventType::SecretSet,
-            data: serde_json::to_value(SecretSetData {
+        let ev = envelope(
+            SOURCE_OX,
+            kinds::SECRET_SET,
+            "api_key",
+            serde_json::to_value(SecretSetData {
                 name: "api_key".into(),
                 value: "sk-secret-123".into(),
             })
             .unwrap(),
-        };
-
-        let redacted = envelope.redacted_for_sse();
+        );
+        let redacted = ev.redacted_for_sse();
         let obj = redacted.data.as_object().unwrap();
         assert!(obj.contains_key("name"));
         assert!(!obj.contains_key("value"));
@@ -568,72 +542,95 @@ mod tests {
 
     #[test]
     fn non_secret_event_not_redacted() {
-        let envelope = EventEnvelope {
-            seq: Seq(2),
-            ts: Utc::now(),
-            event_type: EventType::RunnerRegistered,
-            data: serde_json::to_value(RunnerRegisteredData {
+        let ev = envelope(
+            SOURCE_OX,
+            kinds::RUNNER_REGISTERED,
+            "run-0001",
+            serde_json::to_value(RunnerRegisteredData {
                 runner_id: RunnerId("run-0001".into()),
                 environment: "test".into(),
                 labels: HashMap::new(),
             })
             .unwrap(),
-        };
-
-        let redacted = envelope.redacted_for_sse();
+        );
+        let redacted = ev.redacted_for_sse();
         assert_eq!(
-            serde_json::to_string(&envelope.data).unwrap(),
+            serde_json::to_string(&ev.data).unwrap(),
             serde_json::to_string(&redacted.data).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_top_level_and_data() {
+        let ev = envelope(
+            "cx",
+            "node.ready",
+            "Q6cY",
+            serde_json::json!({ "title": "hi", "tags": ["workflow:code-task"] }),
+        );
+        assert_eq!(ev.resolve("event.source"), Some("cx".into()));
+        assert_eq!(ev.resolve("event.kind"), Some("node.ready".into()));
+        assert_eq!(ev.resolve("event.subject_id"), Some("Q6cY".into()));
+        assert_eq!(ev.resolve("event.data.title"), Some("hi".into()));
+        assert_eq!(ev.resolve("event.data.bogus"), None);
+        assert_eq!(
+            ev.resolve_value("event.data.tags"),
+            Some(serde_json::json!(["workflow:code-task"]))
         );
     }
 
     // ── ExecutionOrigin ────────────────────────────────────────────────
 
     fn src_origin(subject: &str) -> ExecutionOrigin {
-        ExecutionOrigin::Source {
+        ExecutionOrigin::Event {
             source: "cx".into(),
             kind: "node.ready".into(),
             subject_id: subject.into(),
+            seq: Seq(42),
         }
     }
 
     #[test]
-    fn execution_origin_structural_equality() {
+    fn origins_match_for_dedup_ignores_seq() {
         let a = src_origin("aJuO");
-        let b = src_origin("aJuO");
-        let c = src_origin("different");
-        let m = ExecutionOrigin::Manual { user: None };
+        let mut b = src_origin("aJuO");
+        if let ExecutionOrigin::Event { seq, .. } = &mut b {
+            *seq = Seq(999);
+        }
+        assert!(origins_match_for_dedup(&a, &b));
+    }
 
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-        assert_ne!(a, m);
+    #[test]
+    fn origins_match_for_dedup_respects_subject() {
+        let a = src_origin("aJuO");
+        let b = src_origin("other");
+        assert!(!origins_match_for_dedup(&a, &b));
+    }
+
+    #[test]
+    fn manual_never_matches_for_dedup() {
+        let a = src_origin("aJuO");
+        let m = ExecutionOrigin::Manual { user: None };
+        assert!(!origins_match_for_dedup(&a, &m));
+        assert!(!origins_match_for_dedup(&m, &m));
     }
 
     #[test]
     fn execution_created_data_round_trips_origin() {
-        let with_origin = ExecutionCreatedData {
+        let data = ExecutionCreatedData {
             execution_id: ExecutionId("e-1".into()),
             workflow: "code-task".into(),
             trigger: "node.ready".into(),
             vars: HashMap::from([("task_id".into(), "aJuO".into())]),
-            origin: Some(src_origin("aJuO")),
+            origin: src_origin("aJuO"),
         };
-        let json = serde_json::to_value(&with_origin).unwrap();
+        let json = serde_json::to_value(&data).unwrap();
         let back: ExecutionCreatedData = serde_json::from_value(json).unwrap();
-        assert_eq!(back.origin, with_origin.origin);
-        assert_eq!(back.vars, with_origin.vars);
+        assert_eq!(back.origin, data.origin);
+        assert_eq!(back.vars, data.vars);
     }
 
     // ── TriggerFailed ──────────────────────────────────────────────────
-
-    #[test]
-    fn trigger_failed_event_type_serializes_to_dotted_name() {
-        let t = EventType::TriggerFailed;
-        let json = serde_json::to_string(&t).unwrap();
-        assert_eq!(json, "\"trigger.failed\"");
-        let back: EventType = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, EventType::TriggerFailed);
-    }
 
     #[test]
     fn trigger_failed_data_round_trips_missing_field_reason() {
@@ -643,44 +640,6 @@ mod tests {
             "consultation",
             "event.bogus".into(),
         );
-        assert_eq!(data.source_seq, Seq(42));
-        assert_eq!(data.on, "node.ready");
-        assert_eq!(data.workflow, "consultation");
-        assert_eq!(
-            data.reason,
-            TriggerFailureReason::MissingEventField {
-                path: "event.bogus".into()
-            }
-        );
-
-        let json = serde_json::to_value(&data).unwrap();
-        let back: TriggerFailedData = serde_json::from_value(json).unwrap();
-        assert_eq!(data, back);
-    }
-
-    #[test]
-    fn trigger_failed_data_round_trips_validation_reason() {
-        let data = TriggerFailedData::from_validation_error(
-            Seq(7),
-            "node.ready",
-            "code-task",
-            "missing required variable: task_id".into(),
-        );
-        assert_eq!(
-            data.reason,
-            TriggerFailureReason::ValidationFailed {
-                message: "missing required variable: task_id".into()
-            }
-        );
-        let json = serde_json::to_value(&data).unwrap();
-        let back: TriggerFailedData = serde_json::from_value(json).unwrap();
-        assert_eq!(data, back);
-    }
-
-    #[test]
-    fn trigger_failed_data_round_trips_unknown_workflow_reason() {
-        let data = TriggerFailedData::for_unknown_workflow(Seq(1), "node.ready", "ghost");
-        assert_eq!(data.reason, TriggerFailureReason::UnknownWorkflow);
         let json = serde_json::to_value(&data).unwrap();
         let back: TriggerFailedData = serde_json::from_value(json).unwrap();
         assert_eq!(data, back);
@@ -688,8 +647,6 @@ mod tests {
 
     #[test]
     fn trigger_failure_reason_is_tagged_on_wire() {
-        // Discriminator lives in the serialized payload so a UI can
-        // switch on it without deserializing into the full enum.
         let reason = TriggerFailureReason::MissingEventField {
             path: "event.bogus".into(),
         };
@@ -705,7 +662,6 @@ mod tests {
         let wf = "consultation";
         let active = |s: &str| s == "running";
 
-        // Match on origin + workflow + active status
         let existing = [(&origin_a, wf, "running")];
         assert!(is_origin_active(
             existing.iter().map(|(o, w, s)| (*o, *w, *s)),
@@ -714,7 +670,6 @@ mod tests {
             active
         ));
 
-        // Different origin → no match
         let existing = [(&origin_b, wf, "running")];
         assert!(!is_origin_active(
             existing.iter().map(|(o, w, s)| (*o, *w, *s)),
@@ -723,7 +678,6 @@ mod tests {
             active
         ));
 
-        // Different workflow → no match
         let existing = [(&origin_a, "other-wf", "running")];
         assert!(!is_origin_active(
             existing.iter().map(|(o, w, s)| (*o, *w, *s)),
@@ -732,7 +686,6 @@ mod tests {
             active
         ));
 
-        // Completed status is not active under this rule
         let existing = [(&origin_a, wf, "completed")];
         assert!(!is_origin_active(
             existing.iter().map(|(o, w, s)| (*o, *w, *s)),

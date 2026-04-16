@@ -41,9 +41,11 @@ The append-only event log. Source of truth for all state.
 ```sql
 CREATE TABLE events (
     seq        INTEGER PRIMARY KEY,  -- monotonically increasing
-    ts         TEXT    NOT NULL,      -- ISO 8601 UTC
-    event_type TEXT    NOT NULL,      -- dotted namespace, e.g. "step.confirmed"
-    data       TEXT    NOT NULL       -- JSON payload
+    ts         TEXT    NOT NULL,     -- ISO 8601 UTC
+    source     TEXT    NOT NULL,     -- "ox", "cx", "github", "linear", ...
+    kind       TEXT    NOT NULL,     -- dotted namespace, e.g. "step.confirmed"
+    subject_id TEXT    NOT NULL,     -- correlation key; empty when no subject
+    data       TEXT    NOT NULL      -- JSON payload, kind-specific
 );
 ```
 
@@ -183,12 +185,12 @@ immediately visible to SSE subscribers.
 caller (API handler)
   │
   ▼
-EventBus::append(event_type, data)
+EventBus::append(source, kind, subject_id, data)
   │
   ├─ acquire write lock
   ├─ assign seq = next_seq; next_seq += 1
   ├─ ts = Utc::now()
-  ├─ INSERT INTO events (seq, ts, event_type, data)
+  ├─ INSERT INTO events (seq, ts, source, kind, subject_id, data)
   ├─ apply event to in-memory projections
   ├─ broadcast to SSE subscribers (tokio::broadcast channel)
   └─ release write lock
@@ -220,7 +222,7 @@ the events it has received.
 Used for SSE reconnection and projection rebuilding.
 
 ```sql
-SELECT seq, ts, event_type, data
+SELECT seq, ts, source, kind, subject_id, data
 FROM events
 WHERE seq > ?
 ORDER BY seq ASC
@@ -286,7 +288,7 @@ fn rebuild_projections(db: &Connection) -> (PoolState, ExecutionsState, SecretsS
     let mut secrets = SecretsState::default();
 
     let mut stmt = db.prepare(
-        "SELECT seq, ts, event_type, data FROM events ORDER BY seq ASC"
+        "SELECT seq, ts, source, kind, subject_id, data FROM events ORDER BY seq ASC"
     ).unwrap();
 
     for event in stmt.query_map([], EventEnvelope::from_row).unwrap() {

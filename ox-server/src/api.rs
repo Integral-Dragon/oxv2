@@ -252,13 +252,14 @@ async fn set_secret(
     Path(name): Path<String>,
     Json(req): Json<SetSecretRequest>,
 ) -> StatusCode {
+    let subject = name.clone();
     let data = SecretSetData {
         name,
         value: req.value,
     };
     state
         .bus
-        .append(EventType::SecretSet, serde_json::to_value(data).unwrap())
+        .append_ox(kinds::SECRET_SET, &subject, serde_json::to_value(data).unwrap())
         .unwrap();
     StatusCode::NO_CONTENT
 }
@@ -281,10 +282,11 @@ async fn delete_secret(
     if !secrets.secrets.contains_key(&name) {
         return StatusCode::NOT_FOUND;
     }
+    let subject = name.clone();
     let data = SecretDeletedData { name };
     state
         .bus
-        .append(EventType::SecretDeleted, serde_json::to_value(data).unwrap())
+        .append_ox(kinds::SECRET_DELETED, &subject, serde_json::to_value(data).unwrap())
         .unwrap();
     StatusCode::NO_CONTENT
 }
@@ -428,16 +430,14 @@ async fn create_execution(
         workflow: req.workflow,
         trigger: req.trigger,
         vars,
-        origin: Some(
-            req.origin
-                .unwrap_or(ExecutionOrigin::Manual { user: None }),
-        ),
+        origin: req.origin.unwrap_or(ExecutionOrigin::Manual { user: None }),
     };
 
     state
         .bus
-        .append(
-            EventType::ExecutionCreated,
+        .append_ox(
+            kinds::EXECUTION_CREATED,
+            &execution_id.0,
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
@@ -491,14 +491,16 @@ async fn cancel_execution(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> StatusCode {
+    let subject = id.clone();
     let data = ExecutionCancelledData {
         execution_id: ExecutionId(id),
         reason: "manual cancel".into(),
     };
     state
         .bus
-        .append(
-            EventType::ExecutionCancelled,
+        .append_ox(
+            kinds::EXECUTION_CANCELLED,
+            &subject,
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
@@ -690,6 +692,7 @@ async fn dispatch_step(
     // Interpolate vars in workspace fields (e.g. branch = "{task_id}")
     let workspace_value = interpolate_workspace(&req.workspace, &req.vars);
 
+    let subject = params.id.clone();
     let data = StepDispatchedData {
         execution_id: ExecutionId(params.id),
         step: params.step,
@@ -703,8 +706,9 @@ async fn dispatch_step(
 
     state
         .bus
-        .append(
-            EventType::StepDispatched,
+        .append_ox(
+            kinds::STEP_DISPATCHED,
+            &subject,
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
@@ -738,6 +742,7 @@ async fn step_running(
     Path(params): Path<StepPathParams>,
     Json(req): Json<StepRunningRequest>,
 ) -> StatusCode {
+    let subject = params.id.clone();
     let data = StepRunningData {
         execution_id: ExecutionId(params.id),
         step: params.step,
@@ -746,7 +751,7 @@ async fn step_running(
     };
     state
         .bus
-        .append(EventType::StepRunning, serde_json::to_value(data).unwrap())
+        .append_ox(kinds::STEP_RUNNING, &subject, serde_json::to_value(data).unwrap())
         .unwrap();
     StatusCode::NO_CONTENT
 }
@@ -756,6 +761,7 @@ async fn step_done(
     Path(params): Path<StepPathParams>,
     Json(req): Json<StepDoneRequest>,
 ) -> StatusCode {
+    let subject = params.id.clone();
     let data = StepDoneData {
         execution_id: ExecutionId(params.id),
         step: params.step,
@@ -764,7 +770,7 @@ async fn step_done(
     };
     state
         .bus
-        .append(EventType::StepDone, serde_json::to_value(data).unwrap())
+        .append_ox(kinds::STEP_DONE, &subject, serde_json::to_value(data).unwrap())
         .unwrap();
     StatusCode::NO_CONTENT
 }
@@ -780,6 +786,7 @@ async fn step_signals(
     Path(params): Path<StepPathParams>,
     Json(req): Json<StepSignalsRequest>,
 ) -> StatusCode {
+    let subject = params.id.clone();
     let data = StepSignalsData {
         execution_id: ExecutionId(params.id),
         step: params.step,
@@ -788,7 +795,7 @@ async fn step_signals(
     };
     state
         .bus
-        .append(EventType::StepSignals, serde_json::to_value(data).unwrap())
+        .append_ox(kinds::STEP_SIGNALS, &subject, serde_json::to_value(data).unwrap())
         .unwrap();
     StatusCode::NO_CONTENT
 }
@@ -805,6 +812,7 @@ async fn step_confirm(
     Path(params): Path<StepPathParams>,
     Json(req): Json<StepConfirmRequest>,
 ) -> StatusCode {
+    let subject = params.id.clone();
     let data = StepConfirmedData {
         execution_id: ExecutionId(params.id),
         step: params.step,
@@ -813,8 +821,9 @@ async fn step_confirm(
     };
     state
         .bus
-        .append(
-            EventType::StepConfirmed,
+        .append_ox(
+            kinds::STEP_CONFIRMED,
+            &subject,
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
@@ -832,6 +841,7 @@ async fn step_fail(
     Path(params): Path<StepPathParams>,
     Json(req): Json<StepFailRequest>,
 ) -> StatusCode {
+    let subject = params.id.clone();
     let data = StepFailedData {
         execution_id: ExecutionId(params.id),
         step: params.step,
@@ -840,7 +850,7 @@ async fn step_fail(
     };
     state
         .bus
-        .append(EventType::StepFailed, serde_json::to_value(data).unwrap())
+        .append_ox(kinds::STEP_FAILED, &subject, serde_json::to_value(data).unwrap())
         .unwrap();
     StatusCode::NO_CONTENT
 }
@@ -856,6 +866,7 @@ async fn step_advance(
     Path(params): Path<StepPathParams>,
     Json(req): Json<StepAdvanceRequest>,
 ) -> StatusCode {
+    let subject = params.id.clone();
     let data = StepAdvancedData {
         execution_id: ExecutionId(params.id),
         from_step: req.from_step,
@@ -863,8 +874,9 @@ async fn step_advance(
     };
     state
         .bus
-        .append(
-            EventType::StepAdvanced,
+        .append_ox(
+            kinds::STEP_ADVANCED,
+            &subject,
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
@@ -877,13 +889,15 @@ async fn complete_execution(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> StatusCode {
+    let subject = id.clone();
     let data = ExecutionCompletedData {
         execution_id: ExecutionId(id),
     };
     state
         .bus
-        .append(
-            EventType::ExecutionCompleted,
+        .append_ox(
+            kinds::EXECUTION_COMPLETED,
+            &subject,
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
@@ -901,6 +915,7 @@ async fn escalate_execution(
     Path(id): Path<String>,
     Json(req): Json<EscalateRequest>,
 ) -> StatusCode {
+    let subject = id.clone();
     let data = ExecutionEscalatedData {
         execution_id: ExecutionId(id),
         step: req.step,
@@ -908,8 +923,9 @@ async fn escalate_execution(
     };
     state
         .bus
-        .append(
-            EventType::ExecutionEscalated,
+        .append_ox(
+            kinds::EXECUTION_ESCALATED,
+            &subject,
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
@@ -946,8 +962,9 @@ async fn merge_step(
             };
             state
                 .bus
-                .append(
-                    EventType::GitMerged,
+                .append_ox(
+                    kinds::GIT_MERGED,
+                    &execution_id.0,
                     serde_json::to_value(merged_data).unwrap(),
                 )
                 .unwrap();
@@ -966,6 +983,7 @@ async fn merge_step(
         }
         Err(e) => {
             // Emit git.merge_failed event
+            let subject = execution_id.0.clone();
             let fail_data = GitMergeFailedData {
                 branch: req.branch,
                 into: "main".into(),
@@ -974,8 +992,9 @@ async fn merge_step(
             };
             state
                 .bus
-                .append(
-                    EventType::GitMergeFailed,
+                .append_ox(
+                    kinds::GIT_MERGE_FAILED,
+                    &subject,
                     serde_json::to_value(fail_data).unwrap(),
                 )
                 .unwrap();
@@ -1001,9 +1020,10 @@ async fn post_trigger_failed(
     State(state): State<AppState>,
     Json(data): Json<TriggerFailedData>,
 ) -> StatusCode {
+    let subject = data.workflow.clone();
     match state
         .bus
-        .append(EventType::TriggerFailed, serde_json::to_value(data).unwrap())
+        .append_ox(kinds::TRIGGER_FAILED, &subject, serde_json::to_value(data).unwrap())
     {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(e) => {
@@ -1147,6 +1167,7 @@ async fn close_artifact(
     });
 
     // Emit artifact.closed event
+    let subject = params.id.clone();
     let data = ArtifactClosedData {
         execution_id: ExecutionId(params.id),
         step: params.step,
@@ -1156,8 +1177,9 @@ async fn close_artifact(
     };
     state
         .bus
-        .append(
-            EventType::ArtifactClosed,
+        .append_ox(
+            kinds::ARTIFACT_CLOSED,
+            &subject,
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
@@ -1459,7 +1481,7 @@ struct IngestBatchRequest {
     cursor_before: Option<String>,
     cursor_after: String,
     #[serde(default)]
-    events: Vec<SourceEventData>,
+    events: Vec<IngestEventData>,
 }
 
 #[derive(Serialize)]

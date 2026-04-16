@@ -457,8 +457,9 @@ Fields:
 - `tag` — optional. When set, the event's `tags` list must contain
   this string.
 - `workflow` — the workflow to start.
-- `[trigger.vars]` — templates resolved against the firing event's
-  `EventContext::Source`. The resulting map is validated against the
+- `[trigger.vars]` — templates resolved against the firing event
+  envelope (`{event.source}`, `{event.kind}`, `{event.subject_id}`,
+  `{event.data.*}`). The resulting map is validated against the
   workflow's `[workflow.vars]` declarations.
 
 The mapping is what lets different workflows use different var names

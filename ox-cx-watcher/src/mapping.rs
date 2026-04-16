@@ -1,20 +1,20 @@
-//! Map cx facts onto `SourceEventData` envelopes. Pure — no I/O.
+//! Map cx facts onto watcher ingest events. Pure — no I/O.
 //!
 //! This is where the watcher's editorial decisions live: which cx
-//! states become source events, what the `kind` strings are, how the
-//! source payload is shaped, how the idempotency key is built, and which nodes are filtered out
-//! server-ward (shadowed / integrated spawners, etc.).
+//! states become events, what the `kind` strings are, how the payload
+//! is shaped, how the idempotency key is built, and which nodes are
+//! filtered out server-ward (shadowed / integrated spawners, etc.).
 //!
 //! Everything else in the watcher is plumbing — fetch state, POST
-//! the envelope, retry on failure. The interesting logic is here.
+//! the batch, retry on failure. The interesting logic is here.
 
 use ox_core::client::CxNodeSnapshot;
-use ox_core::events::SourceEventData;
+use ox_core::events::IngestEventData;
 
 use crate::cx::CxCommentEntry;
 
-/// Watcher identifier. Stamped onto every event so triggers can
-/// filter by `source = "cx"`.
+/// Watcher identifier. Stamped onto every ingest batch so triggers
+/// can filter by `source = "cx"`.
 pub const SOURCE: &str = "cx";
 
 /// Kinds the watcher emits. Strings are stable — triggers match on
@@ -41,7 +41,7 @@ pub mod kinds {
 /// Non-`ready` shadowed states still emit — `node.claimed` /
 /// `node.done` are observational facts that downstream workflows may
 /// care about regardless of shadowing.
-pub fn snapshot_to_event(snap: &CxNodeSnapshot, cursor_hash: &str) -> Option<SourceEventData> {
+pub fn snapshot_to_event(snap: &CxNodeSnapshot, cursor_hash: &str) -> Option<IngestEventData> {
     let kind = match snap.state.as_str() {
         "ready" => {
             if snap.shadowed {
@@ -64,8 +64,7 @@ pub fn snapshot_to_event(snap: &CxNodeSnapshot, cursor_hash: &str) -> Option<Sou
         "shadowed": snap.shadowed,
     });
 
-    Some(SourceEventData {
-        source: SOURCE.to_string(),
+    Some(IngestEventData {
         kind: kind.to_string(),
         subject_id: snap.node_id.clone(),
         idempotency_key,
@@ -76,7 +75,7 @@ pub fn snapshot_to_event(snap: &CxNodeSnapshot, cursor_hash: &str) -> Option<Sou
 /// Build a source event from a comment-added log entry. The
 /// idempotency key folds in author, tag, and the commit hash so two
 /// ticks observing the same commit produce identical keys.
-pub fn comment_to_event(comment: &CxCommentEntry) -> SourceEventData {
+pub fn comment_to_event(comment: &CxCommentEntry) -> IngestEventData {
     let short = short_sha(&comment.hash);
     let tag_slot = comment.tag.as_deref().unwrap_or("-");
     let author_slot = comment.author.as_deref().unwrap_or("-");
@@ -96,8 +95,7 @@ pub fn comment_to_event(comment: &CxCommentEntry) -> SourceEventData {
         "hash": comment.hash,
     });
 
-    SourceEventData {
-        source: SOURCE.to_string(),
+    IngestEventData {
         kind: kinds::COMMENT_ADDED.to_string(),
         subject_id: comment.node_id.clone(),
         idempotency_key,
@@ -132,7 +130,6 @@ mod tests {
     fn ready_node_becomes_node_ready_event() {
         let s = snap("Q6cY", "ready", &["workflow:code-task"], false);
         let ev = snapshot_to_event(&s, "a1b2c3d4e5f6aabb").expect("ready → node.ready");
-        assert_eq!(ev.source, "cx");
         assert_eq!(ev.kind, "node.ready");
         assert_eq!(ev.subject_id, "Q6cY");
         assert_eq!(ev.data["tags"], serde_json::json!(["workflow:code-task"]));
@@ -211,7 +208,6 @@ mod tests {
             hash: "deadbeef11224455".into(),
         };
         let ev = comment_to_event(&c);
-        assert_eq!(ev.source, "cx");
         assert_eq!(ev.kind, "comment.added");
         assert_eq!(ev.subject_id, "Q6cY");
         assert_eq!(

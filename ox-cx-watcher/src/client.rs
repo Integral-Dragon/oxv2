@@ -14,7 +14,7 @@
 //! successful 200.
 
 use anyhow::Result;
-use ox_core::events::SourceEventData;
+use ox_core::events::IngestEventData;
 use serde::{Deserialize, Serialize};
 
 /// Request body for `POST /api/events/ingest`.
@@ -23,7 +23,7 @@ pub struct IngestBody {
     pub source: String,
     pub cursor_before: Option<String>,
     pub cursor_after: String,
-    pub events: Vec<SourceEventData>,
+    pub events: Vec<IngestEventData>,
 }
 
 /// Response body for a successful ingest.
@@ -238,9 +238,8 @@ mod tests {
         (addr, state)
     }
 
-    fn sample_event(key: &str) -> SourceEventData {
-        SourceEventData {
-            source: "cx".into(),
+    fn sample_event(key: &str) -> IngestEventData {
+        IngestEventData {
             kind: "node.ready".into(),
             subject_id: "Q6cY".into(),
             idempotency_key: key.into(),

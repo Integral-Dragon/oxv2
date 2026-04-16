@@ -62,7 +62,10 @@ pub struct Herder<C: OxClientApi = OxClient> {
     executions: HashMap<String, ExecutionView>,
     workflows: HashMap<String, WorkflowEngine>,
     triggers: Vec<TriggerDef>,
-    pending_source_events: Vec<SourceEventData>,
+    /// Events received since the last scheduler tick that may fire
+    /// triggers. Populated by `handle_sse_message` during live mode;
+    /// drained and matched by `evaluate_pending_triggers`.
+    pending_events: Vec<EventEnvelope>,
     last_seq: u64,
     /// True while replaying historical events — suppresses side effects.
     replaying: bool,
@@ -111,7 +114,7 @@ impl<C: OxClientApi> Herder<C> {
             executions: HashMap::new(),
             workflows: HashMap::new(),
             triggers: Vec::new(),
-            pending_source_events: Vec::new(),
+            pending_events: Vec::new(),
             last_seq: 0,
             replaying: true,
             replay_target: 0,
@@ -156,7 +159,7 @@ impl<C: OxClientApi> Herder<C> {
                             backoff_secs = 1;
                         }
                         Ok(SseEvent::Message(msg)) => {
-                            if let Err(e) = self.handle_sse_message(&msg.event, &msg.data).await {
+                            if let Err(e) = self.handle_sse_message(&msg.data).await {
                                 tracing::warn!(err = %e, event = %msg.event, "error handling SSE event");
                             }
                             // Check if replay is done
@@ -219,13 +222,31 @@ impl<C: OxClientApi> Herder<C> {
 
     // ── Event handlers — pure state updates ────────────────────────
 
-    async fn handle_sse_message(&mut self, event_type: &str, data: &str) -> Result<()> {
+    async fn handle_sse_message(&mut self, data: &str) -> Result<()> {
         let envelope: EventEnvelope =
             serde_json::from_str(data).context("parsing SSE event data")?;
         self.last_seq = envelope.seq.0;
 
-        match event_type {
-            "runner.registered" => {
+        // Every event is a candidate for trigger matching in live mode.
+        // Ox-internal events feed both projection-style state updates
+        // below AND the trigger path — a workflow can `on =
+        // "execution.completed"` just as naturally as `on = "node.ready"`.
+        let is_ox = envelope.source == SOURCE_OX;
+        if !self.replaying {
+            self.pending_events.push(envelope.clone());
+        }
+
+        if !is_ox {
+            // Non-ox events (watcher source events) don't fold into
+            // local runner/execution state — they only feed triggers.
+            if !self.replaying {
+                self.schedule().await;
+            }
+            return Ok(());
+        }
+
+        match envelope.kind.as_str() {
+            kinds::RUNNER_REGISTERED => {
                 let d: RunnerRegisteredData = serde_json::from_value(envelope.data)?;
                 tracing::info!(runner = %d.runner_id, "runner registered");
                 self.runners.insert(
@@ -238,12 +259,12 @@ impl<C: OxClientApi> Herder<C> {
                     },
                 );
             }
-            "runner.drained" => {
+            kinds::RUNNER_DRAINED => {
                 let d: RunnerDrainedData = serde_json::from_value(envelope.data)?;
                 tracing::info!(runner = %d.runner_id, "runner drained");
                 self.runners.remove(&d.runner_id.0);
             }
-            "runner.heartbeat_missed" => {
+            kinds::RUNNER_HEARTBEAT_MISSED => {
                 let d: RunnerHeartbeatMissedData = serde_json::from_value(envelope.data)?;
                 tracing::warn!(
                     runner = %d.runner_id,
@@ -264,29 +285,20 @@ impl<C: OxClientApi> Herder<C> {
                 self.runners.remove(&d.runner_id.0);
             }
 
-            "execution.created" => {
+            kinds::EXECUTION_CREATED => {
                 let d: ExecutionCreatedData = serde_json::from_value(envelope.data)?;
                 tracing::info!(exec = %d.execution_id, workflow = %d.workflow, "execution created");
 
-                // Determine first step
                 let first_step = self.workflows.get(&d.workflow)
                     .and_then(|e| e.first_step())
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
-                // Events from pre-slice-5 logs may lack an origin;
-                // fall back to Manual so the execution still lands in
-                // local state.
-                let origin = d
-                    .origin
-                    .clone()
-                    .unwrap_or(ExecutionOrigin::Manual { user: None });
-
                 self.executions.insert(
                     d.execution_id.0.clone(),
                     ExecutionView {
                         vars: d.vars,
-                        origin,
+                        origin: d.origin,
                         workflow: d.workflow,
                         status: "running".into(),
                         phase: ExecPhase::Ready { step: first_step, attempt: 1 },
@@ -296,7 +308,7 @@ impl<C: OxClientApi> Herder<C> {
                     },
                 );
             }
-            "execution.completed" => {
+            kinds::EXECUTION_COMPLETED => {
                 let d: ExecutionCompletedData = serde_json::from_value(envelope.data)?;
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     exec.status = "completed".into();
@@ -304,7 +316,7 @@ impl<C: OxClientApi> Herder<C> {
                 }
                 tracing::info!(exec = %d.execution_id, "execution completed");
             }
-            "execution.escalated" => {
+            kinds::EXECUTION_ESCALATED => {
                 let d: ExecutionEscalatedData = serde_json::from_value(envelope.data)?;
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     exec.status = "escalated".into();
@@ -312,7 +324,7 @@ impl<C: OxClientApi> Herder<C> {
                 }
                 tracing::info!(exec = %d.execution_id, step = %d.step, reason = %d.reason, "execution escalated");
             }
-            "execution.cancelled" => {
+            kinds::EXECUTION_CANCELLED => {
                 let d: ExecutionCancelledData = serde_json::from_value(envelope.data)?;
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
                     exec.status = "cancelled".into();
@@ -320,7 +332,7 @@ impl<C: OxClientApi> Herder<C> {
                 }
             }
 
-            "step.dispatched" => {
+            kinds::STEP_DISPATCHED => {
                 let d: StepDispatchedData = serde_json::from_value(envelope.data)?;
                 // Mark runner as busy
                 if let Some(runner) = self.runners.get_mut(&d.runner_id.0) {
@@ -338,14 +350,14 @@ impl<C: OxClientApi> Herder<C> {
                     }
                 }
             }
-            "step.done" => {
+            kinds::STEP_DONE => {
                 let d: StepDoneData = serde_json::from_value(envelope.data)?;
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0)
                     && exec.status == "running" {
                         exec.last_output = Some(d.output);
                     }
             }
-            "step.confirmed" => {
+            kinds::STEP_CONFIRMED => {
                 let d: StepConfirmedData = serde_json::from_value(envelope.data)?;
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0)
@@ -355,7 +367,7 @@ impl<C: OxClientApi> Herder<C> {
                         exec.phase = ExecPhase::NeedsAdvance { step: d.step };
                     }
             }
-            "step.failed" => {
+            kinds::STEP_FAILED => {
                 let d: StepFailedData = serde_json::from_value(envelope.data)?;
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0)
@@ -364,7 +376,7 @@ impl<C: OxClientApi> Herder<C> {
                         exec.phase = ExecPhase::NeedsFailure { step: d.step, error: d.error };
                     }
             }
-            "step.timeout" => {
+            kinds::STEP_TIMEOUT => {
                 let d: StepTimeoutData = serde_json::from_value(envelope.data)?;
                 self.free_runner_for_step(&d.execution_id.0, &d.step);
                 if let Some(exec) = self.executions.get_mut(&d.execution_id.0)
@@ -375,31 +387,15 @@ impl<C: OxClientApi> Herder<C> {
                         exec.phase = ExecPhase::Ready { step: d.step, attempt: d.attempt };
                     }
             }
-            "step.advanced" => {
+            kinds::STEP_ADVANCED => {
                 // Pure state — no action needed, scheduler already handled it
             }
 
-            // Source events (from watcher plugins) — queue for matching.
-            "source" => {
-                let d: SourceEventData = serde_json::from_value(envelope.data)?;
-                tracing::info!(
-                    source = %d.source,
-                    kind = %d.kind,
-                    subject = %d.subject_id,
-                    replaying = self.replaying,
-                    "source event"
-                );
-                if !self.replaying {
-                    self.pending_source_events.push(d);
-                }
-            }
-
-            // Git events
-            "git.merged" => {
+            kinds::GIT_MERGED => {
                 let d: GitMergedData = serde_json::from_value(envelope.data)?;
                 tracing::info!(branch = %d.branch, sha = %d.sha, exec = %d.execution_id, "git.merged");
             }
-            "git.merge_failed" => {
+            kinds::GIT_MERGE_FAILED => {
                 let d: GitMergeFailedData = serde_json::from_value(envelope.data)?;
                 tracing::warn!(branch = %d.branch, reason = %d.reason, exec = %d.execution_id, "git.merge_failed");
             }
@@ -443,7 +439,7 @@ impl<C: OxClientApi> Herder<C> {
     async fn schedule(&mut self) {
         // Phase 1: Evaluate pending source-event triggers queued by
         // handle_event. Source events arrive on the SSE stream as
-        // `EventType::Source` envelopes from watcher plugins.
+        // pending envelopes — both watcher source events and ox-internal events.
         self.evaluate_pending_triggers().await;
 
         // Phase 2: Process execution state machines (loop until stable)
@@ -886,7 +882,6 @@ impl<C: OxClientApi> Herder<C> {
 
     async fn evaluate_pending_triggers(&mut self) {
         // Re-fetch config from server if stale (>30s since last refresh).
-        // This picks up hot-reloaded workflows, triggers, and personas.
         if self.last_config_refresh.elapsed() > Duration::from_secs(30) {
             if let Err(e) = self.load_workflows().await {
                 tracing::warn!(err = %e, "failed to refresh config from server");
@@ -894,37 +889,39 @@ impl<C: OxClientApi> Herder<C> {
             self.last_config_refresh = Instant::now();
         }
 
-        let source_events = std::mem::take(&mut self.pending_source_events);
-        for event in source_events {
-            self.evaluate_triggers_for_source_event(&event).await;
+        let pending = std::mem::take(&mut self.pending_events);
+        for envelope in pending {
+            self.evaluate_triggers_for_event(&envelope).await;
         }
     }
 
-    /// Match source events (from watcher plugins) against configured
-    /// triggers. A trigger matches when its `on` equals the event kind,
-    /// its optional `source` equals the event source, and every
-    /// `[trigger.where]` predicate matches the event context. Dedup is by
-    /// `ExecutionOrigin::Source { source, kind, subject_id }`; vars
-    /// template against an `EventContext::Source` context.
+    /// Match one envelope against every configured trigger. A trigger
+    /// matches when its `on` equals `envelope.kind`, its optional
+    /// `source` equals `envelope.source`, and every `[trigger.where]`
+    /// predicate matches. Dedup is via `ExecutionOrigin::Event { source,
+    /// kind, subject_id, .. }` under `origins_match_for_dedup`, which
+    /// ignores the firing seq.
     ///
-    /// Source-side state suppression (skip-if-integrated for cx, etc.)
-    /// is the watcher's responsibility under the event-sources plan —
-    /// the server-side matcher has no special-cased knowledge of any
+    /// Source-side state suppression (e.g. cx "skip if integrated") is
+    /// the watcher's responsibility under the event-sources plan — the
+    /// server-side matcher has no special-cased knowledge of any
     /// source's lifecycle.
-    async fn evaluate_triggers_for_source_event(&mut self, event: &SourceEventData) {
+    async fn evaluate_triggers_for_event(&mut self, envelope: &EventEnvelope) {
         for trigger in &self.triggers {
-            if trigger.on != event.kind {
+            if trigger.on != envelope.kind {
                 continue;
             }
             if let Some(ref want_source) = trigger.source
-                && want_source != &event.source
+                && want_source != &envelope.source
             {
                 continue;
             }
-            let origin = ExecutionOrigin::Source {
-                source: event.source.clone(),
-                kind: event.kind.clone(),
-                subject_id: event.subject_id.clone(),
+
+            let origin = ExecutionOrigin::Event {
+                source: envelope.source.clone(),
+                kind: envelope.kind.clone(),
+                subject_id: envelope.subject_id.clone(),
+                seq: envelope.seq,
             };
 
             // Dedup — herder blocks on running OR escalated
@@ -941,40 +938,31 @@ impl<C: OxClientApi> Herder<C> {
                 |s| s == "running" || s == "escalated",
             ) {
                 tracing::debug!(
-                    source = %event.source,
-                    kind = %event.kind,
-                    subject = %event.subject_id,
+                    source = %envelope.source,
+                    kind = %envelope.kind,
+                    subject = %envelope.subject_id,
                     workflow = %trigger.workflow,
                     "trigger suppressed: execution already exists"
                 );
                 continue;
             }
 
-            // Build workflow vars from the `[trigger.vars]` block
-            // resolved against an EventContext::Source. On a missing
-            // field, emit trigger.failed and skip.
-            let ctx = EventContext::Source {
-                source: event.source.clone(),
-                kind: event.kind.clone(),
-                subject_id: event.subject_id.clone(),
-                data: event.data.clone(),
-            };
-            if !trigger.matches_where(&ctx) {
+            if !trigger.matches_where(envelope) {
                 continue;
             }
-            let trigger_vars = match trigger.build_vars(&ctx) {
+            let trigger_vars = match trigger.build_vars(envelope) {
                 Ok(v) => v,
                 Err(ox_core::workflow::TriggerError::MissingEventField { path }) => {
                     tracing::warn!(
-                        source = %event.source,
-                        kind = %event.kind,
-                        subject = %event.subject_id,
+                        source = %envelope.source,
+                        kind = %envelope.kind,
+                        subject = %envelope.subject_id,
                         workflow = %trigger.workflow,
                         path = %path,
                         "trigger var interpolation failed — missing event field"
                     );
                     let failed = TriggerFailedData::from_missing_field(
-                        Seq(self.last_seq),
+                        envelope.seq,
                         &trigger.on,
                         &trigger.workflow,
                         path,
@@ -987,9 +975,9 @@ impl<C: OxClientApi> Herder<C> {
             };
 
             tracing::info!(
-                source = %event.source,
-                kind = %event.kind,
-                subject = %event.subject_id,
+                source = %envelope.source,
+                kind = %envelope.kind,
+                subject = %envelope.subject_id,
                 workflow = %trigger.workflow,
                 "trigger matched, creating execution"
             );
@@ -1007,12 +995,9 @@ impl<C: OxClientApi> Herder<C> {
                 .await
             {
                 Ok(exec_id) => {
-                    tracing::info!(exec = %exec_id, "execution created from source event");
+                    tracing::info!(exec = %exec_id, "execution created from event");
 
-                    // Optimistic local insert for dedup: a second
-                    // event arriving before the SSE round-trip carrying
-                    // execution.created back must see this execution in
-                    // `self.executions` and skip the matcher.
+                    // Optimistic local insert for dedup.
                     self.executions.insert(
                         exec_id.0.clone(),
                         ExecutionView {
@@ -1028,7 +1013,7 @@ impl<C: OxClientApi> Herder<C> {
                     );
                 }
                 Err(e) => {
-                    tracing::error!(err = %e, "failed to create execution from source event");
+                    tracing::error!(err = %e, "failed to create execution from event");
                 }
             }
         }
@@ -1142,7 +1127,7 @@ mod tests {
         }
     }
 
-    /// Source-event trigger that matches `EventType::Source` with
+    /// Source-event trigger that matches a canonical envelope with
     /// `source = "cx"` and `kind = "node.ready"`.
     fn cx_source_trigger() -> TriggerDef {
         let mut vars = HashMap::new();
@@ -1165,12 +1150,13 @@ mod tests {
         }
     }
 
-    fn sample_cx_source_event() -> SourceEventData {
-        SourceEventData {
+    fn sample_cx_source_event() -> EventEnvelope {
+        EventEnvelope {
+            seq: Seq(7),
+            ts: chrono::Utc::now(),
             source: "cx".into(),
             kind: "node.ready".into(),
             subject_id: "Q6cY".into(),
-            idempotency_key: "Q6cY:node.ready:sha-abc".into(),
             data: serde_json::json!({
                 "title": "ccstat models — model-mix breakdown over time",
                 "node_id": "Q6cY",
@@ -1191,7 +1177,7 @@ mod tests {
 
     /// A `source = "cx", on = "node.ready"` trigger fires when a
     /// matching source event arrives. The execution is created with
-    /// `ExecutionOrigin::Source { source, kind, subject_id }` and the
+    /// `ExecutionOrigin::Event { source, kind, subject_id, seq }` and the
     /// vars template resolves against `event.source`, `event.kind`,
     /// `event.subject_id`, and `event.data.*`.
     #[tokio::test]
@@ -1199,17 +1185,18 @@ mod tests {
         let mut h = herder_with_source_trigger(MockClient::new());
 
         let event = sample_cx_source_event();
-        h.evaluate_triggers_for_source_event(&event).await;
+        h.evaluate_triggers_for_event(&event).await;
 
         let calls = h.client.create_calls();
         assert_eq!(calls.len(), 1, "one execution should be created");
         assert_eq!(calls[0].0, "code-task");
         assert_eq!(
             calls[0].2,
-            ExecutionOrigin::Source {
+            ExecutionOrigin::Event {
                 source: "cx".into(),
                 kind: "node.ready".into(),
                 subject_id: "Q6cY".into(),
+                seq: event.seq,
             }
         );
 
@@ -1223,51 +1210,36 @@ mod tests {
         );
     }
 
-    /// A trigger with `source = "cx"` must NOT fire on an event from a
-    /// different watcher. Source is a hard filter.
     #[tokio::test]
     async fn source_event_does_not_fire_for_different_source() {
         let mut h = herder_with_source_trigger(MockClient::new());
-
         let mut event = sample_cx_source_event();
         event.source = "linear".into();
-
-        h.evaluate_triggers_for_source_event(&event).await;
-
+        h.evaluate_triggers_for_event(&event).await;
         assert_eq!(h.client.create_calls().len(), 0);
     }
 
-    /// A trigger with `on = "node.ready"` must NOT fire on a source
-    /// event with a different kind — even when the source matches.
     #[tokio::test]
     async fn source_event_does_not_fire_for_different_kind() {
         let mut h = herder_with_source_trigger(MockClient::new());
-
         let mut event = sample_cx_source_event();
         event.kind = "node.claimed".into();
-
-        h.evaluate_triggers_for_source_event(&event).await;
-
+        h.evaluate_triggers_for_event(&event).await;
         assert_eq!(h.client.create_calls().len(), 0);
     }
 
-    /// A trigger with a `[trigger.where]` filter must NOT fire when
-    /// the event payload does not match it.
     #[tokio::test]
     async fn source_event_does_not_fire_when_where_missing() {
         let mut h = herder_with_source_trigger(MockClient::new());
-
         let mut event = sample_cx_source_event();
         event.data["tags"] = serde_json::json!(["workflow:other"]);
-
-        h.evaluate_triggers_for_source_event(&event).await;
-
+        h.evaluate_triggers_for_event(&event).await;
         assert_eq!(h.client.create_calls().len(), 0);
     }
 
-    /// Dedup: a second source event with the same
-    /// `(source, kind, subject_id)` tuple while the first execution is
-    /// still live must NOT fire a second execution.
+    /// Dedup: a second event with the same `(source, kind, subject_id)`
+    /// triplet while the first execution is still live must NOT fire a
+    /// second execution — even if the firing seq differs.
     #[tokio::test]
     async fn source_event_skipped_when_origin_already_active() {
         let mut h = herder_with_source_trigger(MockClient::new());
@@ -1277,10 +1249,11 @@ mod tests {
             "exec-existing".into(),
             ExecutionView {
                 vars: HashMap::new(),
-                origin: ExecutionOrigin::Source {
+                origin: ExecutionOrigin::Event {
                     source: "cx".into(),
                     kind: "node.ready".into(),
                     subject_id: "Q6cY".into(),
+                    seq: Seq(1), // different seq from the firing event
                 },
                 workflow: "code-task".into(),
                 status: "running".into(),
@@ -1291,7 +1264,7 @@ mod tests {
             },
         );
 
-        h.evaluate_triggers_for_source_event(&event).await;
+        h.evaluate_triggers_for_event(&event).await;
 
         assert_eq!(h.client.create_calls().len(), 0);
     }

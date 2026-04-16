@@ -271,8 +271,9 @@ larger system to coordinate itself through facts in the world.
 - `CX_CURSOR_KEY` and its KV row — deleted. Cursor storage stays in
   the server, but generalizes into a `watcher_cursors` table keyed by
   watcher name; no cx-specific code or keys remain.
-- `ox_core::events::EventType::Cx*` — collapsed into a single
-  `SourceEvent` carrying `source`, `kind`, and `subject_id` fields.
+- Any cx-specific event variants in `ox_core::events` — collapsed
+  into the canonical envelope `{source, kind, subject_id, data}`
+  with `source = "cx"` and watcher-authored kinds.
 - Shelling out to `cx` from server code — deleted.
 
 The git HTTP endpoint (used by runners to clone workspaces) stays. The

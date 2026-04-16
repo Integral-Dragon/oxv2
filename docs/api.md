@@ -593,8 +593,10 @@ Request:
 
 \* `cursor_before` is `null` on the very first call for a new source.
 
-Each event is appended as a single `EventType::Source` row with a
-`SourceEventData` payload.
+Each event is appended as a canonical envelope stamped with
+`source = batch.source` and the supplied `kind`/`subject_id`/`data`.
+`idempotency_key` lives only in the `ingest_idempotency` table — it
+is not persisted on the envelope.
 
 Transaction:
 
@@ -603,7 +605,7 @@ Transaction:
    stashed on the row.
 2. For each event: `INSERT OR IGNORE INTO ingest_idempotency`. No-op
    inserts skip the event (silent dedup).
-3. Append non-duplicate events as `EventType::Source`.
+3. Append non-duplicate events as canonical envelopes.
 4. `INSERT OR REPLACE INTO watcher_cursors` with the new cursor,
    `updated_at`, `updated_seq`, and `last_error = NULL`.
 5. Commit. Apply projections and broadcast SSE.

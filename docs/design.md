@@ -197,46 +197,29 @@ pub struct StepAttemptId {
 pub struct EventEnvelope {
     pub seq: Seq,
     pub ts: DateTime<Utc>,
-    pub event_type: EventType,
+    pub source: String,       // "ox", "cx", "github", "linear", ...
+    pub kind: String,         // "execution.completed", "node.ready", ...
+    pub subject_id: String,   // what the event is about
     pub data: serde_json::Value,
-}
-
-pub enum EventType {
-    // Runner
-    RunnerRegistered,
-    RunnerDrained,
-    RunnerHeartbeatMissed,
-    // Execution
-    ExecutionCreated,
-    ExecutionCompleted,
-    ExecutionEscalated,
-    ExecutionCancelled,
-    // Step
-    StepDispatched,
-    StepRunning,
-    StepDone,
-    StepSignals,
-    StepConfirmed,
-    StepFailed,
-    StepTimeout,
-    StepAdvanced,
-    StepRetrying,
-    // Artifact
-    ArtifactDeclared,
-    ArtifactClosed,
-    // Source event (from watcher ingest)
-    Source,
-    // Git
-    GitBranchPushed,
-    GitMerged,
-    GitMergeFailed,
-    // Secrets
-    SecretSet,
-    SecretDeleted,
 }
 ```
 
-Each variant's `data` payload is a typed struct (e.g.
+Every event in the log — whether emitted by Ox internally
+(`source = "ox"`) or ingested from a watcher (`source = "cx"`, …) —
+has this shape. Consumers discriminate on `(source, kind)` strings;
+there is no closed enum. Kind constants live in `ox_core::events::kinds`
+for grep-ability (`kinds::STEP_CONFIRMED = "step.confirmed"`).
+
+The `subject_id` is the event's correlation key:
+
+- `execution.*`, `step.*`, `artifact.*`, `git.*` → the execution ID.
+- `runner.*` → the runner ID.
+- `secret.*` → the secret name.
+- `trigger.failed` → the target workflow name.
+- `server.ready` → empty string (no meaningful subject).
+- Watcher events → source-native IDs (cx `node_id`, linear issue ID, ...).
+
+Each kind's `data` payload is a typed struct (e.g.
 `StepDispatchedData`, `RunnerRegisteredData`) that serialises to/from
 the `serde_json::Value` in the envelope. Type safety at the edges,
 JSON in storage and on the wire.
@@ -425,8 +408,9 @@ watcher process, runs a single SQLite transaction that:
    row (CAS guard) — on mismatch, returns 409 with no side effects.
 2. For each event, attempts `INSERT OR IGNORE INTO ingest_idempotency`.
    Duplicate keys silently drop the event.
-3. Appends non-duplicate events as `EventType::Source` rows with a
-   `SourceEventData` payload (`source`, `kind`, `subject_id`, `data`).
+3. Appends non-duplicate events as canonical envelopes with
+   `source = batch.source`, the watcher's `kind` and `subject_id`, and
+   the supplied free-form `data`.
 4. Updates `watcher_cursors[source] = cursor_after` with fresh
    `updated_at` / `updated_seq` / cleared `last_error`.
 

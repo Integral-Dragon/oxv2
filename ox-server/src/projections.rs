@@ -144,11 +144,15 @@ impl ExecutionState {
 }
 
 impl Projections {
-    /// Apply an event to all projections.
+    /// Apply an event to all projections. Only ox-emitted events fold
+    /// into projections — watcher source events and unknown kinds flow
+    /// through to the log and SSE unchanged.
     pub fn apply(&self, event: &EventEnvelope) {
-        match event.event_type {
-            // Runner events
-            EventType::RunnerRegistered => {
+        if event.source != SOURCE_OX {
+            return;
+        }
+        match event.kind.as_str() {
+            kinds::RUNNER_REGISTERED => {
                 if let Ok(data) = serde_json::from_value::<RunnerRegisteredData>(event.data.clone())
                 {
                     let mut pool = self.pool.write().unwrap();
@@ -167,7 +171,7 @@ impl Projections {
                     );
                 }
             }
-            EventType::RunnerDrained => {
+            kinds::RUNNER_DRAINED => {
                 if let Ok(data) = serde_json::from_value::<RunnerDrainedData>(event.data.clone()) {
                     let mut pool = self.pool.write().unwrap();
                     if let Some(runner) = pool.runners.get_mut(&data.runner_id.0) {
@@ -176,8 +180,7 @@ impl Projections {
                 }
             }
 
-            // Step events that affect pool state
-            EventType::StepDispatched => {
+            kinds::STEP_DISPATCHED => {
                 if let Ok(data) =
                     serde_json::from_value::<StepDispatchedData>(event.data.clone())
                 {
@@ -217,7 +220,7 @@ impl Projections {
                     }
                 }
             }
-            EventType::StepRunning => {
+            kinds::STEP_RUNNING => {
                 if let Ok(data) = serde_json::from_value::<StepRunningData>(event.data.clone()) {
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
@@ -229,7 +232,7 @@ impl Projections {
                     }
                 }
             }
-            EventType::StepDone => {
+            kinds::STEP_DONE => {
                 if let Ok(data) = serde_json::from_value::<StepDoneData>(event.data.clone()) {
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
@@ -239,7 +242,7 @@ impl Projections {
                     }
                 }
             }
-            EventType::StepSignals => {
+            kinds::STEP_SIGNALS => {
                 if let Ok(data) = serde_json::from_value::<StepSignalsData>(event.data.clone()) {
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
@@ -248,7 +251,7 @@ impl Projections {
                     }
                 }
             }
-            EventType::StepConfirmed => {
+            kinds::STEP_CONFIRMED => {
                 if let Ok(data) = serde_json::from_value::<StepConfirmedData>(event.data.clone()) {
                     // Return runner to idle
                     let mut pool = self.pool.write().unwrap();
@@ -272,7 +275,7 @@ impl Projections {
                     }
                 }
             }
-            EventType::StepFailed => {
+            kinds::STEP_FAILED => {
                 if let Ok(data) = serde_json::from_value::<StepFailedData>(event.data.clone()) {
                     // Return runner to idle
                     let mut pool = self.pool.write().unwrap();
@@ -297,7 +300,7 @@ impl Projections {
                     }
                 }
             }
-            EventType::StepTimeout => {
+            kinds::STEP_TIMEOUT => {
                 if let Ok(data) = serde_json::from_value::<StepTimeoutData>(event.data.clone()) {
                     // Return runner to idle
                     let mut pool = self.pool.write().unwrap();
@@ -322,7 +325,7 @@ impl Projections {
                     }
                 }
             }
-            EventType::StepAdvanced => {
+            kinds::STEP_ADVANCED => {
                 if let Ok(data) = serde_json::from_value::<StepAdvancedData>(event.data.clone()) {
                     let mut execs = self.executions.write().unwrap();
                     if let Some(exec) = execs.executions.get_mut(&data.execution_id.0) {
@@ -335,19 +338,10 @@ impl Projections {
                 }
             }
 
-            // Execution lifecycle
-            EventType::ExecutionCreated => {
+            kinds::EXECUTION_CREATED => {
                 if let Ok(data) =
                     serde_json::from_value::<ExecutionCreatedData>(event.data.clone())
                 {
-                    // Events from pre-slice-5 logs may lack an origin on
-                    // the wire. Default to Manual — the operator can see
-                    // the execution in the list and retrigger from the
-                    // real source if needed.
-                    let origin = data
-                        .origin
-                        .clone()
-                        .unwrap_or(ExecutionOrigin::Manual { user: None });
                     let mut execs = self.executions.write().unwrap();
                     execs.executions.insert(
                         data.execution_id.0.clone(),
@@ -356,7 +350,7 @@ impl Projections {
                             workflow: data.workflow,
                             status: ExecutionStatus::Running,
                             vars: data.vars,
-                            origin,
+                            origin: data.origin,
                             attempts: vec![],
                             current_step: None,
                             current_attempt: 0,
@@ -366,7 +360,7 @@ impl Projections {
                     );
                 }
             }
-            EventType::ExecutionCompleted => {
+            kinds::EXECUTION_COMPLETED => {
                 if let Ok(data) =
                     serde_json::from_value::<ExecutionCompletedData>(event.data.clone())
                 {
@@ -376,7 +370,7 @@ impl Projections {
                     }
                 }
             }
-            EventType::ExecutionEscalated => {
+            kinds::EXECUTION_ESCALATED => {
                 if let Ok(data) =
                     serde_json::from_value::<ExecutionEscalatedData>(event.data.clone())
                 {
@@ -386,7 +380,7 @@ impl Projections {
                     }
                 }
             }
-            EventType::ExecutionCancelled => {
+            kinds::EXECUTION_CANCELLED => {
                 if let Ok(data) =
                     serde_json::from_value::<ExecutionCancelledData>(event.data.clone())
                 {
@@ -397,14 +391,13 @@ impl Projections {
                 }
             }
 
-            // Secrets
-            EventType::SecretSet => {
+            kinds::SECRET_SET => {
                 if let Ok(data) = serde_json::from_value::<SecretSetData>(event.data.clone()) {
                     let mut secrets = self.secrets.write().unwrap();
                     secrets.secrets.insert(data.name, data.value);
                 }
             }
-            EventType::SecretDeleted => {
+            kinds::SECRET_DELETED => {
                 if let Ok(data) = serde_json::from_value::<SecretDeletedData>(event.data.clone()) {
                     let mut secrets = self.secrets.write().unwrap();
                     secrets.secrets.remove(&data.name);
@@ -438,11 +431,13 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn envelope(seq: u64, event_type: EventType, data: serde_json::Value) -> EventEnvelope {
+    fn envelope(seq: u64, kind: &str, subject_id: &str, data: serde_json::Value) -> EventEnvelope {
         EventEnvelope {
             seq: Seq(seq),
             ts: Utc::now(),
-            event_type,
+            source: SOURCE_OX.into(),
+            kind: kind.into(),
+            subject_id: subject_id.into(),
             data,
         }
     }
@@ -450,13 +445,14 @@ mod tests {
     fn exec_created(seq: u64, exec_id: &str, workflow: &str) -> EventEnvelope {
         envelope(
             seq,
-            EventType::ExecutionCreated,
+            kinds::EXECUTION_CREATED,
+            exec_id,
             serde_json::to_value(ExecutionCreatedData {
                 execution_id: ExecutionId(exec_id.into()),
                 workflow: workflow.into(),
                 trigger: "manual".into(),
                 vars: HashMap::new(),
-                origin: None,
+                origin: ExecutionOrigin::Manual { user: None },
             })
             .unwrap(),
         )
@@ -465,7 +461,8 @@ mod tests {
     fn step_dispatched(seq: u64, exec_id: &str, step: &str, attempt: u32, runner: &str) -> EventEnvelope {
         envelope(
             seq,
-            EventType::StepDispatched,
+            kinds::STEP_DISPATCHED,
+            exec_id,
             serde_json::to_value(StepDispatchedData {
                 execution_id: ExecutionId(exec_id.into()),
                 step: step.into(),
