@@ -1,0 +1,12 @@
+{
+  "id": "sKFs",
+  "title": "ox-ctl up silently continues when ox-server fails to bind",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-16T20:19:13.960835992Z",
+  "updated_at": "2026-04-16T20:19:13.960835992Z",
+  "tags": [
+    "bug"
+  ]
+}
