@@ -23,6 +23,41 @@ pub struct RuntimeDef {
     pub proxy: Vec<ProxyDef>,
     #[serde(default)]
     pub metrics: Vec<MetricDef>,
+    #[serde(default)]
+    pub failure_signals: Vec<RuntimeFailureSignal>,
+}
+
+/// Declarative log-pattern signal. After process exit the runner scans
+/// the tail of the step log for `pattern`; a match emits `name` as a signal.
+/// `retriable = false` lets the workflow engine bypass max_retries and
+/// escalate the step on the first failure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeFailureSignal {
+    pub name: String,
+    pub pattern: String,
+    #[serde(default = "default_signal_retriable")]
+    pub retriable: bool,
+    #[serde(default = "default_signal_tail_bytes")]
+    pub tail_bytes: usize,
+}
+
+fn default_signal_retriable() -> bool {
+    true
+}
+
+fn default_signal_tail_bytes() -> usize {
+    65_536
+}
+
+/// A `RuntimeFailureSignal` with its regex compiled. Built once per config
+/// load (initial + SIGHUP reload) so a bad pattern fails the load instead
+/// of crashing a step mid-execution.
+#[derive(Debug, Clone)]
+pub struct CompiledFailureSignal {
+    pub name: String,
+    pub regex: regex::Regex,
+    pub retriable: bool,
+    pub tail_bytes: usize,
 }
 
 /// TOML file layout: [runtime] header.
@@ -43,6 +78,14 @@ impl RuntimeDef {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("reading runtime file: {}", path.display()))?;
         Self::from_toml(&content).with_context(|| format!("parsing runtime: {}", path.display()))
+    }
+
+    /// Compile every declared failure signal's regex. Call this on every
+    /// config load (initial + SIGHUP reload) so a malformed pattern is
+    /// rejected before any step references it.
+    pub fn compile_failure_signals(&self) -> Result<Vec<CompiledFailureSignal>, regex::Error> {
+        let _ = self;
+        todo!("compile failure_signals into Vec<CompiledFailureSignal>")
     }
 }
 
@@ -366,6 +409,7 @@ mod tests {
             env: HashMap::new(),
             proxy: vec![],
             metrics: vec![],
+            failure_signals: vec![],
         };
 
         let step_runtime = RuntimeSpec {
@@ -422,6 +466,7 @@ mod tests {
             env: HashMap::new(),
             proxy: vec![],
             metrics: vec![],
+            failure_signals: vec![],
         };
 
         // Step overrides prompt
@@ -446,5 +491,103 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.command, vec!["echo", "overridden"]);
+    }
+
+    #[test]
+    fn failure_signals_parse_with_all_fields() {
+        let toml_str = r#"
+            [runtime]
+            name = "test"
+
+            [runtime.command]
+            cmd = ["true"]
+
+            [[runtime.failure_signals]]
+            name = "auth_failed"
+            pattern = "authentication_error"
+            retriable = false
+            tail_bytes = 1024
+        "#;
+        let rt = RuntimeDef::from_toml(toml_str).unwrap();
+        assert_eq!(rt.failure_signals.len(), 1);
+        let sig = &rt.failure_signals[0];
+        assert_eq!(sig.name, "auth_failed");
+        assert_eq!(sig.pattern, "authentication_error");
+        assert!(!sig.retriable);
+        assert_eq!(sig.tail_bytes, 1024);
+    }
+
+    #[test]
+    fn failure_signals_apply_defaults_when_omitted() {
+        let toml_str = r#"
+            [runtime]
+            name = "test"
+
+            [runtime.command]
+            cmd = ["true"]
+
+            [[runtime.failure_signals]]
+            name = "transient_blip"
+            pattern = "blip"
+        "#;
+        let rt = RuntimeDef::from_toml(toml_str).unwrap();
+        let sig = &rt.failure_signals[0];
+        assert!(sig.retriable, "retriable defaults to true");
+        assert_eq!(sig.tail_bytes, 65_536, "tail_bytes defaults to 64 KiB");
+    }
+
+    #[test]
+    fn compile_failure_signals_rejects_invalid_regex() {
+        let rt = RuntimeDef {
+            name: "test".into(),
+            vars: IndexMap::new(),
+            command: CommandDef { cmd: vec!["true".into()], interactive_cmd: None, optional: vec![] },
+            files: vec![],
+            env: HashMap::new(),
+            proxy: vec![],
+            metrics: vec![],
+            failure_signals: vec![RuntimeFailureSignal {
+                name: "broken".into(),
+                pattern: "(unclosed".into(),
+                retriable: false,
+                tail_bytes: 1024,
+            }],
+        };
+        assert!(rt.compile_failure_signals().is_err());
+    }
+
+    #[test]
+    fn compile_failure_signals_returns_compiled_set() {
+        let rt = RuntimeDef {
+            name: "test".into(),
+            vars: IndexMap::new(),
+            command: CommandDef { cmd: vec!["true".into()], interactive_cmd: None, optional: vec![] },
+            files: vec![],
+            env: HashMap::new(),
+            proxy: vec![],
+            metrics: vec![],
+            failure_signals: vec![
+                RuntimeFailureSignal {
+                    name: "auth_failed".into(),
+                    pattern: r#""error":"authentication_error""#.into(),
+                    retriable: false,
+                    tail_bytes: 4096,
+                },
+                RuntimeFailureSignal {
+                    name: "rate_limited".into(),
+                    pattern: "rate_limit_exceeded".into(),
+                    retriable: true,
+                    tail_bytes: 8192,
+                },
+            ],
+        };
+        let compiled = rt.compile_failure_signals().expect("valid patterns compile");
+        assert_eq!(compiled.len(), 2);
+        assert_eq!(compiled[0].name, "auth_failed");
+        assert!(!compiled[0].retriable);
+        assert_eq!(compiled[0].tail_bytes, 4096);
+        assert!(compiled[0].regex.is_match(r#"x"error":"authentication_error"y"#));
+        assert_eq!(compiled[1].name, "rate_limited");
+        assert!(compiled[1].regex.is_match("foo rate_limit_exceeded bar"));
     }
 }

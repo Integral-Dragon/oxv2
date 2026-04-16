@@ -376,6 +376,7 @@ You are a software engineer."#;
             env: HashMap::new(),
             proxy: vec![],
             metrics: vec![],
+            failure_signals: vec![],
         });
 
         let errors = validate_personas(&personas, &runtimes);
@@ -462,6 +463,7 @@ You are a software engineer."#;
             env: HashMap::new(),
             proxy: vec![],
             metrics: vec![],
+            failure_signals: vec![],
         });
 
         let errors = validate_personas(&personas, &runtimes);

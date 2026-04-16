@@ -1,0 +1,12 @@
+{
+  "id": "tXwK",
+  "title": "ox-runner: detect runtime failures via runtime-declared log patterns",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-16T23:14:44.128897286Z",
+  "updated_at": "2026-04-16T23:21:43.413171769Z",
+  "tags": [
+    "bug"
+  ]
+}

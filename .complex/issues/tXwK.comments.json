@@ -1,0 +1,7 @@
+[
+  {
+    "timestamp": "2026-04-16T23:21:43.413157603Z",
+    "author": "unknown",
+    "body": "Resolved design Qs (2026-04-16):\n- regex compilation runs on every config load (initial + SIGHUP reload), not just startup\n- assignment carries raw patterns; runner re-compiles per step (server pre-validated)\n- StepSignalsData gains parallel signal_matches: Vec<SignalMatch> field (additive)\n- slice order: 1 config -> 2 runner scan -> 3 workflow policy -> 4 claude.toml + manual repro"
+  }
+]

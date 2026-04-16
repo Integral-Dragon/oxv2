@@ -1,0 +1,19 @@
+{
+  "id": "qB5P",
+  "title": "slice 2: runner log-tail scan emits matched signals",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-16T23:22:15.133025200Z",
+  "updated_at": "2026-04-16T23:22:15.133025200Z",
+  "tags": [
+    "bug"
+  ],
+  "parent": "tXwK",
+  "edges": [
+    {
+      "to": "csQA",
+      "type": "blocks"
+    }
+  ]
+}
