@@ -126,6 +126,18 @@ pub struct ExecutionCreatedData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionCompletedData {
     pub execution_id: ExecutionId,
+    /// Workflow that just finished. Lets `[trigger.where]` on
+    /// `execution.completed` filter by workflow (e.g. cx-surface only
+    /// chains after `code-task`, not after itself).
+    pub workflow: String,
+    /// All input vars the execution was created with. Chained
+    /// workflows can template from `{event.data.vars.<name>}`.
+    #[serde(default)]
+    pub vars: HashMap<String, String>,
+    /// Origin of the completed execution — the cause that started it.
+    /// Useful for correlating a completion back to the source fact
+    /// (cx node id, linear issue, manual run, ...).
+    pub origin: ExecutionOrigin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -613,6 +625,23 @@ mod tests {
         let m = ExecutionOrigin::Manual { user: None };
         assert!(!origins_match_for_dedup(&a, &m));
         assert!(!origins_match_for_dedup(&m, &m));
+    }
+
+    #[test]
+    fn execution_completed_data_round_trips_workflow_vars_origin() {
+        let data = ExecutionCompletedData {
+            execution_id: ExecutionId("e-1".into()),
+            workflow: "code-task".into(),
+            vars: HashMap::from([("task_id".into(), "Q6cY".into())]),
+            origin: src_origin("Q6cY"),
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["workflow"], "code-task");
+        assert_eq!(json["vars"]["task_id"], "Q6cY");
+        let back: ExecutionCompletedData = serde_json::from_value(json).unwrap();
+        assert_eq!(back.workflow, "code-task");
+        assert_eq!(back.vars.get("task_id").map(String::as_str), Some("Q6cY"));
+        assert_eq!(back.origin, data.origin);
     }
 
     #[test]

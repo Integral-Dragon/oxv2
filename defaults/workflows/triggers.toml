@@ -1,16 +1,21 @@
-# Triggers map source events (from watcher plugins) onto workflow
-# executions. Each trigger declares:
-#   - `on`: the source-native event kind it matches (e.g. `node.ready`)
-#   - `source`: the watcher namespace it filters on (e.g. `cx`)
-#   - `[trigger.where]`: optional predicates over event fields
+# Triggers map events on the canonical bus onto workflow executions.
+# Every event — whether from a watcher (`source = "cx"`, `"linear"`,
+# ...) or emitted by ox itself (`source = "ox"`) — is a candidate.
+#
+# Each trigger declares:
+#   - `on`: the event kind it matches (e.g. `node.ready`, `execution.completed`)
+#   - `source`: the emitter namespace to filter on (optional)
+#   - `[trigger.where]`: optional predicates over envelope fields
 #   - `workflow`: the workflow to run
 #   - `[trigger.vars]`: how to populate the workflow's declared vars
-#     from event fields. Templates may reference `{event.source}`,
-#     `{event.kind}`, `{event.subject_id}`, or `{event.data.<path>}`
-#     for dotted walks into the source payload.
+#     from the firing envelope. Templates may reference
+#     `{event.source}`, `{event.kind}`, `{event.subject_id}`, or
+#     `{event.data.<path>}` for dotted walks into the payload.
 #
 # ox-cx-watcher emits source events with `source = "cx"` and kinds
 # `node.ready` / `node.claimed` / `node.done` / `comment.added`.
+# ox-internal events (`source = "ox"`) include `execution.completed`,
+# `execution.escalated`, `step.confirmed`, etc.
 
 [[trigger]]
 on       = "node.ready"
@@ -31,11 +36,16 @@ workflow = "consultation"
 branch = "{event.subject_id}"
 
 [[trigger]]
-on       = "node.done"
-source   = "cx"
+# Chain cx-surface off the completion of any `code-task` execution.
+# `execution.completed` is an ox-internal event; the canonical
+# envelope matcher treats it identically to watcher source events.
+# The `data.workflow` filter is what prevents cx-surface from
+# chaining off its own completions (it would loop otherwise).
+on       = "execution.completed"
+source   = "ox"
 workflow = "cx-surface"
 [trigger.where]
-"data.tags" = { contains = "workflow:code-task" }
+"data.workflow" = "code-task"
 [trigger.vars]
-completed_task_id = "{event.subject_id}"
-branch = "cx-surface-{event.subject_id}"
+completed_task_id = "{event.data.vars.task_id}"
+branch            = "cx-surface-{event.data.vars.task_id}"

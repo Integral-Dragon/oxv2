@@ -769,10 +769,10 @@ shape.
 ### Triggers
 
 Manual triggering is not served by ox-server — the herder evaluates
-triggers itself against incoming source events. To fire a workflow by
-hand, synthesize a source event via `POST /api/events/ingest` or
-mutate the underlying source (`cx` node, Linear issue, ...) and let
-the watcher observe it.
+triggers itself against every event on the bus, watcher-emitted or
+ox-internal alike. To fire a workflow by hand, synthesize an event
+via `POST /api/events/ingest` or mutate the underlying source (`cx`
+node, Linear issue, ...) and let the watcher observe it.
 
 #### `POST /api/triggers/failed`
 
@@ -787,7 +787,6 @@ Request: a `TriggerFailedData` payload:
 {
   "source_seq": 42,
   "on": "node.ready",
-  "tag": "workflow:consultation",
   "workflow": "consultation",
   "reason": {
     "type": "missing_event_field",
@@ -861,7 +860,13 @@ Response:
     "name": "code-task",
     "steps": ["propose", "review-plan", "implement", "review-code", "merge"],
     "triggers": [
-      { "on": "node.ready", "source": "cx", "tag": "workflow:code-task", "workflow": "code-task" }
+      {
+        "on": "node.ready",
+        "source": "cx",
+        "workflow": "code-task",
+        "where": { "data.tags": { "contains": "workflow:code-task" } },
+        "vars": { "task_id": "{event.subject_id}" }
+      }
     ]
   }
 ]

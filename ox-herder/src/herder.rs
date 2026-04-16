@@ -1268,4 +1268,108 @@ mod tests {
 
         assert_eq!(h.client.create_calls().len(), 0);
     }
+
+    // ── Ox-internal event chaining ─────────────────────────────────────
+
+    /// Trigger that chains off a completed `code-task` execution —
+    /// this is the cx-surface trigger from `defaults/workflows/triggers.toml`
+    /// expressed as a `TriggerDef` for test isolation.
+    fn execution_completed_chain_trigger() -> TriggerDef {
+        let mut vars = HashMap::new();
+        vars.insert("completed_task_id".into(), "{event.data.vars.task_id}".into());
+        vars.insert("branch".into(), "cx-surface-{event.data.vars.task_id}".into());
+        let where_ = HashMap::from([(
+            "data.workflow".into(),
+            ox_core::workflow::TriggerWhere::Eq("code-task".into()),
+        )]);
+        TriggerDef {
+            on: "execution.completed".into(),
+            source: Some(SOURCE_OX.into()),
+            where_,
+            workflow: "cx-surface".into(),
+            poll_interval: None,
+            vars,
+        }
+    }
+
+    fn completion_envelope(workflow: &str, task_id: &str) -> EventEnvelope {
+        let origin = ExecutionOrigin::Event {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: task_id.into(),
+            seq: Seq(1),
+        };
+        let data = ExecutionCompletedData {
+            execution_id: ExecutionId("e-1744000000-42".into()),
+            workflow: workflow.into(),
+            vars: HashMap::from([("task_id".into(), task_id.into())]),
+            origin,
+        };
+        EventEnvelope {
+            seq: Seq(99),
+            ts: chrono::Utc::now(),
+            source: SOURCE_OX.into(),
+            kind: "execution.completed".into(),
+            subject_id: "e-1744000000-42".into(),
+            data: serde_json::to_value(data).unwrap(),
+        }
+    }
+
+    fn herder_with_chain_trigger(client: MockClient) -> Herder<MockClient> {
+        let mut h = Herder::with_client(client, "http://test", 0, 60, 1);
+        h.triggers = vec![execution_completed_chain_trigger()];
+        h.replaying = false;
+        h
+    }
+
+    /// An ox-internal `execution.completed` envelope fires the
+    /// cx-surface trigger when `data.workflow` matches the
+    /// `[trigger.where]` filter. Vars interpolate from the completed
+    /// execution's original input vars, and the dedup origin points
+    /// at the completion envelope itself.
+    #[tokio::test]
+    async fn execution_completed_fires_cx_surface_for_matching_workflow() {
+        let mut h = herder_with_chain_trigger(MockClient::new());
+        let envelope = completion_envelope("code-task", "Q6cY");
+
+        h.evaluate_triggers_for_event(&envelope).await;
+
+        let calls = h.client.create_calls();
+        assert_eq!(calls.len(), 1, "one execution should be created");
+        assert_eq!(calls[0].0, "cx-surface");
+        assert_eq!(
+            calls[0].2,
+            ExecutionOrigin::Event {
+                source: SOURCE_OX.into(),
+                kind: "execution.completed".into(),
+                subject_id: "e-1744000000-42".into(),
+                seq: envelope.seq,
+            }
+        );
+
+        let vars = h.client.create_call_vars();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(
+            vars[0].get("completed_task_id").map(String::as_str),
+            Some("Q6cY")
+        );
+        assert_eq!(
+            vars[0].get("branch").map(String::as_str),
+            Some("cx-surface-Q6cY")
+        );
+    }
+
+    /// The same trigger must NOT fire when the completed workflow is
+    /// a different one — the `[trigger.where]` filter excludes it.
+    /// This is also what protects cx-surface from chaining off its
+    /// own completions.
+    #[tokio::test]
+    async fn execution_completed_does_not_fire_for_other_workflows() {
+        let mut h = herder_with_chain_trigger(MockClient::new());
+        let envelope = completion_envelope("consultation", "Q6cY");
+
+        h.evaluate_triggers_for_event(&envelope).await;
+
+        assert_eq!(h.client.create_calls().len(), 0);
+    }
 }

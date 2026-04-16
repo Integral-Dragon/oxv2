@@ -437,10 +437,11 @@ events start workflows.
 ```toml
 # workflows/triggers.toml
 [[trigger]]
-on       = "node.ready"                # the source-native event kind
-source   = "cx"                        # watcher identifier (optional filter)
-tag      = "workflow:code-task"        # must appear in the event's tag list
+on       = "node.ready"                # the event kind to match
+source   = "cx"                        # emitter namespace (optional filter)
 workflow = "code-task"
+[trigger.where]
+"data.tags" = { contains = "workflow:code-task" }
 [trigger.vars]
 branch  = "cx-{event.subject_id}"
 task_id = "{event.subject_id}"
@@ -449,16 +450,19 @@ title   = "{event.data.title}"
 
 Fields:
 
-- `on` — matches the event's `kind` field verbatim. Kinds are
-  source-authored strings like `node.ready`, `issue.labeled`, or
-  `schedule.tick`; Ox does not interpret them.
-- `source` — optional. When set, only events whose `source` equals
-  this value match. Omit it to accept any watcher.
-- `tag` — optional. When set, the event's `tags` list must contain
-  this string.
+- `on` — matches the envelope's `kind` field verbatim. Kinds are
+  emitter-authored strings (e.g. `node.ready`, `issue.labeled`,
+  `execution.completed`); Ox does not interpret them.
+- `source` — optional. When set, only envelopes whose `source` equals
+  this value match. Omit it to accept any emitter. Use `source = "ox"`
+  to chain off ox-internal events like `execution.completed`.
+- `[trigger.where]` — optional predicates over envelope fields.
+  Keys are dotted paths rooted at the envelope (`data.tags`,
+  `data.workflow`, ...). Values are either a bare scalar (exact
+  match) or `{ contains = "..." }` (array/string containment).
 - `workflow` — the workflow to start.
-- `[trigger.vars]` — templates resolved against the firing event
-  envelope (`{event.source}`, `{event.kind}`, `{event.subject_id}`,
+- `[trigger.vars]` — templates resolved against the firing envelope
+  (`{event.source}`, `{event.kind}`, `{event.subject_id}`,
   `{event.data.*}`). The resulting map is validated against the
   workflow's `[workflow.vars]` declarations.
 
@@ -471,11 +475,32 @@ workflow wants:
 [[trigger]]
 on       = "node.ready"
 source   = "cx"
-tag      = "workflow:consultation"
 workflow = "consultation"
+[trigger.where]
+"data.tags" = { contains = "workflow:consultation" }
 [trigger.vars]
 branch = "cx-{event.subject_id}"
 ```
+
+Chaining off an ox-internal event uses the same shape. The
+cx-surface workflow chains off the completion of any `code-task`:
+
+```toml
+[[trigger]]
+on       = "execution.completed"
+source   = "ox"
+workflow = "cx-surface"
+[trigger.where]
+"data.workflow" = "code-task"
+[trigger.vars]
+completed_task_id = "{event.data.vars.task_id}"
+branch            = "cx-surface-{event.data.vars.task_id}"
+```
+
+The `data.workflow` filter is what keeps cx-surface from chaining
+off its own completions. `execution.completed` carries the original
+execution's `workflow`, input `vars`, and `origin`, so the chained
+workflow can template any of those.
 
 A trigger with no `[trigger.vars]` block produces no workflow vars —
 the workflow must declare only optional vars with defaults, or the
@@ -524,10 +549,11 @@ repeatedly while the condition holds:
 [[trigger]]
 on            = "node.ready"
 source        = "cx"
-tag           = "phase"
-state         = "claimed"
 workflow      = "checkpoint"
 poll_interval = "15m"      # fire every 15 minutes while condition is true
+[trigger.where]
+"data.tags"  = { contains = "phase" }
+"data.state" = "claimed"
 ```
 
 This replaces a separate cron system. When the condition becomes false

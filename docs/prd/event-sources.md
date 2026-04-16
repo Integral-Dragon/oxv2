@@ -223,17 +223,20 @@ strings beyond matching them.
 ```toml
 [[trigger]]
 on       = "node.ready"
-source   = "cx"                      # new — filter by originating watcher
-tag      = "workflow:code-task"
+source   = "cx"                      # filter by originating emitter
 workflow = "code-task"
+[trigger.where]
+"data.tags" = { contains = "workflow:code-task" }
 [trigger.vars]
-branch = "cx-{event.subject_id}"
+branch    = "cx-{event.subject_id}"
 source_id = "{event.subject_id}"
-title = "{event.data.title}"
+title     = "{event.data.title}"
 ```
 
-`source` is an optional extra filter. A Linear project's trigger would
-use `source = "linear"`; a watcher-agnostic trigger can omit it.
+`source` is an optional filter. A Linear project's trigger would use
+`source = "linear"`; an ox-internal chain uses `source = "ox"`; a
+watcher-agnostic trigger can omit it. Generic field predicates live
+in `[trigger.where]` and match any dotted path into the envelope.
 
 The trigger maps event fields into execution vars. Branch names are not
 special in the core event model — they are workflow vars chosen by the

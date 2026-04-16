@@ -889,19 +889,113 @@ async fn complete_execution(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> StatusCode {
-    let subject = id.clone();
-    let data = ExecutionCompletedData {
-        execution_id: ExecutionId(id),
+    let execs = state.bus.projections.executions();
+    let Some(data) = build_execution_completed(&execs, &id) else {
+        tracing::warn!(exec = %id, "complete_execution: no projection row; returning 404");
+        return StatusCode::NOT_FOUND;
     };
     state
         .bus
         .append_ox(
             kinds::EXECUTION_COMPLETED,
-            &subject,
+            &id,
             serde_json::to_value(data).unwrap(),
         )
         .unwrap();
     StatusCode::NO_CONTENT
+}
+
+/// Build the `ExecutionCompletedData` payload for a given execution
+/// from the current projection state. Returns `None` if the execution
+/// has no projection row — downstream workflows rely on the enriched
+/// fields, so emitting a stub completion would break chaining.
+///
+/// Extracted for unit testing; the `complete_execution` handler just
+/// dispatches on the `Option`.
+fn build_execution_completed(
+    execs: &projections::ExecutionsState,
+    id: &str,
+) -> Option<ExecutionCompletedData> {
+    let exec = execs.executions.get(id)?;
+    Some(ExecutionCompletedData {
+        execution_id: exec.id.clone(),
+        workflow: exec.workflow.clone(),
+        vars: exec.vars.clone(),
+        origin: exec.origin.clone(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::projections::Projections;
+    use chrono::Utc;
+    use ox_core::events::{ExecutionCreatedData, kinds};
+    use ox_core::types::Seq;
+
+    fn envelope(seq: u64, kind: &str, subject_id: &str, data: serde_json::Value) -> EventEnvelope {
+        EventEnvelope {
+            seq: Seq(seq),
+            ts: Utc::now(),
+            source: ox_core::events::SOURCE_OX.into(),
+            kind: kind.into(),
+            subject_id: subject_id.into(),
+            data,
+        }
+    }
+
+    fn seeded_projections(exec_id: &str, workflow: &str) -> Projections {
+        let proj = Projections::default();
+        let origin = ExecutionOrigin::Event {
+            source: "cx".into(),
+            kind: "node.ready".into(),
+            subject_id: "Q6cY".into(),
+            seq: Seq(1),
+        };
+        let data = ExecutionCreatedData {
+            execution_id: ExecutionId(exec_id.into()),
+            workflow: workflow.into(),
+            trigger: "node.ready".into(),
+            vars: HashMap::from([
+                ("task_id".into(), "Q6cY".into()),
+                ("persona".into(), "engineer".into()),
+            ]),
+            origin,
+        };
+        proj.apply(&envelope(
+            1,
+            kinds::EXECUTION_CREATED,
+            exec_id,
+            serde_json::to_value(data).unwrap(),
+        ));
+        proj
+    }
+
+    #[test]
+    fn build_execution_completed_copies_workflow_vars_and_origin() {
+        let proj = seeded_projections("e-42", "code-task");
+        let execs = proj.executions();
+        let data = build_execution_completed(&execs, "e-42")
+            .expect("projection row should exist");
+        assert_eq!(data.execution_id.0, "e-42");
+        assert_eq!(data.workflow, "code-task");
+        assert_eq!(data.vars.get("task_id").map(String::as_str), Some("Q6cY"));
+        assert_eq!(data.vars.get("persona").map(String::as_str), Some("engineer"));
+        match data.origin {
+            ExecutionOrigin::Event { source, subject_id, .. } => {
+                assert_eq!(source, "cx");
+                assert_eq!(subject_id, "Q6cY");
+            }
+            other => panic!("expected Event origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_execution_completed_returns_none_when_missing() {
+        let proj = Projections::default();
+        let execs = proj.executions();
+        assert!(build_execution_completed(&execs, "e-does-not-exist").is_none());
+    }
 }
 
 #[derive(Deserialize)]

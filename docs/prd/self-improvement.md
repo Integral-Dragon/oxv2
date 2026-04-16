@@ -222,9 +222,10 @@ A poll trigger that fires periodically to consolidate and prune memory.
 [[trigger]]
 on            = "node.ready"
 source        = "cx"
-tag           = "retro-schedule"
 poll_interval = "24h"
 workflow      = "retro-consolidate"
+[trigger.where]
+"data.tags" = { contains = "retro-schedule" }
 ```
 
 The consolidation retro reads all memory files, checks whether
