@@ -495,7 +495,19 @@ impl RetryTracker {
     }
 
     /// Record a step failure and decide whether to retry.
-    pub fn record_failure(&mut self, step: &str, max_retries: Option<u32>) -> RetryDecision {
+    ///
+    /// `force_escalate = true` makes the tracker return `Exhausted`
+    /// regardless of the remaining retry budget — the runner has
+    /// reported a non-retriable failure signal and burning more
+    /// attempts wouldn't change the outcome. The attempt counter is
+    /// also cleared so a manual rerun starts fresh.
+    pub fn record_failure(
+        &mut self,
+        step: &str,
+        max_retries: Option<u32>,
+        force_escalate: bool,
+    ) -> RetryDecision {
+        let _ = force_escalate;
         let max = max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
 
         // Reset if we moved to a different step
@@ -697,15 +709,15 @@ mod tests {
     fn retry_within_budget() {
         let mut tracker = RetryTracker::new();
         assert_eq!(
-            tracker.record_failure("propose", Some(2)),
+            tracker.record_failure("propose", Some(2), false),
             RetryDecision::Retry { attempt: 2 }
         );
         assert_eq!(
-            tracker.record_failure("propose", Some(2)),
+            tracker.record_failure("propose", Some(2), false),
             RetryDecision::Retry { attempt: 3 }
         );
         assert_eq!(
-            tracker.record_failure("propose", Some(2)),
+            tracker.record_failure("propose", Some(2), false),
             RetryDecision::Exhausted
         );
     }
@@ -713,10 +725,10 @@ mod tests {
     #[test]
     fn retry_resets_on_step_change() {
         let mut tracker = RetryTracker::new();
-        tracker.record_failure("propose", Some(1));
+        tracker.record_failure("propose", Some(1), false);
         // Moving to a different step resets the count
         assert_eq!(
-            tracker.record_failure("review", Some(1)),
+            tracker.record_failure("review", Some(1), false),
             RetryDecision::Retry { attempt: 2 }
         );
     }
@@ -726,13 +738,31 @@ mod tests {
         let mut tracker = RetryTracker::new();
         for _ in 0..3 {
             assert!(matches!(
-                tracker.record_failure("step", None),
+                tracker.record_failure("step", None, false),
                 RetryDecision::Retry { .. }
             ));
         }
         assert_eq!(
-            tracker.record_failure("step", None),
+            tracker.record_failure("step", None, false),
             RetryDecision::Exhausted
+        );
+    }
+
+    #[test]
+    fn force_escalate_exhausts_immediately_and_clears_counter() {
+        let mut tracker = RetryTracker::new();
+        // First failure with force_escalate=true must skip the budget.
+        assert_eq!(
+            tracker.record_failure("propose", Some(5), true),
+            RetryDecision::Exhausted,
+            "force_escalate=true must return Exhausted on the first failure"
+        );
+        // Counter must be cleared so a manual rerun isn't poisoned —
+        // the next failure on the same step starts at attempt 2 again.
+        assert_eq!(
+            tracker.record_failure("propose", Some(5), false),
+            RetryDecision::Retry { attempt: 2 },
+            "force_escalate must reset the counter so reruns aren't poisoned"
         );
     }
 

@@ -47,6 +47,13 @@ struct ExecutionView {
     visit_counts: HashMap<String, u32>,
     last_output: Option<String>,
     retry_tracker: RetryTracker,
+    /// Signal matches reported by the runner for the most recent
+    /// attempt of the current step. Populated on `step.signals`,
+    /// reset when a new attempt is dispatched or the step is
+    /// confirmed. `do_failure` consults this list — any match with
+    /// `retriable = false` short-circuits the retry budget and
+    /// escalates the step immediately.
+    last_signal_matches: Vec<SignalMatch>,
 }
 
 pub struct Herder<C: OxClientApi = OxClient> {
@@ -305,6 +312,7 @@ impl<C: OxClientApi> Herder<C> {
                         visit_counts: HashMap::new(),
                         last_output: None,
                         retry_tracker: RetryTracker::new(),
+                        last_signal_matches: vec![],
                     },
                 );
             }
@@ -595,7 +603,7 @@ impl<C: OxClientApi> Herder<C> {
                 Some(e) => e,
                 None => return,
             };
-            exec.retry_tracker.record_failure(step, max_retries)
+            exec.retry_tracker.record_failure(step, max_retries, false)
         };
 
         match decision {
@@ -1009,6 +1017,7 @@ impl<C: OxClientApi> Herder<C> {
                             visit_counts: HashMap::new(),
                             last_output: None,
                             retry_tracker: RetryTracker::new(),
+                            last_signal_matches: vec![],
                         },
                     );
                 }
@@ -1059,6 +1068,7 @@ mod tests {
     struct MockClient {
         created: Mutex<Vec<(String, String, ExecutionOrigin)>>,
         created_vars: Mutex<Vec<HashMap<String, String>>>,
+        escalated: Mutex<Vec<(String, String, String)>>,
     }
 
     impl MockClient {
@@ -1070,6 +1080,9 @@ mod tests {
         }
         fn create_call_vars(&self) -> Vec<HashMap<String, String>> {
             self.created_vars.lock().unwrap().clone()
+        }
+        fn escalate_calls(&self) -> Vec<(String, String, String)> {
+            self.escalated.lock().unwrap().clone()
         }
     }
 
@@ -1098,8 +1111,13 @@ mod tests {
         async fn complete_execution(&self, _id: &str) -> Result<()> {
             unimplemented!()
         }
-        async fn escalate_execution(&self, _id: &str, _step: &str, _reason: &str) -> Result<()> {
-            unimplemented!()
+        async fn escalate_execution(&self, id: &str, step: &str, reason: &str) -> Result<()> {
+            self.escalated.lock().unwrap().push((
+                id.to_string(),
+                step.to_string(),
+                reason.to_string(),
+            ));
+            Ok(())
         }
         async fn dispatch_step(&self, _params: &DispatchStepParams) -> Result<()> {
             unimplemented!()
@@ -1261,6 +1279,7 @@ mod tests {
                 visit_counts: HashMap::new(),
                 last_output: None,
                 retry_tracker: RetryTracker::new(),
+                last_signal_matches: vec![],
             },
         );
 
@@ -1371,5 +1390,129 @@ mod tests {
         h.evaluate_triggers_for_event(&envelope).await;
 
         assert_eq!(h.client.create_calls().len(), 0);
+    }
+
+    // ── Failure-signal escalation policy ────────────────────────────
+
+    /// Build a herder pre-loaded with a one-step workflow whose step
+    /// `propose` allows a generous retry budget (5). The test then
+    /// proves that a retriable=false signal short-circuits that
+    /// budget — without this guard, claude auth-failure loops would
+    /// burn all 5 attempts before escalating.
+    fn herder_with_one_step(client: MockClient, max_retries: u32) -> Herder<MockClient> {
+        use ox_core::workflow::{StepDef, WorkflowDef, WorkflowEngine};
+        let mut h = Herder::with_client(client, "http://test", 0, 60, 1);
+        let def = WorkflowDef {
+            name: "test-wf".into(),
+            description: String::new(),
+            persona: None,
+            skills: vec![],
+            vars: Default::default(),
+            steps: vec![StepDef {
+                name: "propose".into(),
+                persona: None,
+                prompt: None,
+                skills: vec![],
+                runtime: None,
+                action: None,
+                output: None,
+                workspace: None,
+                artifacts: vec![],
+                transitions: vec![],
+                max_retries: Some(max_retries),
+                max_visits: None,
+                max_visits_goto: None,
+                on_fail: None,
+                squash: false,
+            }],
+        };
+        h.workflows.insert("test-wf".into(), WorkflowEngine::from_def(def));
+        h.replaying = false;
+        h
+    }
+
+    fn insert_failing_exec(h: &mut Herder<MockClient>, exec_id: &str, signal_matches: Vec<SignalMatch>) {
+        h.executions.insert(
+            exec_id.into(),
+            ExecutionView {
+                vars: HashMap::new(),
+                origin: ExecutionOrigin::Manual { user: None },
+                workflow: "test-wf".into(),
+                status: "running".into(),
+                phase: ExecPhase::NeedsFailure {
+                    step: "propose".into(),
+                    error: "signal:auth_failed".into(),
+                },
+                visit_counts: HashMap::new(),
+                last_output: None,
+                retry_tracker: RetryTracker::new(),
+                last_signal_matches: signal_matches,
+            },
+        );
+    }
+
+    /// A non-retriable signal (e.g. `auth_failed`) must escalate the
+    /// step on its first failure, even when `max_retries` would
+    /// otherwise allow several more attempts. This is the policy
+    /// enforced by slice 3 — without it the herder retries claude
+    /// auth errors 4× and only escalates after burning the budget.
+    #[tokio::test]
+    async fn non_retriable_signal_escalates_on_first_failure() {
+        let mut h = herder_with_one_step(MockClient::new(), 5);
+        insert_failing_exec(
+            &mut h,
+            "exec-auth-fail",
+            vec![SignalMatch {
+                name: "auth_failed".into(),
+                line: r#"{"is_error":true,"error":"authentication_error"}"#.into(),
+                retriable: false,
+            }],
+        );
+
+        // Drive NeedsFailure → do_failure once.
+        let progressed = h.process_execution("exec-auth-fail").await;
+        assert!(progressed, "NeedsFailure should be processed");
+
+        let escalations = h.client.escalate_calls();
+        assert_eq!(
+            escalations.len(),
+            1,
+            "non-retriable signal must escalate, not retry"
+        );
+        assert_eq!(escalations[0].0, "exec-auth-fail");
+        assert_eq!(escalations[0].1, "propose");
+
+        let exec = h.executions.get("exec-auth-fail").unwrap();
+        assert_eq!(exec.status, "escalated", "execution must be marked escalated");
+    }
+
+    /// A retriable signal (or no signal at all) must NOT escalate on
+    /// first failure when retries remain — preserves existing retry
+    /// semantics for transient failures.
+    #[tokio::test]
+    async fn retriable_signal_still_uses_retry_budget() {
+        let mut h = herder_with_one_step(MockClient::new(), 5);
+        insert_failing_exec(
+            &mut h,
+            "exec-blip",
+            vec![SignalMatch {
+                name: "transient_blip".into(),
+                line: "blip blip".into(),
+                retriable: true,
+            }],
+        );
+
+        let _ = h.process_execution("exec-blip").await;
+
+        assert!(
+            h.client.escalate_calls().is_empty(),
+            "retriable signal must not trigger escalation while budget remains"
+        );
+        let exec = h.executions.get("exec-blip").unwrap();
+        assert!(
+            matches!(exec.phase, ExecPhase::Ready { .. }),
+            "exec should be re-readied for another attempt, got {:?}",
+            exec.phase
+        );
     }
 }

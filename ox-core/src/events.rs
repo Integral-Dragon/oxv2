@@ -205,13 +205,23 @@ pub struct StepSignalsData {
     pub signal_matches: Vec<SignalMatch>,
 }
 
-/// One log-pattern signal match: the configured signal name plus the
-/// log line that triggered it, so operators can see *why* a signal fired
-/// without trawling logs.
+/// One log-pattern signal match: the configured signal name, the log
+/// line that triggered it (so operators can see *why* a signal fired
+/// without trawling logs), and the `retriable` bit copied from the
+/// runtime config so the workflow engine can decide policy without
+/// re-reading config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignalMatch {
     pub name: String,
     pub line: String,
+    /// Whether this signal allows further retries. Defaults to `true`
+    /// for events written before this field existed.
+    #[serde(default = "default_signal_match_retriable")]
+    pub retriable: bool,
+}
+
+fn default_signal_match_retriable() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

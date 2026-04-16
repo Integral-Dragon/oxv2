@@ -1,11 +1,11 @@
 {
   "id": "9Fa3",
   "title": "slice 1: runtime config schema for failure_signals",
-  "state": "ready",
+  "state": "integrated",
   "shadowed": false,
   "part": null,
   "created_at": "2026-04-16T23:22:04.623259579Z",
-  "updated_at": "2026-04-16T23:22:29.928787446Z",
+  "updated_at": "2026-04-16T23:25:49.909174835Z",
   "tags": [
     "bug"
   ],

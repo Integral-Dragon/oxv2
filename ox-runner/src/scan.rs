@@ -58,6 +58,7 @@ pub fn scan_failure_signals(
             out.push(SignalMatch {
                 name: sig.name.clone(),
                 line,
+                retriable: sig.retriable,
             });
         }
     }
