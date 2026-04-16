@@ -779,6 +779,8 @@ async fn step_done(
 struct StepSignalsRequest {
     attempt: u32,
     signals: Vec<String>,
+    #[serde(default)]
+    signal_matches: Vec<ox_core::events::SignalMatch>,
 }
 
 async fn step_signals(
@@ -792,6 +794,7 @@ async fn step_signals(
         step: params.step,
         attempt: req.attempt,
         signals: req.signals,
+        signal_matches: req.signal_matches,
     };
     state
         .bus

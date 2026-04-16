@@ -30,8 +30,89 @@ pub fn scan_failure_signals(
     log_path: &Path,
     signals: &[CompiledFailureSignal],
 ) -> Vec<SignalMatch> {
-    let _ = (log_path, signals);
-    todo!("read tail of log_path, scan each signal regex, return SignalMatch per match")
+    if signals.is_empty() {
+        return vec![];
+    }
+
+    // Read once, sized to the largest tail any signal asks for. Each
+    // signal then scans its own (possibly shorter) suffix of that read.
+    let max_tail = signals.iter().map(|s| s.tail_bytes).max().unwrap_or(0);
+    let bytes = match read_tail(log_path, max_tail) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                path = %log_path.display(),
+                error = %e,
+                "failure-signal scan: log unreadable, skipping"
+            );
+            return vec![];
+        }
+    };
+
+    let mut out = Vec::new();
+    for sig in signals {
+        let suffix = tail_suffix(&bytes, sig.tail_bytes);
+        let text = drop_partial_utf8_prefix(suffix);
+        if let Some(m) = sig.regex.find(text) {
+            let line = enclosing_line(text, m.start(), m.end()).to_string();
+            out.push(SignalMatch {
+                name: sig.name.clone(),
+                line,
+            });
+        }
+    }
+    out
+}
+
+/// Read at most `max_bytes` from the end of `path`. Files smaller than
+/// `max_bytes` are returned in full.
+fn read_tail(path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let to_read = std::cmp::min(len, max_bytes as u64);
+    let start = len - to_read;
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::with_capacity(to_read as usize);
+    file.take(to_read).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Last `n` bytes of `bytes` (or all of it if shorter).
+fn tail_suffix(bytes: &[u8], n: usize) -> &[u8] {
+    let start = bytes.len().saturating_sub(n);
+    &bytes[start..]
+}
+
+/// Drop any leading bytes that aren't a valid UTF-8 boundary so the
+/// remainder is safe to treat as `&str`. Invalid bytes elsewhere are
+/// replaced lazily via `String::from_utf8_lossy` is overkill — patterns
+/// only need to find ASCII-ish anchors, so a clean prefix is enough.
+fn drop_partial_utf8_prefix(bytes: &[u8]) -> &str {
+    // Find the first index that begins a valid UTF-8 sequence by
+    // scanning forward up to 4 bytes (max UTF-8 char width) and trying
+    // to parse from there. If nothing parses cleanly, return "".
+    for skip in 0..bytes.len().min(4) {
+        if let Ok(s) = std::str::from_utf8(&bytes[skip..]) {
+            return s;
+        }
+    }
+    // Last resort: only the empty suffix is guaranteed valid UTF-8.
+    ""
+}
+
+/// Return the substring of `text` that contains the byte range
+/// `[match_start, match_end)` extended out to enclosing newline
+/// boundaries.
+fn enclosing_line(text: &str, match_start: usize, match_end: usize) -> &str {
+    let line_start = text[..match_start]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let line_end = text[match_end..]
+        .find('\n')
+        .map(|i| match_end + i)
+        .unwrap_or(text.len());
+    &text[line_start..line_end]
 }
 
 #[cfg(test)]

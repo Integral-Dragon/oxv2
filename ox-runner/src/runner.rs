@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use ox_core::client::OxClient;
 use ox_core::events::*;
-use ox_core::runtime::ResolvedStepSpec;
+use ox_core::runtime::{ResolvedStepSpec, RuntimeFailureSignal};
 use ox_core::types::RunnerId;
 use reqwest_eventsource::{Event as SseEvent, EventSource};
 use std::collections::HashMap;
@@ -623,6 +623,47 @@ impl Runner {
         // 8. Collect signals
         let duration = start.elapsed();
         let mut signals = vec![];
+        let mut signal_matches = vec![];
+
+        // Declarative log-pattern scan: any runtime-declared signal
+        // whose pattern matches the log tail is reported as a named
+        // signal plus the matched line. The workflow engine inspects
+        // these to decide whether to retry or escalate.
+        let raw_signals: &[RuntimeFailureSignal] = assignment
+            .resolved
+            .as_ref()
+            .map(|r| r.failure_signals.as_slice())
+            .unwrap_or(&[]);
+        if !raw_signals.is_empty() {
+            // Compile per step. Cheap (regex crate caches NFA construction
+            // internally), and patterns were already validated at server
+            // config-load time so this should never fail.
+            let compiled: Vec<_> = raw_signals
+                .iter()
+                .filter_map(|s| match regex::Regex::new(&s.pattern) {
+                    Ok(re) => Some(ox_core::runtime::CompiledFailureSignal {
+                        name: s.name.clone(),
+                        regex: re,
+                        retriable: s.retriable,
+                        tail_bytes: s.tail_bytes,
+                    }),
+                    Err(e) => {
+                        tracing::warn!(
+                            signal = %s.name,
+                            pattern = %s.pattern,
+                            error = %e,
+                            "failure-signal pattern failed to compile in runner; skipping"
+                        );
+                        None
+                    }
+                })
+                .collect();
+            let matches = crate::scan::scan_failure_signals(&log_file_path, &compiled);
+            for m in matches {
+                signals.push(m.name.clone());
+                signal_matches.push(m);
+            }
+        }
 
         // If the process exited 0 but never called ox-rt done, treat as implicit done.
         // Output is empty — the workflow engine will fall through to the next step
@@ -660,7 +701,13 @@ impl Runner {
 
         // 10. Report signals
         self.client
-            .step_signals(exec_id, step, attempt, signals.clone())
+            .step_signals(
+                exec_id,
+                step,
+                attempt,
+                signals.clone(),
+                signal_matches.clone(),
+            )
             .await?;
 
         // 11. Check signal failure rules

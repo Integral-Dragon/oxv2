@@ -231,6 +231,8 @@ struct StepDoneRequest {
 struct StepSignalsRequest {
     attempt: u32,
     signals: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    signal_matches: Vec<crate::events::SignalMatch>,
 }
 
 #[derive(Serialize)]
@@ -543,12 +545,17 @@ impl OxClient {
         step: &str,
         attempt: u32,
         signals: Vec<String>,
+        signal_matches: Vec<crate::events::SignalMatch>,
     ) -> Result<()> {
         self.http
             .post(self.url(&format!(
                 "/api/executions/{execution_id}/steps/{step}/signals"
             )))
-            .json(&StepSignalsRequest { attempt, signals })
+            .json(&StepSignalsRequest {
+                attempt,
+                signals,
+                signal_matches,
+            })
             .send()
             .await?
             .error_for_status()?;

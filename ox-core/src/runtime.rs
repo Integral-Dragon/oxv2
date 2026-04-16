@@ -203,6 +203,11 @@ pub struct ResolvedStepSpec {
     /// Metric declarations.
     #[serde(default)]
     pub metrics: Vec<MetricDef>,
+    /// Raw failure-signal patterns from the runtime. The runner
+    /// re-compiles these per step (server already validated them at
+    /// config load) and scans the step log tail after process exit.
+    #[serde(default)]
+    pub failure_signals: Vec<RuntimeFailureSignal>,
 }
 
 /// A file to place before the runtime runs.
@@ -324,6 +329,7 @@ pub fn resolve_step_spec(
         files: resolved_files,
         proxy: runtime_def.proxy.clone(),
         metrics: runtime_def.metrics.clone(),
+        failure_signals: runtime_def.failure_signals.clone(),
     })
 }
 
