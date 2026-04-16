@@ -507,7 +507,16 @@ impl RetryTracker {
         max_retries: Option<u32>,
         force_escalate: bool,
     ) -> RetryDecision {
-        let _ = force_escalate;
+        if force_escalate {
+            // Clear the counter so a manual rerun starts at attempt 1
+            // again — the prior attempts shouldn't count against a
+            // human re-trying after fixing the underlying cause
+            // (e.g. rotating credentials).
+            self.counts.remove(step);
+            self.last_step = Some(step.to_string());
+            return RetryDecision::Exhausted;
+        }
+
         let max = max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
 
         // Reset if we moved to a different step

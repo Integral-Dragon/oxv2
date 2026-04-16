@@ -352,6 +352,8 @@ impl<C: OxClientApi> Herder<C> {
                     if exec.status == "running" {
                         exec.phase = ExecPhase::AwaitingStep;
                     }
+                    // New attempt = fresh slate for failure-signal cache.
+                    exec.last_signal_matches.clear();
                     // During replay, reconstruct visit_counts from dispatches
                     if self.replaying {
                         *exec.visit_counts.entry(d.step.clone()).or_insert(0) += 1;
@@ -374,6 +376,16 @@ impl<C: OxClientApi> Herder<C> {
                         exec.retry_tracker.reset();
                         exec.phase = ExecPhase::NeedsAdvance { step: d.step };
                     }
+            }
+            kinds::STEP_SIGNALS => {
+                // Cache matches so do_failure can short-circuit the
+                // retry budget when any signal is non-retriable
+                // (e.g. claude auth failure). Always emitted before
+                // step.failed/step.confirmed for the same attempt.
+                let d: StepSignalsData = serde_json::from_value(envelope.data)?;
+                if let Some(exec) = self.executions.get_mut(&d.execution_id.0) {
+                    exec.last_signal_matches = d.signal_matches;
+                }
             }
             kinds::STEP_FAILED => {
                 let d: StepFailedData = serde_json::from_value(envelope.data)?;
@@ -603,7 +615,15 @@ impl<C: OxClientApi> Herder<C> {
                 Some(e) => e,
                 None => return,
             };
-            exec.retry_tracker.record_failure(step, max_retries, false)
+            // A non-retriable signal short-circuits the retry budget —
+            // burning more attempts on auth errors, missing creds, etc.
+            // accomplishes nothing except slow-walking to escalation.
+            let force_escalate = exec
+                .last_signal_matches
+                .iter()
+                .any(|m| !m.retriable);
+            exec.retry_tracker
+                .record_failure(step, max_retries, force_escalate)
         };
 
         match decision {
