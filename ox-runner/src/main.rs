@@ -1,6 +1,7 @@
 mod proxy;
 mod pty;
 mod runner;
+mod scan;
 mod socket;
 
 use anyhow::Result;

@@ -197,6 +197,21 @@ pub struct StepSignalsData {
     pub step: String,
     pub attempt: u32,
     pub signals: Vec<String>,
+    /// Per-match diagnostics for signals fired by declarative log-pattern
+    /// detection. Parallel to `signals` (every entry's `name` also appears
+    /// in `signals`), kept additive so older event records deserialize
+    /// cleanly with an empty vec.
+    #[serde(default)]
+    pub signal_matches: Vec<SignalMatch>,
+}
+
+/// One log-pattern signal match: the configured signal name plus the
+/// log line that triggered it, so operators can see *why* a signal fired
+/// without trawling logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignalMatch {
+    pub name: String,
+    pub line: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
