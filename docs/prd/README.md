@@ -217,11 +217,9 @@ A file-native hierarchical issue tracker. Nodes have states
 field for arbitrary orchestrator data.
 
 cx has no knowledge of ox. It is a passive read/write tool against JSON
-files. ox-server is its only writer in a running ox installation.
-
-cx's own event log (`events/`) is not used. ox-server derives cx events by
-diffing `.complex/` changes in git commits — the git log already contains
-the full mutation history. See [cx.md](cx.md).
+files. A watcher process can observe cx's event log and post source
+events to ox-server via the ingest API, making it the reference event
+source for local development. See [cx.md](cx.md).
 
 ### seguro
 
