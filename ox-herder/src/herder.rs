@@ -1535,4 +1535,131 @@ mod tests {
             exec.phase
         );
     }
+
+    // ── execution.created start_step override ───────────────────────
+
+    /// Build a workflow with two named steps so the test can assert
+    /// `start_step` skips past the first one.
+    fn workflow_two_steps() -> ox_core::workflow::WorkflowDef {
+        use ox_core::workflow::{StepDef, WorkflowDef};
+        WorkflowDef {
+            name: "test-wf".into(),
+            description: String::new(),
+            persona: None,
+            skills: vec![],
+            vars: Default::default(),
+            steps: vec![
+                StepDef {
+                    name: "first".into(),
+                    persona: None,
+                    prompt: None,
+                    skills: vec![],
+                    runtime: None,
+                    action: None,
+                    output: None,
+                    workspace: None,
+                    artifacts: vec![],
+                    transitions: vec![],
+                    max_retries: None,
+                    max_visits: None,
+                    max_visits_goto: None,
+                    on_fail: None,
+                    squash: false,
+                },
+                StepDef {
+                    name: "second".into(),
+                    persona: None,
+                    prompt: None,
+                    skills: vec![],
+                    runtime: None,
+                    action: None,
+                    output: None,
+                    workspace: None,
+                    artifacts: vec![],
+                    transitions: vec![],
+                    max_retries: None,
+                    max_visits: None,
+                    max_visits_goto: None,
+                    on_fail: None,
+                    squash: false,
+                },
+            ],
+        }
+    }
+
+    fn execution_created_envelope(
+        exec_id: &str,
+        workflow: &str,
+        start_step: Option<&str>,
+    ) -> EventEnvelope {
+        let data = ExecutionCreatedData {
+            execution_id: ExecutionId(exec_id.into()),
+            workflow: workflow.into(),
+            trigger: "retry".into(),
+            vars: HashMap::new(),
+            origin: ExecutionOrigin::Manual { user: None },
+            start_step: start_step.map(|s| s.into()),
+        };
+        EventEnvelope {
+            seq: Seq(1),
+            ts: chrono::Utc::now(),
+            source: SOURCE_OX.into(),
+            kind: kinds::EXECUTION_CREATED.into(),
+            subject_id: exec_id.into(),
+            data: serde_json::to_value(data).unwrap(),
+        }
+    }
+
+    /// `start_step = Some("second")` must put the new execution in
+    /// `Ready { step: "second", attempt: 1 }` — bypassing the
+    /// workflow's first step. This is what `ox-ctl exec retry`
+    /// relies on to resume an escalated execution from where it
+    /// failed instead of redoing confirmed work.
+    #[tokio::test]
+    async fn execution_created_with_start_step_skips_to_that_step() {
+        use ox_core::workflow::WorkflowEngine;
+        let mut h = Herder::with_client(MockClient::new(), "http://test", 0, 60, 1);
+        h.replaying = false;
+        h.workflows
+            .insert("test-wf".into(), WorkflowEngine::from_def(workflow_two_steps()));
+
+        let env = execution_created_envelope("e-retry-1", "test-wf", Some("second"));
+        h.handle_sse_message(&serde_json::to_string(&env).unwrap())
+            .await
+            .unwrap();
+
+        let exec = h.executions.get("e-retry-1").expect("exec inserted");
+        match &exec.phase {
+            ExecPhase::Ready { step, attempt } => {
+                assert_eq!(step, "second", "must start at the override step");
+                assert_eq!(*attempt, 1);
+            }
+            other => panic!("expected Ready{{step:second}}, got {:?}", other),
+        }
+    }
+
+    /// `start_step = None` preserves the existing behavior — start at
+    /// `workflow.first_step()`. Regression guard so the override path
+    /// doesn't accidentally swallow the default.
+    #[tokio::test]
+    async fn execution_created_without_start_step_uses_first_step() {
+        use ox_core::workflow::WorkflowEngine;
+        let mut h = Herder::with_client(MockClient::new(), "http://test", 0, 60, 1);
+        h.replaying = false;
+        h.workflows
+            .insert("test-wf".into(), WorkflowEngine::from_def(workflow_two_steps()));
+
+        let env = execution_created_envelope("e-fresh-1", "test-wf", None);
+        h.handle_sse_message(&serde_json::to_string(&env).unwrap())
+            .await
+            .unwrap();
+
+        let exec = h.executions.get("e-fresh-1").expect("exec inserted");
+        match &exec.phase {
+            ExecPhase::Ready { step, .. } => {
+                assert_eq!(step, "first", "no override must default to first_step()");
+            }
+            other => panic!("expected Ready{{step:first}}, got {:?}", other),
+        }
+    }
 }

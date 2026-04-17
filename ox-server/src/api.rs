@@ -431,6 +431,7 @@ async fn create_execution(
         trigger: req.trigger,
         vars,
         origin: req.origin.unwrap_or(ExecutionOrigin::Manual { user: None }),
+        start_step: None,
     };
 
     state
@@ -964,6 +965,7 @@ mod tests {
                 ("persona".into(), "engineer".into()),
             ]),
             origin,
+            start_step: None,
         };
         proj.apply(&envelope(
             1,

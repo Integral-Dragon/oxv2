@@ -453,6 +453,7 @@ mod tests {
                 trigger: "manual".into(),
                 vars: HashMap::new(),
                 origin: ExecutionOrigin::Manual { user: None },
+                start_step: None,
             })
             .unwrap(),
         )

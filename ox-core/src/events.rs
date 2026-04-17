@@ -39,6 +39,7 @@ pub mod kinds {
     pub const RUNNER_REGISTERED: &str = "runner.registered";
     pub const RUNNER_DRAINED: &str = "runner.drained";
     pub const RUNNER_HEARTBEAT_MISSED: &str = "runner.heartbeat_missed";
+    pub const RUNNER_RECOVERED: &str = "runner.recovered";
 
     pub const TRIGGER_FAILED: &str = "trigger.failed";
 
@@ -113,6 +114,17 @@ pub struct RunnerHeartbeatMissedData {
     pub attempt: Option<u32>,
 }
 
+/// Emitted when a runner that was previously marked stale
+/// (`runner.heartbeat_missed`) starts heartbeating within the grace
+/// period again. Paired with `heartbeat_missed` so projections can
+/// track the full healthy↔stale transition without out-of-band
+/// queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerRecoveredData {
+    pub runner_id: RunnerId,
+    pub last_seen: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionCreatedData {
     pub execution_id: ExecutionId,
@@ -121,6 +133,13 @@ pub struct ExecutionCreatedData {
     #[serde(default)]
     pub vars: HashMap<String, String>,
     pub origin: ExecutionOrigin,
+    /// Override for the step the herder schedules first. `None`
+    /// (the default) means start at `workflow.first_step()` — the
+    /// existing behavior. Set by `ox-ctl exec retry` to resume an
+    /// escalated execution from the failed step instead of redoing
+    /// confirmed work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -677,6 +696,7 @@ mod tests {
             trigger: "node.ready".into(),
             vars: HashMap::from([("task_id".into(), "aJuO".into())]),
             origin: src_origin("aJuO"),
+            start_step: None,
         };
         let json = serde_json::to_value(&data).unwrap();
         let back: ExecutionCreatedData = serde_json::from_value(json).unwrap();
