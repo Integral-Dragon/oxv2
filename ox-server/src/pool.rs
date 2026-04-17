@@ -105,8 +105,21 @@ pub async fn check_loop(bus: &EventBus, grace_secs: u64) {
 
     loop {
         interval.tick().await;
+        check_tick(bus, &mut already_missed, &mut already_timed_out, Utc::now(), grace_secs);
+    }
+}
 
-        let now = Utc::now();
+/// One iteration of `check_loop` — pure enough to test. Reads pool
+/// state and heartbeats from `bus`, emits events for stale/recovered
+/// runners and timed-out steps, and updates the dedup sets in place.
+pub(crate) fn check_tick(
+    bus: &EventBus,
+    already_missed: &mut HashSet<String>,
+    already_timed_out: &mut HashSet<String>,
+    now: DateTime<Utc>,
+    grace_secs: u64,
+) {
+    {
         let grace = chrono::Duration::seconds(grace_secs as i64);
         let pool = bus.projections.pool();
         let heartbeats = read_heartbeats(bus);
@@ -195,24 +208,46 @@ pub async fn check_loop(bus: &EventBus, grace_secs: u64) {
             }
         }
 
-        // Clear runners that are no longer problematic
+        // Clear runners that are no longer problematic, emitting
+        // `runner.recovered` for each one that went stale → healthy
+        // (the exit transition symmetric to `runner.heartbeat_missed`).
+        let mut recovered: Vec<(String, DateTime<Utc>)> = Vec::new();
         already_missed.retain(|id| {
             if !pool.runners.contains_key(id) { return false; }
             let Some(hb) = heartbeats.get(id) else { return false; };
-            let stale = hb.last_seen.parse::<DateTime<Utc>>()
-                .map(|dt| now - dt > grace)
-                .unwrap_or(true);
+            let last_seen = hb.last_seen.parse::<DateTime<Utc>>().ok();
+            let stale = last_seen.map(|dt| now - dt > grace).unwrap_or(true);
             if stale { return true; }
             let projected_step = pool.runners.get(id).and_then(|pr| pr.current_step.as_ref());
-            if let Some(ps) = projected_step {
+            let still_mismatched = if let Some(ps) = projected_step {
                 match (&hb.execution_id, &hb.step) {
                     (Some(e), Some(s)) => e != &ps.execution_id.0 || s != &ps.step,
                     _ => true,
                 }
             } else {
                 false
+            };
+            if still_mismatched { return true; }
+            if let Some(ls) = last_seen {
+                recovered.push((id.clone(), ls));
             }
+            false
         });
+
+        for (id, last_seen) in recovered {
+            tracing::info!(runner = %id, "runner recovered");
+            let data = RunnerRecoveredData {
+                runner_id: RunnerId(id.clone()),
+                last_seen,
+            };
+            if let Err(e) = bus.append_ox(
+                kinds::RUNNER_RECOVERED,
+                &id,
+                serde_json::to_value(data).unwrap(),
+            ) {
+                tracing::error!(err = %e, "failed to emit runner.recovered");
+            }
+        }
 
         // Step timeout detection — independent of runner health.
         // A runner can be healthy but a step can exceed its timeout.
@@ -299,4 +334,79 @@ fn read_heartbeats(bus: &EventBus) -> HashMap<String, HeartbeatRow> {
         .filter_map(|r| r.ok())
         .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use ox_core::events::kinds;
+    use rusqlite::Connection;
+
+    fn test_bus() -> EventBus {
+        let conn = Connection::open_in_memory().unwrap();
+        EventBus::new(conn).unwrap()
+    }
+
+    fn set_heartbeat(bus: &EventBus, runner_id: &str, last_seen: DateTime<Utc>) {
+        bus.with_conn(|conn| {
+            db::upsert_runner_heartbeat(
+                conn,
+                runner_id,
+                &last_seen.to_rfc3339(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        });
+    }
+
+    /// A runner that was flagged `runner.heartbeat_missed` must emit a
+    /// matching `runner.recovered` event once its heartbeat catches up
+    /// within the grace period. Without this exit-transition event,
+    /// herder-style projections that track runner liveness have no way
+    /// to observe recovery and can strand the runner permanently (see
+    /// sKFs).
+    #[test]
+    fn emits_runner_recovered_when_stale_runner_heartbeats_again() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.0.as_str();
+        let grace_secs = 60;
+
+        // 1. Runner is stale (last heartbeat 2 minutes ago).
+        let now = Utc::now();
+        set_heartbeat(&bus, runner_id, now - chrono::Duration::seconds(120));
+
+        let mut missed: HashSet<String> = HashSet::new();
+        let mut timed_out: HashSet<String> = HashSet::new();
+        check_tick(&bus, &mut missed, &mut timed_out, now, grace_secs);
+        assert!(
+            missed.contains(runner_id),
+            "runner should be flagged as stale after tick 1"
+        );
+
+        // 2. Runner recovers — fresh heartbeat.
+        set_heartbeat(&bus, runner_id, now);
+        check_tick(&bus, &mut missed, &mut timed_out, now, grace_secs);
+        assert!(
+            !missed.contains(runner_id),
+            "runner should be cleared from missed set after tick 2"
+        );
+
+        // 3. A runner.recovered event must have been appended to the log.
+        let events = bus.replay_after(0).unwrap();
+        let recovered_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == kinds::RUNNER_RECOVERED && e.subject_id == runner_id)
+            .collect();
+        assert_eq!(
+            recovered_events.len(),
+            1,
+            "exactly one runner.recovered event expected, got {} events total: {:?}",
+            recovered_events.len(),
+            events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+    }
 }

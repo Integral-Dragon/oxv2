@@ -293,6 +293,26 @@ impl<C: OxClientApi> Herder<C> {
                 // runner may recover from a transient stall. Only
                 // runner.drained should remove from the local map.
             }
+            kinds::RUNNER_RECOVERED => {
+                let d: RunnerRecoveredData = serde_json::from_value(envelope.data)?;
+                // Defensive self-heal: if the local map has drifted
+                // from the server's projection and we don't know about
+                // this runner, re-insert as idle. If we already know
+                // it, preserve its current busy state — recovery is
+                // orthogonal to assignment.
+                if !self.runners.contains_key(&d.runner_id.0) {
+                    tracing::info!(runner = %d.runner_id, "runner recovered — re-inserting as idle");
+                    self.runners.insert(
+                        d.runner_id.0.clone(),
+                        RunnerView {
+                            id: d.runner_id,
+                            idle: true,
+                            current_execution: None,
+                            current_step: None,
+                        },
+                    );
+                }
+            }
 
             kinds::EXECUTION_CREATED => {
                 let d: ExecutionCreatedData = serde_json::from_value(envelope.data)?;
@@ -1614,6 +1634,81 @@ mod tests {
             "orphaned step re-readied, got {:?}",
             exec.phase
         );
+    }
+
+    /// A `runner.recovered` event for a runner the herder doesn't
+    /// currently know about re-inserts it as idle. This is the
+    /// self-healing path: if the herder's local map ever drifts from
+    /// the server's projection (missed registration during a restart,
+    /// etc.), `recovered` brings it back without requiring a runner
+    /// restart.
+    #[tokio::test]
+    async fn recovered_reinserts_missing_runner_as_idle() {
+        let mut h = Herder::with_client(MockClient::new(), "http://test", 0, 60, 1);
+        h.replaying = false;
+        assert!(h.runners.is_empty(), "precondition: local map empty");
+
+        let runner_id = "run-0001";
+        let data = RunnerRecoveredData {
+            runner_id: RunnerId(runner_id.into()),
+            last_seen: chrono::Utc::now(),
+        };
+        let envelope = EventEnvelope {
+            seq: Seq(99),
+            ts: chrono::Utc::now(),
+            source: SOURCE_OX.into(),
+            kind: kinds::RUNNER_RECOVERED.into(),
+            subject_id: runner_id.into(),
+            data: serde_json::to_value(data).unwrap(),
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        h.handle_sse_message(&json).await.unwrap();
+
+        let runner = h.runners.get(runner_id).expect("runner re-inserted");
+        assert!(runner.idle, "recovered runner is idle");
+        assert!(runner.current_execution.is_none());
+        assert!(runner.current_step.is_none());
+    }
+
+    /// When the runner is already in the local map, `runner.recovered`
+    /// must NOT clobber its current busy state — otherwise a runner
+    /// that briefly stalled while executing a step would have its
+    /// assignment wiped, and the scheduler would double-dispatch.
+    #[tokio::test]
+    async fn recovered_preserves_existing_runner_state() {
+        let mut h = Herder::with_client(MockClient::new(), "http://test", 0, 60, 1);
+        h.replaying = false;
+
+        let runner_id = "run-0001";
+        h.runners.insert(
+            runner_id.into(),
+            RunnerView {
+                id: RunnerId(runner_id.into()),
+                idle: false,
+                current_execution: Some("exec-1".into()),
+                current_step: Some("propose".into()),
+            },
+        );
+
+        let data = RunnerRecoveredData {
+            runner_id: RunnerId(runner_id.into()),
+            last_seen: chrono::Utc::now(),
+        };
+        let envelope = EventEnvelope {
+            seq: Seq(99),
+            ts: chrono::Utc::now(),
+            source: SOURCE_OX.into(),
+            kind: kinds::RUNNER_RECOVERED.into(),
+            subject_id: runner_id.into(),
+            data: serde_json::to_value(data).unwrap(),
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        h.handle_sse_message(&json).await.unwrap();
+
+        let runner = h.runners.get(runner_id).expect("runner still present");
+        assert!(!runner.idle, "busy runner stays busy");
+        assert_eq!(runner.current_execution.as_deref(), Some("exec-1"));
+        assert_eq!(runner.current_step.as_deref(), Some("propose"));
     }
 
     // ── execution.created start_step override ───────────────────────

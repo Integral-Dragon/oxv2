@@ -1,0 +1,18 @@
+{
+  "id": "7rW7",
+  "title": "emit runner.recovered event when a stale runner starts heartbeating again",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-16T20:32:29.724418429Z",
+  "updated_at": "2026-04-16T20:32:29.724418429Z",
+  "tags": [
+    "bug"
+  ],
+  "edges": [
+    {
+      "to": "jVtw",
+      "type": "blocks"
+    }
+  ]
+}
