@@ -296,10 +296,16 @@ impl<C: OxClientApi> Herder<C> {
                 let d: ExecutionCreatedData = serde_json::from_value(envelope.data)?;
                 tracing::info!(exec = %d.execution_id, workflow = %d.workflow, "execution created");
 
-                let first_step = self.workflows.get(&d.workflow)
-                    .and_then(|e| e.first_step())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
+                // Honor the explicit start_step override (used by
+                // `ox-ctl exec retry` to resume from the failed step);
+                // fall back to the workflow's first step otherwise.
+                let first_step = d.start_step.clone().unwrap_or_else(|| {
+                    self.workflows
+                        .get(&d.workflow)
+                        .and_then(|e| e.first_step())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
+                });
 
                 self.executions.insert(
                     d.execution_id.0.clone(),
