@@ -120,6 +120,18 @@ enum ExecCommands {
         /// Execution ID.
         id: String,
     },
+    /// Retry an escalated execution. Cancels the old one (releasing
+    /// the trigger-dedup lock) and creates a new one with the same
+    /// workflow, vars, and origin. By default resumes from the
+    /// escalated step; pass --from-start to restart the workflow.
+    Retry {
+        /// Execution ID of the escalated execution to retry.
+        id: String,
+        /// Restart at the workflow's first step instead of resuming
+        /// from the escalated step.
+        #[arg(long)]
+        from_start: bool,
+    },
     /// Attach to an interactive PTY step.
     Attach {
         /// Execution ID.
@@ -198,6 +210,7 @@ async fn main() -> Result<()> {
             }
             ExecCommands::Show { id } => cmd_exec_show(&client, json, &id).await,
             ExecCommands::Cancel { id } => cmd_exec_cancel(&client, &id).await,
+            ExecCommands::Retry { id, from_start } => cmd_exec_retry(&client, &id, from_start).await,
             ExecCommands::Attach { id, step } => cmd_attach(&cli.server, &id, &step).await,
             ExecCommands::Logs { id, step, attempt, lines, follow, pretty } => {
                 cmd_logs(&cli.server, &id, &step, attempt, lines, follow, pretty).await
@@ -527,6 +540,13 @@ async fn cmd_exec_show(client: &OxClient, json: bool, id: &str) -> Result<()> {
 async fn cmd_exec_cancel(client: &OxClient, id: &str) -> Result<()> {
     client.cancel_execution(id).await?;
     println!("Cancelled {id}");
+    Ok(())
+}
+
+async fn cmd_exec_retry(client: &OxClient, id: &str, from_start: bool) -> Result<()> {
+    let new_id = client.retry_execution(id, from_start).await?;
+    let mode = if from_start { "from start" } else { "from failed step" };
+    println!("Retry of {id} ({mode}) → {}", new_id.0);
     Ok(())
 }
 

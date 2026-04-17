@@ -428,6 +428,28 @@ impl OxClient {
         Ok(())
     }
 
+    /// Retry an escalated execution. The server cancels the old one
+    /// (releasing the trigger-dedup lock) and creates a new execution
+    /// carrying the same workflow / vars / origin. By default the new
+    /// execution resumes from the failed step; `from_start = true`
+    /// restarts the workflow at its first step.
+    pub async fn retry_execution(&self, id: &str, from_start: bool) -> Result<crate::types::ExecutionId> {
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            execution_id: crate::types::ExecutionId,
+        }
+        let resp: Resp = self
+            .http
+            .post(self.url(&format!("/api/executions/{id}/retry")))
+            .query(&[("from-start", from_start)])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(resp.execution_id)
+    }
+
     pub async fn complete_execution(&self, id: &str) -> Result<()> {
         self.http
             .post(self.url(&format!("/api/executions/{id}/complete")))
