@@ -1,0 +1,12 @@
+{
+  "id": "jVtw",
+  "title": "herder: full runner-lifecycle test matrix",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-16T20:32:40.981318300Z",
+  "updated_at": "2026-04-16T20:32:40.981318300Z",
+  "tags": [
+    "bug"
+  ]
+}

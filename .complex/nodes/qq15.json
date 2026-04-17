@@ -1,11 +1,11 @@
 {
   "id": "qq15",
   "title": "ox-ctl exec retry: restart escalated executions from the failed step",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "claude",
   "created_at": "2026-04-17T00:01:14.532212421Z",
-  "updated_at": "2026-04-17T00:01:48.544391957Z",
+  "updated_at": "2026-04-17T00:26:28.135645442Z",
   "tags": [
     "bug"
   ],
