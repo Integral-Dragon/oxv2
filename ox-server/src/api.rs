@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/executions", get(list_executions).post(create_execution))
         .route("/api/executions/{id}", get(get_execution))
         .route("/api/executions/{id}/cancel", post(cancel_execution))
+        .route("/api/executions/{id}/retry", post(retry_execution))
         .route(
             "/api/executions/{id}/complete",
             post(complete_execution),
@@ -508,6 +509,65 @@ async fn cancel_execution(
     StatusCode::NO_CONTENT
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct RetryParams {
+    /// `true` restarts at the workflow's first step instead of
+    /// resuming from the failed step. Wire name `from-start` matches
+    /// the CLI flag.
+    #[serde(rename = "from-start", default)]
+    from_start: bool,
+}
+
+async fn retry_execution(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<RetryParams>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
+    // Mint the new execution id off the bus seq the same way
+    // create_execution does.
+    let epoch = chrono::Utc::now().timestamp();
+    let seq = state.bus.current_seq() + 1;
+    let new_id = ExecutionId(format!("e-{epoch}-{seq}"));
+
+    let (cancelled, created) = {
+        let execs = state.bus.projections.executions();
+        build_retry_events(&execs, &id, new_id.clone(), params.from_start).map_err(|e| match e {
+            RetryError::NotFound => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("execution not found: {id}") })),
+            ),
+            RetryError::NotEscalated => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "only escalated executions can be retried; cancel running ones first"
+                })),
+            ),
+        })?
+    };
+
+    state
+        .bus
+        .append_ox(
+            kinds::EXECUTION_CANCELLED,
+            &id,
+            serde_json::to_value(cancelled).unwrap(),
+        )
+        .unwrap();
+    state
+        .bus
+        .append_ox(
+            kinds::EXECUTION_CREATED,
+            &new_id.0,
+            serde_json::to_value(created).unwrap(),
+        )
+        .unwrap();
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "execution_id": new_id })),
+    ))
+}
+
 // ── Steps ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -950,8 +1010,23 @@ fn build_retry_events(
     new_id: ExecutionId,
     from_start: bool,
 ) -> Result<(ExecutionCancelledData, ExecutionCreatedData), RetryError> {
-    let _ = (execs, old_id, new_id, from_start);
-    todo!("build_retry_events: validate Escalated, mint cancelled+created with start_step")
+    let exec = execs.executions.get(old_id).ok_or(RetryError::NotFound)?;
+    if exec.status != projections::ExecutionStatus::Escalated {
+        return Err(RetryError::NotEscalated);
+    }
+    let cancelled = ExecutionCancelledData {
+        execution_id: ExecutionId(old_id.into()),
+        reason: format!("retry → {}", new_id.0),
+    };
+    let created = ExecutionCreatedData {
+        execution_id: new_id,
+        workflow: exec.workflow.clone(),
+        trigger: "retry".into(),
+        vars: exec.vars.clone(),
+        origin: exec.origin.clone(),
+        start_step: if from_start { None } else { exec.current_step.clone() },
+    };
+    Ok((cancelled, created))
 }
 
 #[cfg(test)]
