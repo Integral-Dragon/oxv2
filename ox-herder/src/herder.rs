@@ -288,8 +288,10 @@ impl<C: OxClientApi> Herder<C> {
                             tracing::info!(exec = %exec_id, step = %step, attempt, "re-dispatching orphaned step");
                             exec.phase = ExecPhase::Ready { step: step.clone(), attempt };
                         }
-                // Remove the dead runner
-                self.runners.remove(&d.runner_id.0);
+                // Don't evict the runner — heartbeat_missed is a "step
+                // might be orphaned" signal, not a death signal. The
+                // runner may recover from a transient stall. Only
+                // runner.drained should remove from the local map.
             }
 
             kinds::EXECUTION_CREATED => {
@@ -1538,6 +1540,78 @@ mod tests {
         assert!(
             matches!(exec.phase, ExecPhase::Ready { .. }),
             "exec should be re-readied for another attempt, got {:?}",
+            exec.phase
+        );
+    }
+    // ── Runner lifecycle ───────────────────────────────────────────────
+
+    /// A `runner.heartbeat_missed` event means "this step might be
+    /// orphaned, consider re-dispatch" — it is NOT a death signal.
+    /// The server dedups and only emits it once per stall; the runner
+    /// may recover from a transient blip, finish its step, and go idle.
+    /// If the herder evicts the runner from its local map here, there
+    /// is no event that re-adds it — `runner.registered` only fires on
+    /// fresh registration. `find_idle_runner()` then never sees the
+    /// recovered runner, stranding it and stalling future dispatches.
+    /// Only `runner.drained` should evict.
+    #[tokio::test]
+    async fn heartbeat_missed_does_not_evict_runner_from_local_map() {
+        let mut h = Herder::with_client(MockClient::new(), "http://test", 0, 60, 1);
+        h.replaying = false;
+
+        let runner_id = "run-0001";
+        h.runners.insert(
+            runner_id.into(),
+            RunnerView {
+                id: RunnerId(runner_id.into()),
+                idle: false,
+                current_execution: Some("exec-1".into()),
+                current_step: Some("propose".into()),
+            },
+        );
+        h.executions.insert(
+            "exec-1".into(),
+            ExecutionView {
+                vars: HashMap::new(),
+                origin: ExecutionOrigin::Manual { user: None },
+                workflow: "code-task".into(),
+                status: "running".into(),
+                phase: ExecPhase::AwaitingStep,
+                visit_counts: HashMap::new(),
+                last_output: None,
+                retry_tracker: RetryTracker::new(),
+                last_signal_matches: vec![],
+            },
+        );
+
+        let data = RunnerHeartbeatMissedData {
+            runner_id: RunnerId(runner_id.into()),
+            last_seen: chrono::Utc::now(),
+            grace_period_secs: 60,
+            execution_id: Some("exec-1".into()),
+            step: Some("propose".into()),
+            attempt: Some(1),
+        };
+        let envelope = EventEnvelope {
+            seq: Seq(42),
+            ts: chrono::Utc::now(),
+            source: SOURCE_OX.into(),
+            kind: kinds::RUNNER_HEARTBEAT_MISSED.into(),
+            subject_id: runner_id.into(),
+            data: serde_json::to_value(data).unwrap(),
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        h.handle_sse_message(&json).await.unwrap();
+
+        assert!(
+            h.runners.contains_key(runner_id),
+            "runner must stay in local map after heartbeat_missed"
+        );
+
+        let exec = h.executions.get("exec-1").expect("exec-1 present");
+        assert!(
+            matches!(exec.phase, ExecPhase::Ready { .. }),
+            "orphaned step re-readied, got {:?}",
             exec.phase
         );
     }

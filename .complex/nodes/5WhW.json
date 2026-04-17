@@ -1,0 +1,12 @@
+{
+  "id": "5WhW",
+  "title": "herder evicts runner on heartbeat_missed, stranding idle runner",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-16T20:27:51.015704853Z",
+  "updated_at": "2026-04-16T20:27:51.015704853Z",
+  "tags": [
+    "bug"
+  ]
+}
