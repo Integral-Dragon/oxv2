@@ -929,6 +929,31 @@ fn build_execution_completed(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RetryError {
+    NotFound,
+    NotEscalated,
+}
+
+/// Build the (cancelled, created) event pair for an `ox-ctl exec
+/// retry` request. The caller mints `new_id` and is responsible for
+/// appending both events to the bus in order — the cancellation
+/// releases the trigger-dedup lock so the new execution can run.
+///
+/// `from_start = false` (the default in the CLI) carries the
+/// projection's `current_step` (always set by `step.dispatched`)
+/// forward as `start_step`, resuming from the failed step.
+/// `from_start = true` clears it, restarting the workflow.
+fn build_retry_events(
+    execs: &projections::ExecutionsState,
+    old_id: &str,
+    new_id: ExecutionId,
+    from_start: bool,
+) -> Result<(ExecutionCancelledData, ExecutionCreatedData), RetryError> {
+    let _ = (execs, old_id, new_id, from_start);
+    todo!("build_retry_events: validate Escalated, mint cancelled+created with start_step")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,6 +1025,117 @@ mod tests {
         let proj = Projections::default();
         let execs = proj.executions();
         assert!(build_execution_completed(&execs, "e-does-not-exist").is_none());
+    }
+
+    // ── retry helper ────────────────────────────────────────────────
+
+    /// Promote a seeded execution to `Escalated` with a `current_step`
+    /// (the failed step) by feeding the projection a step.dispatched
+    /// followed by execution.escalated — mirrors how a real auth
+    /// failure leaves the projection.
+    fn drive_to_escalated(proj: &Projections, exec_id: &str, failed_step: &str) {
+        use ox_core::events::{StepDispatchedData, ExecutionEscalatedData};
+        let runner_id = ox_core::types::RunnerId("run-test".into());
+        proj.apply(&envelope(
+            2,
+            kinds::STEP_DISPATCHED,
+            exec_id,
+            serde_json::to_value(StepDispatchedData {
+                execution_id: ExecutionId(exec_id.into()),
+                step: failed_step.into(),
+                attempt: 1,
+                runner_id,
+                secret_refs: vec![],
+                runtime: serde_json::json!({}),
+                workspace: serde_json::json!({}),
+                artifacts: vec![],
+            })
+            .unwrap(),
+        ));
+        proj.apply(&envelope(
+            3,
+            kinds::EXECUTION_ESCALATED,
+            exec_id,
+            serde_json::to_value(ExecutionEscalatedData {
+                execution_id: ExecutionId(exec_id.into()),
+                step: failed_step.into(),
+                reason: "signal:auth_failed".into(),
+            })
+            .unwrap(),
+        ));
+    }
+
+    #[test]
+    fn build_retry_events_resumes_from_failed_step_by_default() {
+        let proj = seeded_projections("e-orig", "code-task");
+        drive_to_escalated(&proj, "e-orig", "propose");
+        let execs = proj.executions();
+
+        let new_id = ExecutionId("e-retry".into());
+        let (cancelled, created) =
+            build_retry_events(&execs, "e-orig", new_id.clone(), false)
+                .expect("retry should build for an escalated execution");
+
+        assert_eq!(cancelled.execution_id.0, "e-orig");
+        assert!(
+            cancelled.reason.contains("retry"),
+            "cancellation reason should mark the link, got {:?}",
+            cancelled.reason
+        );
+
+        assert_eq!(created.execution_id, new_id);
+        assert_eq!(created.workflow, "code-task");
+        // Carries vars + origin forward unchanged.
+        assert_eq!(created.vars.get("task_id").map(String::as_str), Some("Q6cY"));
+        match &created.origin {
+            ExecutionOrigin::Event { source, subject_id, .. } => {
+                assert_eq!(source, "cx");
+                assert_eq!(subject_id, "Q6cY");
+            }
+            other => panic!("origin must be carried forward, got {other:?}"),
+        }
+        // Default: resume from the escalated step.
+        assert_eq!(created.start_step.as_deref(), Some("propose"));
+    }
+
+    #[test]
+    fn build_retry_events_with_from_start_clears_start_step() {
+        let proj = seeded_projections("e-orig", "code-task");
+        drive_to_escalated(&proj, "e-orig", "propose");
+        let execs = proj.executions();
+
+        let (_, created) =
+            build_retry_events(&execs, "e-orig", ExecutionId("e-retry".into()), true)
+                .expect("retry should build with from_start=true");
+
+        assert_eq!(
+            created.start_step, None,
+            "from_start=true must clear the override and restart at first_step"
+        );
+    }
+
+    #[test]
+    fn build_retry_events_returns_not_found_for_unknown_id() {
+        let proj = Projections::default();
+        let execs = proj.executions();
+        let err = build_retry_events(&execs, "e-missing", ExecutionId("e-new".into()), false)
+            .expect_err("unknown id must error");
+        assert_eq!(err, RetryError::NotFound);
+    }
+
+    #[test]
+    fn build_retry_events_rejects_non_escalated() {
+        // Seeded execution is in Running status — no escalation drive.
+        let proj = seeded_projections("e-running", "code-task");
+        let execs = proj.executions();
+        let err = build_retry_events(
+            &execs,
+            "e-running",
+            ExecutionId("e-new".into()),
+            false,
+        )
+        .expect_err("running execution must not be retriable");
+        assert_eq!(err, RetryError::NotEscalated);
     }
 }
 
