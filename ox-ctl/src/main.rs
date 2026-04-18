@@ -261,8 +261,17 @@ struct WatcherRow {
 /// with a numeric attempt. `rsplitn` is used so that an exec_id or step
 /// containing a `/` would at worst leak into `exec_id`, not misalign
 /// the attempt field.
-fn parse_step_attempt(_s: &str) -> Option<(String, String, u32)> {
-    None
+#[allow(dead_code)] // wired into cmd_status in a follow-up slice
+fn parse_step_attempt(s: &str) -> Option<(String, String, u32)> {
+    let mut parts = s.rsplitn(3, '/');
+    let attempt_str = parts.next()?;
+    let step = parts.next()?;
+    let exec_id = parts.next()?;
+    if exec_id.is_empty() || step.is_empty() {
+        return None;
+    }
+    let attempt: u32 = attempt_str.parse().ok()?;
+    Some((exec_id.to_string(), step.to_string(), attempt))
 }
 
 /// Render the watchers section of `ox-ctl status`. Pure — takes the
