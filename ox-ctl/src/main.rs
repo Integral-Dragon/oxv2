@@ -266,7 +266,7 @@ struct WatcherRow {
 /// `GET /api/executions/:id` (to resolve `workflow`). `workflow`, `exec_id`,
 /// `step`, `attempt` are all None for an idle/drained runner with no
 /// current step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct RunnerRow {
     id: String,
     status: String,
@@ -279,7 +279,6 @@ struct RunnerRow {
 /// Render the per-runner section of `ox-ctl status`. Pure — takes the
 /// joined rows and returns a string. Empty input renders an empty
 /// string so the caller can decide whether to print a header.
-#[allow(dead_code)] // wired into cmd_status in a follow-up slice
 fn format_runners_section(rows: &[RunnerRow]) -> String {
     if rows.is_empty() {
         return String::new();
@@ -304,7 +303,6 @@ fn format_runners_section(rows: &[RunnerRow]) -> String {
     out
 }
 
-#[allow(dead_code)] // wired into cmd_status in a follow-up slice
 fn parse_step_attempt(s: &str) -> Option<(String, String, u32)> {
     let mut parts = s.rsplitn(3, '/');
     let attempt_str = parts.next()?;
@@ -389,6 +387,8 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    let runners = collect_runner_rows(client).await.unwrap_or_default();
+
     if json {
         println!(
             "{}",
@@ -401,6 +401,7 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
                 "workflows_loaded": s.workflows_loaded,
                 "event_seq": s.event_seq,
                 "watchers": watchers_raw.unwrap_or(serde_json::json!([])),
+                "runners": runners,
             }))?
         );
     } else {
@@ -411,6 +412,12 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
         );
         println!("executions  {} running", s.executions_running);
         println!("workflows   {} loaded", s.workflows_loaded);
+        let section = format_runners_section(&runners);
+        if !section.is_empty() {
+            println!();
+            println!("runners");
+            print!("{section}");
+        }
         let section = format_watchers_section(&watchers);
         if !section.is_empty() {
             println!();
@@ -419,6 +426,58 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Fetch `/api/state/pool`, parse each runner, and for busy runners
+/// resolve the workflow name via `GET /api/executions/:id`. Returns
+/// an empty vec on any error (old server, network blip) — `cmd_status`
+/// should still print the aggregate counts in that case.
+async fn collect_runner_rows(client: &OxClient) -> Result<Vec<RunnerRow>> {
+    let pool: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/api/state/pool", client.base_url()))
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let runners = pool
+        .get("runners")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Gather unique execution ids that need a workflow lookup, then
+    // fetch each at most once.
+    let mut wanted: Vec<String> = Vec::new();
+    for r in &runners {
+        if let Some(step) = r.get("current_step").and_then(|v| v.as_str())
+            && let Some((exec_id, _, _)) = parse_step_attempt(step)
+            && !wanted.contains(&exec_id)
+        {
+            wanted.push(exec_id);
+        }
+    }
+    let mut workflows: std::collections::HashMap<String, String> = Default::default();
+    for exec_id in &wanted {
+        if let Ok(detail) = client.get_execution(exec_id).await {
+            workflows.insert(exec_id.clone(), detail.workflow);
+        }
+    }
+
+    let mut rows = Vec::with_capacity(runners.len());
+    for r in &runners {
+        let id = r.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let status = r.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let (exec_id, step, attempt) = r
+            .get("current_step")
+            .and_then(|v| v.as_str())
+            .and_then(parse_step_attempt)
+            .map(|(e, s, a)| (Some(e), Some(s), Some(a)))
+            .unwrap_or((None, None, None));
+        let workflow = exec_id.as_ref().and_then(|e| workflows.get(e).cloned());
+        rows.push(RunnerRow { id, status, workflow, exec_id, step, attempt });
+    }
+    Ok(rows)
 }
 
 // ── Executions ──────────────────────────────────────────────────────
