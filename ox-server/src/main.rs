@@ -85,6 +85,15 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(server_state);
 
+    // Reconcile runners resurrected by event-log replay. Any runner in
+    // the projection whose heartbeat has lapsed past `grace` belongs to
+    // a prior server lifetime that didn't drain cleanly (crash,
+    // SIGKILL, or an old `ox-ctl down` that skipped drain). Emit
+    // synthetic drains so the projection reflects reality before
+    // `server.ready` fires.
+    let grace = args.heartbeat_grace.unwrap_or(state.hot.load().config.heartbeat_grace);
+    pool::sweep_orphans(&state.bus, chrono::Utc::now(), grace);
+
     // Emit server.ready — signals that migrations and projections are complete.
     state
         .bus

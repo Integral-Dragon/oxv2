@@ -108,8 +108,29 @@ pub fn state(bus: &EventBus) -> serde_json::Value {
 ///
 /// Intended to run exactly once at server startup, after projections
 /// are built and before `server.ready` is emitted.
-pub fn sweep_orphans(_bus: &EventBus, _now: DateTime<Utc>, _grace_secs: u64) {
-    // stub
+pub fn sweep_orphans(bus: &EventBus, now: DateTime<Utc>, grace_secs: u64) {
+    let grace = chrono::Duration::seconds(grace_secs as i64);
+    let heartbeats = read_heartbeats(bus);
+
+    let orphans: Vec<String> = {
+        let pool = bus.projections.pool();
+        pool.runners
+            .values()
+            .filter(|r| r.status != crate::projections::RunnerStatus::Drained)
+            .filter(|r| match heartbeats.get(&r.id.0) {
+                None => true,
+                Some(hb) => match hb.last_seen.parse::<DateTime<Utc>>() {
+                    Ok(last_seen) => now - last_seen > grace,
+                    Err(_) => true,
+                },
+            })
+            .map(|r| r.id.0.clone())
+            .collect()
+    };
+
+    for id in orphans {
+        drain(bus, &id, "orphan at startup");
+    }
 }
 
 // ── Background check loop ──────────────────────────────────────────
