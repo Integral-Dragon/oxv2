@@ -255,6 +255,16 @@ struct WatcherRow {
     last_error: Option<String>,
 }
 
+/// Parse a `StepAttemptId` Display string into (exec_id, step, attempt).
+/// Format is `"{exec_id}/{step}/{attempt}"` — see `ox-core/src/types.rs`.
+/// Returns None if the input is not exactly three `/`-separated fields
+/// with a numeric attempt. `rsplitn` is used so that an exec_id or step
+/// containing a `/` would at worst leak into `exec_id`, not misalign
+/// the attempt field.
+fn parse_step_attempt(_s: &str) -> Option<(String, String, u32)> {
+    None
+}
+
 /// Render the watchers section of `ox-ctl status`. Pure — takes the
 /// rows as input and returns the string to print (with a trailing
 /// newline per line). Empty input renders an empty string so the
@@ -1549,6 +1559,30 @@ mod tests {
             updated_at: updated_at.into(),
             last_error: last_error.map(String::from),
         }
+    }
+
+    #[test]
+    fn parse_step_attempt_canonical() {
+        assert_eq!(
+            parse_step_attempt("aJuO-e1/propose/2"),
+            Some(("aJuO-e1".to_string(), "propose".to_string(), 2))
+        );
+    }
+
+    #[test]
+    fn parse_step_attempt_empty_returns_none() {
+        assert_eq!(parse_step_attempt(""), None);
+    }
+
+    #[test]
+    fn parse_step_attempt_missing_parts_returns_none() {
+        assert_eq!(parse_step_attempt("aJuO-e1"), None);
+        assert_eq!(parse_step_attempt("aJuO-e1/propose"), None);
+    }
+
+    #[test]
+    fn parse_step_attempt_non_numeric_attempt_returns_none() {
+        assert_eq!(parse_step_attempt("aJuO-e1/propose/abc"), None);
     }
 
     #[test]

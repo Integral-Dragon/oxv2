@@ -1,0 +1,17 @@
+{
+  "id": "risD",
+  "title": "Slice 2: format_runners_section helper + tests",
+  "state": "ready",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-18T15:54:51.222264921Z",
+  "updated_at": "2026-04-18T15:55:33.383289074Z",
+  "filed_by": "claude",
+  "parent": "XzQW",
+  "edges": [
+    {
+      "to": "4iXz",
+      "type": "blocks"
+    }
+  ]
+}
