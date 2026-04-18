@@ -91,6 +91,11 @@ async fn main() -> Result<()> {
     // SIGKILL, or an old `ox-ctl down` that skipped drain). Emit
     // synthetic drains so the projection reflects reality before
     // `server.ready` fires.
+    // Seed the runner-id generator with this server's start epoch so
+    // IDs generated in this lifetime cannot collide with any already
+    // present in the replayed event log.
+    ox_core::types::RunnerId::init_generator(chrono::Utc::now());
+
     let grace = args.heartbeat_grace.unwrap_or(state.hot.load().config.heartbeat_grace);
     pool::sweep_orphans(&state.bus, chrono::Utc::now(), grace);
 

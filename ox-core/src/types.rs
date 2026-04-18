@@ -33,18 +33,23 @@ pub fn fmt_runner_id(epoch_secs: u64, counter: u32) -> String {
     format!("run-{epoch_secs:x}-{counter:04x}")
 }
 
+static RUNNER_START_EPOCH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+static RUNNER_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 impl RunnerId {
     /// Initialize the generator with this server's start epoch. Call
     /// once at server startup before any runners register. Subsequent
     /// calls are ignored (`OnceLock` semantics) so tests and nested
     /// code paths can call it defensively.
     pub fn init_generator(start: DateTime<Utc>) {
-        let _ = start;
-        todo!("implement in green")
+        let _ = RUNNER_START_EPOCH.set(start.timestamp() as u64);
     }
 
     pub fn generate() -> Self {
-        todo!("implement in green")
+        use std::sync::atomic::Ordering;
+        let epoch = *RUNNER_START_EPOCH.get_or_init(|| Utc::now().timestamp() as u64);
+        let n = RUNNER_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self(fmt_runner_id(epoch, n))
     }
 }
 
@@ -143,8 +148,8 @@ mod tests {
         let a = RunnerId::generate();
         let b = RunnerId::generate();
         assert_ne!(a, b);
-        let a_parts: Vec<&str> = a.0.splitn(3, '-').collect();
-        let b_parts: Vec<&str> = b.0.splitn(3, '-').collect();
+        let a_parts: Vec<&str> = a.0.split('-').collect();
+        let b_parts: Vec<&str> = b.0.split('-').collect();
         assert_eq!(a_parts.len(), 3);
         assert_eq!(b_parts.len(), 3);
         assert_eq!(a_parts[0], "run");
@@ -157,7 +162,7 @@ mod tests {
     fn generate_uses_initialized_epoch() {
         RunnerId::init_generator(Utc::now()); // first-writer wins via OnceLock
         let id = RunnerId::generate();
-        let epoch_hex = id.0.splitn(3, '-').nth(1).unwrap();
+        let epoch_hex = id.0.split('-').nth(1).unwrap();
         let parsed = u64::from_str_radix(epoch_hex, 16).expect("epoch must parse as hex");
         assert!(parsed > 0, "epoch must be non-zero");
         // Sanity: epoch must be a plausible recent unix timestamp.
