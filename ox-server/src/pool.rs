@@ -444,8 +444,43 @@ pub fn close_prior_attempt_on_dispatch(
     new_step: &str,
     new_attempt: u32,
 ) {
-    let _ = (bus, runner_id, new_exec, new_step, new_attempt);
-    todo!("implement in green")
+    let prior = {
+        let pool = bus.projections.pool();
+        pool.runners
+            .get(&runner_id.0)
+            .and_then(|r| r.current_step.clone())
+    };
+    let Some(prior) = prior else { return };
+    if prior.execution_id == *new_exec
+        && prior.step == new_step
+        && prior.attempt == new_attempt
+    {
+        return;
+    }
+
+    tracing::warn!(
+        runner = %runner_id,
+        prior_exec = %prior.execution_id,
+        prior_step = %prior.step,
+        prior_attempt = prior.attempt,
+        new_exec = %new_exec,
+        new_step = %new_step,
+        new_attempt,
+        "dispatch to busy runner — closing prior attempt"
+    );
+    let data = StepFailedData {
+        execution_id: prior.execution_id.clone(),
+        step: prior.step.clone(),
+        attempt: prior.attempt,
+        error: "orphaned: runner reassigned at dispatch time".into(),
+    };
+    if let Err(e) = bus.append_ox(
+        kinds::STEP_FAILED,
+        &prior.execution_id.0,
+        serde_json::to_value(data).unwrap(),
+    ) {
+        tracing::error!(err = %e, "failed to emit step.failed for prior attempt");
+    }
 }
 
 pub(crate) fn scan_orphan_attempts(

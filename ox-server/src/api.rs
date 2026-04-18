@@ -779,8 +779,22 @@ async fn dispatch_step(
     let workspace_value = interpolate_workspace(&req.workspace, &req.vars);
 
     let subject = params.id.clone();
+    let exec_id = ExecutionId(params.id);
+
+    // If the target runner is already bound to a different
+    // (exec, step, attempt), close that prior attempt before clobbering
+    // its current_step via this new dispatch. Same-attempt re-dispatch
+    // (orphan-recovery) is preserved as a no-op.
+    crate::pool::close_prior_attempt_on_dispatch(
+        &state.bus,
+        &req.runner_id,
+        &exec_id,
+        &params.step,
+        req.attempt,
+    );
+
     let data = StepDispatchedData {
-        execution_id: ExecutionId(params.id),
+        execution_id: exec_id,
         step: params.step,
         attempt: req.attempt,
         runner_id: req.runner_id,
