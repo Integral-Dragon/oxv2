@@ -280,8 +280,28 @@ struct RunnerRow {
 /// joined rows and returns a string. Empty input renders an empty
 /// string so the caller can decide whether to print a header.
 #[allow(dead_code)] // wired into cmd_status in a follow-up slice
-fn format_runners_section(_rows: &[RunnerRow]) -> String {
-    String::new()
+fn format_runners_section(rows: &[RunnerRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "  {:<12} {:<10} {:<20} {}\n",
+        "ID", "STATUS", "WORKFLOW", "STEP"
+    ));
+    for row in rows {
+        let workflow = row.workflow.as_deref().unwrap_or("-");
+        let step = match (&row.exec_id, &row.step, row.attempt) {
+            (Some(exec), Some(step), Some(attempt)) => format!("{exec}/{step}#{attempt}"),
+            _ => "-".to_string(),
+        };
+        out.push_str(&format!(
+            "  {:<12} {:<10} {:<20} {}\n",
+            row.id, row.status, workflow, step
+        ));
+    }
+    out
 }
 
 #[allow(dead_code)] // wired into cmd_status in a follow-up slice
