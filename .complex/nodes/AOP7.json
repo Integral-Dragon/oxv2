@@ -1,0 +1,19 @@
+{
+  "id": "AOP7",
+  "title": "Slice 2: wire into check_loop; emit step.failed",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-18T19:47:55.375360717Z",
+  "updated_at": "2026-04-18T19:47:55.375360717Z",
+  "tags": [
+    "bug"
+  ],
+  "parent": "ys1X",
+  "edges": [
+    {
+      "to": "rR2n",
+      "type": "blocks"
+    }
+  ]
+}

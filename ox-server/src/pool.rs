@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use ox_core::events::*;
-use ox_core::types::RunnerId;
+use ox_core::types::{ExecutionId, RunnerId};
 use std::collections::{HashMap, HashSet};
 
 use crate::db;
@@ -345,6 +345,50 @@ pub(crate) fn check_tick(
     }
 }
 
+// ── Orphan-attempt sweep ───────────────────────────────────────────
+
+/// A step attempt whose runner binding is stale — the runner has been
+/// reassigned, drained, or re-registered without a terminal event
+/// (`step.confirmed`, `step.failed`, `step.timeout`) closing the attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrphanAttempt {
+    pub execution_id: ExecutionId,
+    pub step: String,
+    pub attempt: u32,
+    pub runner_id: RunnerId,
+    pub reason: OrphanReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OrphanReason {
+    /// Runner is no longer in the pool projection, or is Drained.
+    RunnerGone,
+    /// Runner is present and has a different `(exec, step, attempt)` as
+    /// its `current_step` — the prior attempt was silently overwritten.
+    RunnerReassigned,
+    /// Runner is present but `current_step` is `None` — the runner was
+    /// re-registered or its state cleared without a terminal event for
+    /// the prior attempt.
+    RunnerCleared,
+}
+
+/// Scan for step attempts whose runner binding is stale. Pure function —
+/// reads `pool` and `execs` projections, returns orphan descriptors
+/// without mutating anything. The caller emits `step.failed` events.
+///
+/// The invariant being checked: a step attempt with `status ∈
+/// {Dispatched, Running}` must have a runner whose projected
+/// `current_step` points back to that same `(exec, step, attempt)`.
+/// Any other pool state for that runner means the attempt has been
+/// abandoned and no terminal event has closed it.
+pub(crate) fn scan_orphan_attempts(
+    pool: &crate::projections::PoolState,
+    execs: &crate::projections::ExecutionsState,
+) -> Vec<OrphanAttempt> {
+    let _ = (pool, execs);
+    todo!("implement in green")
+}
+
 // ── Internal ───────────────────────────────────────────────────────
 
 struct HeartbeatRow {
@@ -511,6 +555,305 @@ mod tests {
             0,
             "fresh runner must not be drained"
         );
+    }
+
+    // ── scan_orphan_attempts tests ─────────────────────────────────
+
+    /// Helpers for building pool/execution projection state inline —
+    /// the scan is pure, so tests construct state directly rather than
+    /// driving events through a bus.
+    fn pool_with(runners: Vec<crate::projections::RunnerState>) -> crate::projections::PoolState {
+        let mut state = crate::projections::PoolState::default();
+        for r in runners {
+            state.runners.insert(r.id.0.clone(), r);
+        }
+        state
+    }
+
+    fn runner(
+        id: &str,
+        status: crate::projections::RunnerStatus,
+        current_step: Option<(&str, &str, u32)>,
+    ) -> crate::projections::RunnerState {
+        crate::projections::RunnerState {
+            id: RunnerId(id.into()),
+            environment: "test".into(),
+            labels: HashMap::new(),
+            status,
+            current_step: current_step.map(|(e, s, a)| ox_core::types::StepAttemptId {
+                execution_id: ExecutionId(e.into()),
+                step: s.into(),
+                attempt: a,
+            }),
+            registered_at: Utc::now(),
+            dispatched_at: None,
+            step_timeout_secs: None,
+        }
+    }
+
+    fn execs_with(execs: Vec<crate::projections::ExecutionState>) -> crate::projections::ExecutionsState {
+        let mut state = crate::projections::ExecutionsState::default();
+        for e in execs {
+            state.executions.insert(e.id.0.clone(), e);
+        }
+        state
+    }
+
+    fn exec_running(
+        id: &str,
+        attempts: Vec<crate::projections::StepAttemptState>,
+    ) -> crate::projections::ExecutionState {
+        crate::projections::ExecutionState {
+            id: ExecutionId(id.into()),
+            workflow: "wf".into(),
+            status: crate::projections::ExecutionStatus::Running,
+            vars: HashMap::new(),
+            origin: Default::default(),
+            attempts,
+            current_step: None,
+            current_attempt: 0,
+            visit_counts: HashMap::new(),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn attempt(
+        step: &str,
+        attempt: u32,
+        runner_id: Option<&str>,
+        status: crate::projections::StepStatus,
+    ) -> crate::projections::StepAttemptState {
+        crate::projections::StepAttemptState {
+            step: step.into(),
+            attempt,
+            runner_id: runner_id.map(|r| RunnerId(r.into())),
+            status,
+            output: None,
+            signals: vec![],
+            error: None,
+            transition: None,
+            connect_addr: None,
+            started_at: Utc::now(),
+            completed_at: None,
+        }
+    }
+
+    /// Baseline: attempt's runner agrees with pool projection → not an
+    /// orphan. This is the only case that must NOT emit step.failed.
+    #[test]
+    fn scan_finds_no_orphan_when_runner_current_step_matches_attempt() {
+        let pool = pool_with(vec![runner(
+            "run-0000",
+            crate::projections::RunnerStatus::Executing,
+            Some(("e-1", "implement", 1)),
+        )]);
+        let execs = execs_with(vec![exec_running(
+            "e-1",
+            vec![attempt(
+                "implement",
+                1,
+                Some("run-0000"),
+                crate::projections::StepStatus::Running,
+            )],
+        )]);
+
+        let orphans = scan_orphan_attempts(&pool, &execs);
+
+        assert_eq!(orphans, vec![], "healthy attempt must not be flagged");
+    }
+
+    /// Bug scenario A: after a runner is drained, its in-flight attempt
+    /// has no matching current_step. The sweep must flag it.
+    #[test]
+    fn scan_flags_attempt_when_runner_is_drained() {
+        let pool = pool_with(vec![runner(
+            "run-0000",
+            crate::projections::RunnerStatus::Drained,
+            None,
+        )]);
+        let execs = execs_with(vec![exec_running(
+            "e-1",
+            vec![attempt(
+                "implement",
+                1,
+                Some("run-0000"),
+                crate::projections::StepStatus::Running,
+            )],
+        )]);
+
+        let orphans = scan_orphan_attempts(&pool, &execs);
+
+        assert_eq!(
+            orphans,
+            vec![OrphanAttempt {
+                execution_id: ExecutionId("e-1".into()),
+                step: "implement".into(),
+                attempt: 1,
+                runner_id: RunnerId("run-0000".into()),
+                reason: OrphanReason::RunnerGone,
+            }]
+        );
+    }
+
+    /// If the runner is missing from the pool projection entirely
+    /// (e.g. event log was truncated or a test fixture left an orphan),
+    /// the attempt is still orphaned — treat it as RunnerGone.
+    #[test]
+    fn scan_flags_attempt_when_runner_not_in_projection() {
+        let pool = pool_with(vec![]);
+        let execs = execs_with(vec![exec_running(
+            "e-1",
+            vec![attempt(
+                "implement",
+                1,
+                Some("run-0000"),
+                crate::projections::StepStatus::Running,
+            )],
+        )]);
+
+        let orphans = scan_orphan_attempts(&pool, &execs);
+
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].reason, OrphanReason::RunnerGone);
+    }
+
+    /// Bug scenario B (the one that motivated this sweep): a runner is
+    /// dispatched to a new (exec, step, attempt) while a previous
+    /// attempt still claims it. The older attempt must be flagged.
+    #[test]
+    fn scan_flags_attempt_when_runner_reassigned_to_different_step() {
+        let pool = pool_with(vec![runner(
+            "run-0000",
+            crate::projections::RunnerStatus::Executing,
+            Some(("e-2", "implement", 1)), // runner is on exec-2 now
+        )]);
+        let execs = execs_with(vec![
+            exec_running(
+                "e-1",
+                vec![attempt(
+                    "implement",
+                    1,
+                    Some("run-0000"), // but attempt still thinks it's on run-0000
+                    crate::projections::StepStatus::Running,
+                )],
+            ),
+            exec_running(
+                "e-2",
+                vec![attempt(
+                    "implement",
+                    1,
+                    Some("run-0000"),
+                    crate::projections::StepStatus::Running,
+                )],
+            ),
+        ]);
+
+        let orphans = scan_orphan_attempts(&pool, &execs);
+
+        assert_eq!(orphans.len(), 1, "only e-1's attempt is orphaned");
+        assert_eq!(orphans[0].execution_id, ExecutionId("e-1".into()));
+        assert_eq!(orphans[0].reason, OrphanReason::RunnerReassigned);
+    }
+
+    /// Bug scenario C: runner was re-registered (possibly after a
+    /// server restart), clearing `current_step` to None while the
+    /// attempt still believes it's running on this runner.
+    #[test]
+    fn scan_flags_attempt_when_runner_current_step_cleared() {
+        let pool = pool_with(vec![runner(
+            "run-0000",
+            crate::projections::RunnerStatus::Idle,
+            None, // re-registered, no current step
+        )]);
+        let execs = execs_with(vec![exec_running(
+            "e-1",
+            vec![attempt(
+                "implement",
+                1,
+                Some("run-0000"),
+                crate::projections::StepStatus::Running,
+            )],
+        )]);
+
+        let orphans = scan_orphan_attempts(&pool, &execs);
+
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].reason, OrphanReason::RunnerCleared);
+    }
+
+    /// Terminal-state attempts must never be flagged, even when the
+    /// runner state looks wrong — the attempt is already closed.
+    #[test]
+    fn scan_ignores_attempts_in_terminal_states() {
+        let pool = pool_with(vec![runner(
+            "run-0000",
+            crate::projections::RunnerStatus::Drained,
+            None,
+        )]);
+        let execs = execs_with(vec![exec_running(
+            "e-1",
+            vec![
+                attempt("propose", 1, Some("run-0000"), crate::projections::StepStatus::Confirmed),
+                attempt("review", 1, Some("run-0000"), crate::projections::StepStatus::Failed),
+                attempt("build", 1, Some("run-0000"), crate::projections::StepStatus::Done),
+            ],
+        )]);
+
+        let orphans = scan_orphan_attempts(&pool, &execs);
+
+        assert_eq!(orphans, vec![], "terminal attempts must never be flagged");
+    }
+
+    /// Non-running executions (completed/escalated/cancelled) may carry
+    /// historical attempts with non-terminal status in rare edge cases;
+    /// the sweep should skip them — only live executions matter.
+    #[test]
+    fn scan_ignores_attempts_in_non_running_executions() {
+        let pool = pool_with(vec![runner(
+            "run-0000",
+            crate::projections::RunnerStatus::Drained,
+            None,
+        )]);
+        let mut exec = exec_running(
+            "e-1",
+            vec![attempt(
+                "implement",
+                1,
+                Some("run-0000"),
+                crate::projections::StepStatus::Running,
+            )],
+        );
+        exec.status = crate::projections::ExecutionStatus::Escalated;
+        let execs = execs_with(vec![exec]);
+
+        let orphans = scan_orphan_attempts(&pool, &execs);
+
+        assert_eq!(orphans, vec![]);
+    }
+
+    /// Idempotency shape: Dispatched status behaves the same as Running
+    /// for sweep purposes — both are pre-terminal.
+    #[test]
+    fn scan_flags_dispatched_attempts_same_as_running() {
+        let pool = pool_with(vec![runner(
+            "run-0000",
+            crate::projections::RunnerStatus::Drained,
+            None,
+        )]);
+        let execs = execs_with(vec![exec_running(
+            "e-1",
+            vec![attempt(
+                "implement",
+                1,
+                Some("run-0000"),
+                crate::projections::StepStatus::Dispatched,
+            )],
+        )]);
+
+        let orphans = scan_orphan_attempts(&pool, &execs);
+
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].reason, OrphanReason::RunnerGone);
     }
 
     /// Idempotency: running the sweep when a runner is already drained

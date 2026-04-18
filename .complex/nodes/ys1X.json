@@ -1,0 +1,13 @@
+{
+  "id": "ys1X",
+  "title": "orphan step attempts when runner is reassigned or server restarts",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-18T19:47:48.123935272Z",
+  "updated_at": "2026-04-18T19:47:48.123935272Z",
+  "tags": [
+    "bug",
+    "workflow:code-task-tdd"
+  ]
+}

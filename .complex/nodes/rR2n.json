@@ -1,0 +1,13 @@
+{
+  "id": "rR2n",
+  "title": "Slice 3: startup orphan-attempt sweep",
+  "state": "latent",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-18T19:47:55.383021304Z",
+  "updated_at": "2026-04-18T19:47:55.383021304Z",
+  "tags": [
+    "bug"
+  ],
+  "parent": "ys1X"
+}
