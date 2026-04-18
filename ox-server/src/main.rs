@@ -94,6 +94,13 @@ async fn main() -> Result<()> {
     let grace = args.heartbeat_grace.unwrap_or(state.hot.load().config.heartbeat_grace);
     pool::sweep_orphans(&state.bus, chrono::Utc::now(), grace);
 
+    // Close any step attempts orphaned by the runner sweep above, or
+    // by prior-lifetime drift (runner reassigned to a new exec without
+    // a terminal event for the old one). Order matters: this runs
+    // after sweep_orphans so the drains it emits are already folded
+    // into the pool projection.
+    pool::sweep_orphan_attempts(&state.bus);
+
     // Emit server.ready — signals that migrations and projections are complete.
     state
         .bus

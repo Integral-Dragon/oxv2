@@ -345,43 +345,11 @@ pub(crate) fn check_tick(
     }
 
     // Orphan-attempt sweep — closes step attempts whose runner binding
-    // is stale (runner reassigned, drained, or re-registered without a
-    // terminal event). Dedup is implicit: emitting step.failed flips
-    // the attempt to Failed in the projection, so the next scan skips
-    // it.
-    let orphans = {
-        let pool = bus.projections.pool();
-        let execs = bus.projections.executions();
-        scan_orphan_attempts(&pool, &execs)
-    };
-    for orphan in orphans {
-        let reason = match orphan.reason {
-            OrphanReason::Gone => "runner drained or gone",
-            OrphanReason::Reassigned => "runner reassigned to a different step",
-            OrphanReason::Cleared => "runner re-registered without closing prior attempt",
-        };
-        tracing::warn!(
-            exec = %orphan.execution_id,
-            step = %orphan.step,
-            attempt = orphan.attempt,
-            runner = %orphan.runner_id,
-            reason,
-            "closing orphaned step attempt"
-        );
-        let data = StepFailedData {
-            execution_id: orphan.execution_id.clone(),
-            step: orphan.step.clone(),
-            attempt: orphan.attempt,
-            error: format!("orphaned: {reason}"),
-        };
-        if let Err(e) = bus.append_ox(
-            kinds::STEP_FAILED,
-            &orphan.execution_id.0,
-            serde_json::to_value(data).unwrap(),
-        ) {
-            tracing::error!(err = %e, "failed to emit step.failed for orphan");
-        }
-    }
+    // is stale (reassigned, drained, or re-registered without a
+    // terminal event). Shared with the startup sweep; dedup is
+    // implicit because step.failed moves the attempt out of
+    // Running/Dispatched.
+    sweep_orphan_attempts(bus);
 }
 
 // ── Orphan-attempt sweep ───────────────────────────────────────────
@@ -426,8 +394,39 @@ pub(crate) enum OrphanReason {
 /// `step.failed` flips the attempt out of Running/Dispatched in the
 /// projection, so subsequent scans skip it.
 pub fn sweep_orphan_attempts(bus: &EventBus) {
-    let _ = bus;
-    todo!("implement in green")
+    let orphans = {
+        let pool = bus.projections.pool();
+        let execs = bus.projections.executions();
+        scan_orphan_attempts(&pool, &execs)
+    };
+    for orphan in orphans {
+        let reason = match orphan.reason {
+            OrphanReason::Gone => "runner drained or gone",
+            OrphanReason::Reassigned => "runner reassigned to a different step",
+            OrphanReason::Cleared => "runner re-registered without closing prior attempt",
+        };
+        tracing::warn!(
+            exec = %orphan.execution_id,
+            step = %orphan.step,
+            attempt = orphan.attempt,
+            runner = %orphan.runner_id,
+            reason,
+            "closing orphaned step attempt"
+        );
+        let data = StepFailedData {
+            execution_id: orphan.execution_id.clone(),
+            step: orphan.step.clone(),
+            attempt: orphan.attempt,
+            error: format!("orphaned: {reason}"),
+        };
+        if let Err(e) = bus.append_ox(
+            kinds::STEP_FAILED,
+            &orphan.execution_id.0,
+            serde_json::to_value(data).unwrap(),
+        ) {
+            tracing::error!(err = %e, "failed to emit step.failed for orphan");
+        }
+    }
 }
 
 pub(crate) fn scan_orphan_attempts(
