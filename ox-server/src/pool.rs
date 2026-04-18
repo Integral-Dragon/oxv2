@@ -351,6 +351,7 @@ pub(crate) fn check_tick(
 /// reassigned, drained, or re-registered without a terminal event
 /// (`step.confirmed`, `step.failed`, `step.timeout`) closing the attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // wired into check_tick + startup sweep in later slices
 pub(crate) struct OrphanAttempt {
     pub execution_id: ExecutionId,
     pub step: String,
@@ -360,16 +361,17 @@ pub(crate) struct OrphanAttempt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // wired into check_tick + startup sweep in later slices
 pub(crate) enum OrphanReason {
     /// Runner is no longer in the pool projection, or is Drained.
-    RunnerGone,
+    Gone,
     /// Runner is present and has a different `(exec, step, attempt)` as
     /// its `current_step` — the prior attempt was silently overwritten.
-    RunnerReassigned,
+    Reassigned,
     /// Runner is present but `current_step` is `None` — the runner was
     /// re-registered or its state cleared without a terminal event for
     /// the prior attempt.
-    RunnerCleared,
+    Cleared,
 }
 
 /// Scan for step attempts whose runner binding is stale. Pure function —
@@ -381,12 +383,56 @@ pub(crate) enum OrphanReason {
 /// `current_step` points back to that same `(exec, step, attempt)`.
 /// Any other pool state for that runner means the attempt has been
 /// abandoned and no terminal event has closed it.
+#[allow(dead_code)] // wired into check_tick + startup sweep in later slices
 pub(crate) fn scan_orphan_attempts(
     pool: &crate::projections::PoolState,
     execs: &crate::projections::ExecutionsState,
 ) -> Vec<OrphanAttempt> {
-    let _ = (pool, execs);
-    todo!("implement in green")
+    use crate::projections::{ExecutionStatus, RunnerStatus, StepStatus};
+
+    let mut orphans = Vec::new();
+
+    for exec in execs.executions.values() {
+        if exec.status != ExecutionStatus::Running {
+            continue;
+        }
+
+        for att in &exec.attempts {
+            if !matches!(att.status, StepStatus::Dispatched | StepStatus::Running) {
+                continue;
+            }
+            let Some(runner_id) = att.runner_id.as_ref() else {
+                continue;
+            };
+
+            let reason = match pool.runners.get(&runner_id.0) {
+                None => OrphanReason::Gone,
+                Some(r) if r.status == RunnerStatus::Drained => OrphanReason::Gone,
+                Some(r) => match r.current_step.as_ref() {
+                    None => OrphanReason::Cleared,
+                    Some(cs) => {
+                        if cs.execution_id == exec.id
+                            && cs.step == att.step
+                            && cs.attempt == att.attempt
+                        {
+                            continue; // healthy — runner's current_step points back to us
+                        }
+                        OrphanReason::Reassigned
+                    }
+                },
+            };
+
+            orphans.push(OrphanAttempt {
+                execution_id: exec.id.clone(),
+                step: att.step.clone(),
+                attempt: att.attempt,
+                runner_id: runner_id.clone(),
+                reason,
+            });
+        }
+    }
+
+    orphans
 }
 
 // ── Internal ───────────────────────────────────────────────────────
@@ -690,7 +736,7 @@ mod tests {
                 step: "implement".into(),
                 attempt: 1,
                 runner_id: RunnerId("run-0000".into()),
-                reason: OrphanReason::RunnerGone,
+                reason: OrphanReason::Gone,
             }]
         );
     }
@@ -714,7 +760,7 @@ mod tests {
         let orphans = scan_orphan_attempts(&pool, &execs);
 
         assert_eq!(orphans.len(), 1);
-        assert_eq!(orphans[0].reason, OrphanReason::RunnerGone);
+        assert_eq!(orphans[0].reason, OrphanReason::Gone);
     }
 
     /// Bug scenario B (the one that motivated this sweep): a runner is
@@ -752,7 +798,7 @@ mod tests {
 
         assert_eq!(orphans.len(), 1, "only e-1's attempt is orphaned");
         assert_eq!(orphans[0].execution_id, ExecutionId("e-1".into()));
-        assert_eq!(orphans[0].reason, OrphanReason::RunnerReassigned);
+        assert_eq!(orphans[0].reason, OrphanReason::Reassigned);
     }
 
     /// Bug scenario C: runner was re-registered (possibly after a
@@ -778,7 +824,7 @@ mod tests {
         let orphans = scan_orphan_attempts(&pool, &execs);
 
         assert_eq!(orphans.len(), 1);
-        assert_eq!(orphans[0].reason, OrphanReason::RunnerCleared);
+        assert_eq!(orphans[0].reason, OrphanReason::Cleared);
     }
 
     /// Terminal-state attempts must never be flagged, even when the
@@ -853,7 +899,7 @@ mod tests {
         let orphans = scan_orphan_attempts(&pool, &execs);
 
         assert_eq!(orphans.len(), 1);
-        assert_eq!(orphans[0].reason, OrphanReason::RunnerGone);
+        assert_eq!(orphans[0].reason, OrphanReason::Gone);
     }
 
     /// Idempotency: running the sweep when a runner is already drained
