@@ -93,6 +93,25 @@ pub fn state(bus: &EventBus) -> serde_json::Value {
     serde_json::json!({ "runners": runners })
 }
 
+// ── Startup orphan sweep ───────────────────────────────────────────
+
+/// One-shot startup reconciliation — for each non-drained runner in the
+/// replayed pool projection, if there is no heartbeat row or the last
+/// heartbeat is older than `grace_secs`, emit a synthetic
+/// `RUNNER_DRAINED` with reason `"orphan at startup"`.
+///
+/// This catches ghosts left by crashes, SIGKILLs, or shutdowns that
+/// bypassed the drain API (e.g. an older `ox-ctl down` that just sent
+/// SIGTERM). Without this sweep, `RUNNER_REGISTERED` events from a
+/// previous server lifetime are resurrected by event replay and
+/// permanently inflate the pool projection.
+///
+/// Intended to run exactly once at server startup, after projections
+/// are built and before `server.ready` is emitted.
+pub fn sweep_orphans(_bus: &EventBus, _now: DateTime<Utc>, _grace_secs: u64) {
+    // stub
+}
+
 // ── Background check loop ──────────────────────────────────────────
 
 /// Detect stale runners and step mismatches. Runs as a background task.
@@ -407,6 +426,92 @@ mod tests {
             "exactly one runner.recovered event expected, got {} events total: {:?}",
             recovered_events.len(),
             events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+    }
+
+    // ── sweep_orphans ──────────────────────────────────────────────────
+
+    fn drained_events_for(bus: &EventBus, runner_id: &str) -> usize {
+        bus.replay_after(0)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == kinds::RUNNER_DRAINED && e.subject_id == runner_id)
+            .count()
+    }
+
+    /// Event-replay resurrection scenario: a runner was registered in a
+    /// prior server lifetime and killed without draining. On startup
+    /// the projection rebuilds with that runner present but its
+    /// heartbeat row is old. The sweep must emit RUNNER_DRAINED so the
+    /// projection ends boot reflecting reality.
+    #[test]
+    fn sweep_orphans_drains_runner_with_stale_heartbeat() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.0.as_str();
+        let grace_secs = 60;
+
+        let now = Utc::now();
+        set_heartbeat(&bus, runner_id, now - chrono::Duration::seconds(120));
+
+        sweep_orphans(&bus, now, grace_secs);
+
+        assert_eq!(
+            drained_events_for(&bus, runner_id),
+            1,
+            "expected one runner.drained event for the orphan"
+        );
+        let pool = bus.projections.pool();
+        assert_eq!(
+            pool.runners.get(runner_id).map(|r| &r.status),
+            Some(&crate::projections::RunnerStatus::Drained),
+            "orphan should be marked Drained in the projection"
+        );
+    }
+
+    /// A runner whose heartbeat is within the grace window is alive —
+    /// it must not be drained. Covers the common case where the server
+    /// simply restarted quickly and its runners' heartbeats never
+    /// lapsed.
+    #[test]
+    fn sweep_orphans_skips_fresh_runner() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.0.as_str();
+        let grace_secs = 60;
+
+        let now = Utc::now();
+        set_heartbeat(&bus, runner_id, now - chrono::Duration::seconds(5));
+
+        sweep_orphans(&bus, now, grace_secs);
+
+        assert_eq!(
+            drained_events_for(&bus, runner_id),
+            0,
+            "fresh runner must not be drained"
+        );
+    }
+
+    /// Idempotency: running the sweep when a runner is already drained
+    /// must not emit a second `runner.drained`. Guards against startup
+    /// loops or multiple invocations inflating the event log.
+    #[test]
+    fn sweep_orphans_skips_already_drained_runner() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.0.as_str();
+        let grace_secs = 60;
+
+        drain(&bus, runner_id, "manual");
+        let before = drained_events_for(&bus, runner_id);
+
+        let now = Utc::now();
+        sweep_orphans(&bus, now, grace_secs);
+
+        assert_eq!(
+            drained_events_for(&bus, runner_id),
+            before,
+            "already-drained runner should not accrue another drain event"
         );
     }
 }
