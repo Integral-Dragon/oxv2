@@ -1,11 +1,11 @@
 {
   "id": "kHzy",
   "title": "Slice 1: parse_step_attempt helper + tests",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "unknown",
   "created_at": "2026-04-18T15:54:51.220281660Z",
-  "updated_at": "2026-04-18T15:55:50.129510394Z",
+  "updated_at": "2026-04-18T15:58:29.170568932Z",
   "filed_by": "claude",
   "parent": "XzQW",
   "edges": [

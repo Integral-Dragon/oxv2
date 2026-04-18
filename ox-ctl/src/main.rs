@@ -261,6 +261,29 @@ struct WatcherRow {
 /// with a numeric attempt. `rsplitn` is used so that an exec_id or step
 /// containing a `/` would at worst leak into `exec_id`, not misalign
 /// the attempt field.
+/// One runner row in the `ox-ctl status` per-runner section. Built in
+/// the CLI by joining `/api/state/pool` (runner + current_step) against
+/// `GET /api/executions/:id` (to resolve `workflow`). `workflow`, `exec_id`,
+/// `step`, `attempt` are all None for an idle/drained runner with no
+/// current step.
+#[derive(Debug, Clone)]
+struct RunnerRow {
+    id: String,
+    status: String,
+    workflow: Option<String>,
+    exec_id: Option<String>,
+    step: Option<String>,
+    attempt: Option<u32>,
+}
+
+/// Render the per-runner section of `ox-ctl status`. Pure — takes the
+/// joined rows and returns a string. Empty input renders an empty
+/// string so the caller can decide whether to print a header.
+#[allow(dead_code)] // wired into cmd_status in a follow-up slice
+fn format_runners_section(_rows: &[RunnerRow]) -> String {
+    String::new()
+}
+
 #[allow(dead_code)] // wired into cmd_status in a follow-up slice
 fn parse_step_attempt(s: &str) -> Option<(String, String, u32)> {
     let mut parts = s.rsplitn(3, '/');
@@ -1568,6 +1591,95 @@ mod tests {
             updated_at: updated_at.into(),
             last_error: last_error.map(String::from),
         }
+    }
+
+    fn runner_row(
+        id: &str,
+        status: &str,
+        workflow: Option<&str>,
+        exec_id: Option<&str>,
+        step: Option<&str>,
+        attempt: Option<u32>,
+    ) -> RunnerRow {
+        RunnerRow {
+            id: id.into(),
+            status: status.into(),
+            workflow: workflow.map(String::from),
+            exec_id: exec_id.map(String::from),
+            step: step.map(String::from),
+            attempt,
+        }
+    }
+
+    #[test]
+    fn format_runners_section_empty_returns_empty_string() {
+        assert_eq!(format_runners_section(&[]), "");
+    }
+
+    #[test]
+    fn format_runners_section_renders_header_and_busy_row() {
+        let out = format_runners_section(&[runner_row(
+            "run-4a2f",
+            "executing",
+            Some("deploy-api"),
+            Some("aJuO-e1"),
+            Some("propose"),
+            Some(2),
+        )]);
+        assert!(out.contains("ID"), "header missing ID: {out}");
+        assert!(out.contains("STATUS"), "header missing STATUS: {out}");
+        assert!(out.contains("WORKFLOW"), "header missing WORKFLOW: {out}");
+        assert!(out.contains("STEP"), "header missing STEP: {out}");
+        assert!(out.contains("run-4a2f"));
+        assert!(out.contains("executing"));
+        assert!(out.contains("deploy-api"));
+        assert!(out.contains("aJuO-e1"));
+        assert!(out.contains("propose"));
+        // Attempt number surfaces somewhere (e.g. "propose#2" or "propose/2").
+        assert!(out.contains('2'), "attempt number missing: {out}");
+    }
+
+    #[test]
+    fn format_runners_section_renders_idle_as_dashes() {
+        let out = format_runners_section(&[runner_row(
+            "run-91bc",
+            "idle",
+            None,
+            None,
+            None,
+            None,
+        )]);
+        assert!(out.contains("run-91bc"));
+        assert!(out.contains("idle"));
+        // No raw "None" or "null" in the display.
+        assert!(
+            !out.contains("None") && !out.contains("null"),
+            "raw null should not leak: {out}"
+        );
+        // A dash placeholder appears for the missing workflow/step fields.
+        assert!(out.contains('-'), "expected dash placeholder, got: {out}");
+    }
+
+    #[test]
+    fn format_runners_section_renders_multiple_rows() {
+        let out = format_runners_section(&[
+            runner_row(
+                "run-4a2f",
+                "executing",
+                Some("deploy-api"),
+                Some("aJuO-e1"),
+                Some("propose"),
+                Some(2),
+            ),
+            runner_row("run-91bc", "idle", None, None, None, None),
+        ]);
+        assert!(out.contains("run-4a2f"));
+        assert!(out.contains("run-91bc"));
+        let lines: Vec<_> = out.lines().collect();
+        assert!(
+            lines.len() >= 3,
+            "expected header + 2 data rows, got {lines:?}"
+        );
     }
 
     #[test]
