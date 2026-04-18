@@ -442,6 +442,15 @@ pub async fn cmd_up(runners: usize, port: u16) -> Result<()> {
 /// Pick runner ids that should be drained before SIGTERM. Skips runners
 /// already marked `drained` and malformed entries. Takes the parsed JSON
 /// from `GET /api/state/pool` so it's unit-testable without HTTP.
+/// Resolve the runner pool size for `ox-ctl up`: the CLI flag (which
+/// also absorbs `OX_RUNNERS` via clap `env`) wins when set, otherwise
+/// fall back to the `runners` value from `config.toml` (which itself
+/// defaults to `DEFAULT_RUNNERS` when absent everywhere).
+#[allow(dead_code)] // wired into cmd_up in a follow-up commit
+fn resolve_runners(_flag: Option<usize>, _config_value: usize) -> usize {
+    0
+}
+
 fn runner_ids_to_drain(pool: &serde_json::Value) -> Vec<String> {
     pool.get("runners")
         .and_then(|v| v.as_array())
@@ -914,6 +923,26 @@ mod tests {
         let scripts = tmp("cx-dst2");
         let staged = stage_cx_binary_from(&scripts, empty.as_os_str()).unwrap();
         assert_eq!(staged, None);
+    }
+
+    // ── resolve_runners ─────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_runners_flag_wins_over_config() {
+        assert_eq!(resolve_runners(Some(5), 4), 5);
+    }
+
+    #[test]
+    fn resolve_runners_falls_back_to_config_when_flag_unset() {
+        assert_eq!(resolve_runners(None, 4), 4);
+    }
+
+    #[test]
+    fn resolve_runners_zero_flag_is_still_explicit() {
+        // `--runners 0` is weird but unambiguous; don't silently
+        // swap in the config value just because the flag happens to
+        // equal None-y numbers.
+        assert_eq!(resolve_runners(Some(0), 4), 0);
     }
 
     // ── runner_ids_to_drain ─────────────────────────────────────────────

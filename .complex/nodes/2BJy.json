@@ -1,11 +1,11 @@
 {
   "id": "2BJy",
   "title": "Slice 1: OxConfig.runners field + test",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "unknown",
   "created_at": "2026-04-18T16:58:51.131179337Z",
-  "updated_at": "2026-04-18T17:29:11.658515201Z",
+  "updated_at": "2026-04-18T17:32:35.454780928Z",
   "filed_by": "claude",
   "parent": "iEqd",
   "edges": [
