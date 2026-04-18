@@ -283,6 +283,7 @@ impl Default for OxConfig {
 pub fn load_config(search_path: &[PathBuf]) -> OxConfig {
     let mut found_any = false;
     let mut first_heartbeat: Option<u64> = None;
+    let mut first_runners: Option<usize> = None;
     let mut trigger_paths: Vec<String> = Vec::new();
 
     for dir in search_path {
@@ -318,6 +319,9 @@ pub fn load_config(search_path: &[PathBuf]) -> OxConfig {
         // Scalars: first wins
         if first_heartbeat.is_none() {
             first_heartbeat = Some(cfg.heartbeat_grace);
+        }
+        if first_runners.is_none() {
+            first_runners = Some(cfg.runners);
         }
     }
 
@@ -359,7 +363,7 @@ pub fn load_config(search_path: &[PathBuf]) -> OxConfig {
     OxConfig {
         triggers: trigger_paths,
         heartbeat_grace: first_heartbeat.unwrap_or(DEFAULT_HEARTBEAT_GRACE),
-        runners: DEFAULT_RUNNERS, // stub — replaced by first-wins merge in follow-up
+        runners: first_runners.unwrap_or(DEFAULT_RUNNERS),
         watchers,
     }
 }
