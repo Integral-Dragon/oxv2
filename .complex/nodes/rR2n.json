@@ -1,11 +1,11 @@
 {
   "id": "rR2n",
   "title": "Slice 3: startup orphan-attempt sweep",
-  "state": "latent",
+  "state": "claimed",
   "shadowed": false,
-  "part": null,
+  "part": "unknown",
   "created_at": "2026-04-18T19:47:55.383021304Z",
-  "updated_at": "2026-04-18T19:47:55.383021304Z",
+  "updated_at": "2026-04-18T19:55:46.083500260Z",
   "tags": [
     "bug"
   ],

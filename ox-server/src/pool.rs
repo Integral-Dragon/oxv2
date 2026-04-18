@@ -420,6 +420,16 @@ pub(crate) enum OrphanReason {
 /// `current_step` points back to that same `(exec, step, attempt)`.
 /// Any other pool state for that runner means the attempt has been
 /// abandoned and no terminal event has closed it.
+/// Scan and emit: closes every orphaned step attempt by appending
+/// `step.failed`. Safe to call at startup (after `sweep_orphans`) and
+/// from `check_tick` — dedup is implicit because appending
+/// `step.failed` flips the attempt out of Running/Dispatched in the
+/// projection, so subsequent scans skip it.
+pub fn sweep_orphan_attempts(bus: &EventBus) {
+    let _ = bus;
+    todo!("implement in green")
+}
+
 pub(crate) fn scan_orphan_attempts(
     pool: &crate::projections::PoolState,
     execs: &crate::projections::ExecutionsState,
@@ -1104,6 +1114,59 @@ mod tests {
 
         let failed = failed_events_for(&bus, "e-A", "implement");
         assert_eq!(failed.len(), 0, "healthy attempt must not be flagged");
+    }
+
+    // ── sweep_orphan_attempts (startup helper) ─────────────────────
+
+    /// At startup, after `sweep_orphans` has drained any runners left
+    /// stale by a prior server lifetime, `sweep_orphan_attempts` must
+    /// close any step attempts that were orphaned by that drain (plus
+    /// anything else the projection considers bound to a gone /
+    /// reassigned / cleared runner).
+    #[test]
+    fn sweep_orphan_attempts_closes_attempt_after_startup_drain() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.0.as_str();
+
+        seed_execution(&bus, "e-A");
+        seed_running_attempt(&bus, "e-A", "implement", 1, runner_id);
+
+        // Simulate what sweep_orphans would do on a resurrected runner
+        // with a stale heartbeat — emit a drain, creating the attempt orphan.
+        drain(&bus, runner_id, "orphan at startup");
+
+        sweep_orphan_attempts(&bus);
+
+        let failed = failed_events_for(&bus, "e-A", "implement");
+        assert_eq!(failed.len(), 1, "startup sweep must close orphan attempt");
+        assert!(
+            failed[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("runner drained or gone"),
+            "error must name the drain cause: got {:?}",
+            failed[0]["error"]
+        );
+    }
+
+    /// Idempotency at startup: a second call must not re-emit
+    /// step.failed, since the first call flipped the attempt to Failed.
+    #[test]
+    fn sweep_orphan_attempts_is_idempotent() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.0.as_str();
+
+        seed_execution(&bus, "e-A");
+        seed_running_attempt(&bus, "e-A", "implement", 1, runner_id);
+        drain(&bus, runner_id, "orphan at startup");
+
+        sweep_orphan_attempts(&bus);
+        sweep_orphan_attempts(&bus);
+
+        let failed = failed_events_for(&bus, "e-A", "implement");
+        assert_eq!(failed.len(), 1, "repeat sweeps must not accrue events");
     }
 
     /// Idempotency: running the sweep when a runner is already drained
