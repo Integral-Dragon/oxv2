@@ -439,6 +439,14 @@ pub async fn cmd_up(runners: usize, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Pick runner ids that should be drained before SIGTERM. Skips runners
+/// already marked `drained` and malformed entries. Takes the parsed JSON
+/// from `GET /api/state/pool` so it's unit-testable without HTTP.
+#[allow(dead_code)] // wired into cmd_down in a follow-up commit
+fn runner_ids_to_drain(_pool: &serde_json::Value) -> Vec<String> {
+    Vec::new()
+}
+
 /// Stop the local ensemble. Reads the pidfile, sends SIGTERM to every
 /// alive entry, wipes runner workspaces, and prunes seguro sessions.
 pub fn cmd_down() -> Result<()> {
@@ -875,5 +883,34 @@ mod tests {
         let scripts = tmp("cx-dst2");
         let staged = stage_cx_binary_from(&scripts, empty.as_os_str()).unwrap();
         assert_eq!(staged, None);
+    }
+
+    // ── runner_ids_to_drain ─────────────────────────────────────────────
+
+    #[test]
+    fn runner_ids_to_drain_picks_non_drained() {
+        let pool = serde_json::json!({
+            "runners": [
+                {"id": "run-0000", "status": "idle"},
+                {"id": "run-0001", "status": "executing"},
+                {"id": "run-0002", "status": "drained"},
+            ]
+        });
+        let ids = runner_ids_to_drain(&pool);
+        assert_eq!(ids, vec!["run-0000".to_string(), "run-0001".to_string()]);
+    }
+
+    #[test]
+    fn runner_ids_to_drain_empty_when_no_runners() {
+        let pool = serde_json::json!({ "runners": [] });
+        assert_eq!(runner_ids_to_drain(&pool), Vec::<String>::new());
+    }
+
+    #[test]
+    fn runner_ids_to_drain_tolerates_missing_runners_key() {
+        // Older server or a fetch that returned an unexpected shape:
+        // no panic, just an empty list.
+        let pool = serde_json::json!({});
+        assert_eq!(runner_ids_to_drain(&pool), Vec::<String>::new());
     }
 }

@@ -1,0 +1,14 @@
+{
+  "id": "yQ4D",
+  "title": "ox-ctl down + server startup: clean up ghost runners",
+  "state": "ready",
+  "shadowed": false,
+  "part": null,
+  "created_at": "2026-04-18T16:15:35.032062967Z",
+  "updated_at": "2026-04-18T16:17:23.622683614Z",
+  "filed_by": "claude",
+  "tags": [
+    "#workflow:code-task-tdd",
+    "#bug"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "WiU6",
+  "title": "Slice A: ox-ctl down drains runners before SIGTERM",
+  "state": "claimed",
+  "shadowed": false,
+  "part": "unknown",
+  "created_at": "2026-04-18T16:15:47.126187817Z",
+  "updated_at": "2026-04-18T16:17:23.628050450Z",
+  "filed_by": "claude",
+  "parent": "yQ4D",
+  "edges": [
+    {
+      "to": "CTxQ",
+      "type": "blocks"
+    }
+  ]
+}

@@ -1,11 +1,11 @@
 {
   "id": "4iXz",
   "title": "Slice 3: wire into cmd_status (HTTP composition)",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "unknown",
   "created_at": "2026-04-18T15:54:51.229955568Z",
-  "updated_at": "2026-04-18T16:00:11.993823399Z",
+  "updated_at": "2026-04-18T16:03:02.402649676Z",
   "filed_by": "claude",
   "parent": "XzQW"
 }
