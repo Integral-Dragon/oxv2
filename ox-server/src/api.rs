@@ -126,9 +126,15 @@ pub fn router() -> Router<AppState> {
 #[derive(Serialize)]
 struct StatusResponse {
     status: &'static str,
+    /// Live pool — excludes drained runners. Invariant:
+    /// `pool_size == pool_executing + pool_idle`.
     pool_size: usize,
     pool_executing: usize,
     pool_idle: usize,
+    /// Runners still in the projection but no longer in service
+    /// (clean drain or orphan-sweep). Surfaced separately so headline
+    /// counts don't include them.
+    pool_drained: usize,
     executions_running: usize,
     workflows_loaded: usize,
     event_seq: u64,
@@ -151,29 +157,25 @@ impl PoolCounts {
     }
 }
 
-#[allow(dead_code)] // wired into status() in a follow-up commit
-fn aggregate_pool(_pool: &projections::PoolState) -> PoolCounts {
-    PoolCounts { executing: 0, idle: 0, drained: 0 }
+fn aggregate_pool(pool: &projections::PoolState) -> PoolCounts {
+    let mut counts = PoolCounts { executing: 0, idle: 0, drained: 0 };
+    for r in pool.runners.values() {
+        match r.status {
+            projections::RunnerStatus::Executing | projections::RunnerStatus::Assigned => {
+                counts.executing += 1;
+            }
+            projections::RunnerStatus::Idle => counts.idle += 1,
+            projections::RunnerStatus::Drained => counts.drained += 1,
+        }
+    }
+    counts
 }
 
 async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     let pool = state.bus.projections.pool();
     let execs = state.bus.projections.executions();
 
-    let pool_executing = pool
-        .runners
-        .values()
-        .filter(|r| {
-            r.status == projections::RunnerStatus::Executing
-                || r.status == projections::RunnerStatus::Assigned
-        })
-        .count();
-
-    let pool_idle = pool
-        .runners
-        .values()
-        .filter(|r| r.status == projections::RunnerStatus::Idle)
-        .count();
+    let counts = aggregate_pool(&pool);
 
     let executions_running = execs
         .executions
@@ -183,9 +185,10 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
 
     Json(StatusResponse {
         status: "healthy",
-        pool_size: pool.runners.len(),
-        pool_executing,
-        pool_idle,
+        pool_size: counts.size(),
+        pool_executing: counts.executing,
+        pool_idle: counts.idle,
+        pool_drained: counts.drained,
         executions_running,
         workflows_loaded: state.hot.load().workflows.len(),
         event_seq: state.bus.current_seq(),

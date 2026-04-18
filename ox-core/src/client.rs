@@ -110,9 +110,14 @@ pub fn build_list_executions_url(base_url: &str, filter: &ListExecutionsFilter) 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub status: String,
+    /// Live pool — excludes drained runners.
     pub pool_size: usize,
     pub pool_executing: usize,
     pub pool_idle: usize,
+    /// Drained but still-visible runners. `#[serde(default)]` lets
+    /// older servers (pre-field) deserialize as zero.
+    #[serde(default)]
+    pub pool_drained: usize,
     pub executions_running: usize,
     pub workflows_loaded: usize,
     pub event_seq: u64,
