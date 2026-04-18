@@ -229,6 +229,7 @@ pub fn is_workflow_file(path: &Path) -> anyhow::Result<bool> {
 // ── OxConfig ────────────────────────────────────────────────────────
 
 const DEFAULT_HEARTBEAT_GRACE: u64 = 60;
+const DEFAULT_RUNNERS: usize = 2;
 
 /// Top-level ox configuration, loaded from `config.toml` in the search path.
 #[derive(Debug, Clone, Deserialize)]
@@ -239,6 +240,11 @@ pub struct OxConfig {
     /// Heartbeat grace period in seconds.
     #[serde(default = "default_heartbeat_grace")]
     pub heartbeat_grace: u64,
+    /// Default runner pool size for `ox-ctl up`. CLI flag and env
+    /// `OX_RUNNERS` still take precedence; this is the fallback so a
+    /// project can pin its expected pool size in config.toml.
+    #[serde(default = "default_runners")]
+    pub runners: usize,
     /// Names of event-source watchers `ox-ctl up` should launch
     /// alongside the server. Each name resolves to `ox-<name>-watcher`
     /// in the same directory as `ox-server`. Additive across the
@@ -255,11 +261,16 @@ fn default_heartbeat_grace() -> u64 {
     DEFAULT_HEARTBEAT_GRACE
 }
 
+fn default_runners() -> usize {
+    DEFAULT_RUNNERS
+}
+
 impl Default for OxConfig {
     fn default() -> Self {
         Self {
             triggers: default_triggers(),
             heartbeat_grace: DEFAULT_HEARTBEAT_GRACE,
+            runners: DEFAULT_RUNNERS,
             watchers: Vec::new(),
         }
     }
@@ -348,6 +359,7 @@ pub fn load_config(search_path: &[PathBuf]) -> OxConfig {
     OxConfig {
         triggers: trigger_paths,
         heartbeat_grace: first_heartbeat.unwrap_or(DEFAULT_HEARTBEAT_GRACE),
+        runners: DEFAULT_RUNNERS, // stub — replaced by first-wins merge in follow-up
         watchers,
     }
 }
@@ -402,6 +414,39 @@ mod tests {
     }
 
     // ── watchers (slice 4 of event-sources migration) ─────────────
+
+    #[test]
+    fn load_config_parses_runners_from_config_toml() {
+        let dir = tmp_base("runners-parse");
+        fs::write(
+            dir.join("config.toml"),
+            r#"
+            triggers = []
+            runners = 4
+            "#,
+        )
+        .unwrap();
+
+        let cfg = load_config(std::slice::from_ref(&dir));
+        assert_eq!(cfg.runners, 4);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_config_defaults_runners_when_absent() {
+        let dir = tmp_base("runners-default");
+        fs::write(
+            dir.join("config.toml"),
+            r#"
+            triggers = []
+            "#,
+        )
+        .unwrap();
+
+        let cfg = load_config(std::slice::from_ref(&dir));
+        assert_eq!(cfg.runners, DEFAULT_RUNNERS);
+        fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn load_config_parses_watchers_from_config_toml() {

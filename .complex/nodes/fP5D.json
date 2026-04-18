@@ -1,11 +1,11 @@
 {
   "id": "fP5D",
   "title": "Slice 2: CLI renders drained count + sorts detail table",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "unknown",
   "created_at": "2026-04-18T16:40:29.996603879Z",
-  "updated_at": "2026-04-18T16:46:57.771445869Z",
+  "updated_at": "2026-04-18T16:52:33.352512101Z",
   "filed_by": "claude",
   "parent": "fzWD"
 }
