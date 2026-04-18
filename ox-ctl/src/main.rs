@@ -303,6 +303,22 @@ fn format_runners_section(rows: &[RunnerRow]) -> String {
     out
 }
 
+/// Sort priority for `RunnerRow.status`. Active runners (executing /
+/// assigned) come first, then idle, then drained, then anything else.
+/// Keeps live work at the top of the `ox-ctl status` detail table.
+fn status_sort_key(status: &str) -> u8 {
+    match status {
+        "executing" | "assigned" => 0,
+        "idle" => 1,
+        "drained" => 2,
+        _ => 3,
+    }
+}
+
+/// In-place sort: by status priority, then id ascending.
+#[allow(dead_code)] // wired into cmd_status in a follow-up commit
+fn sort_runner_rows(_rows: &mut [RunnerRow]) {}
+
 fn parse_step_attempt(s: &str) -> Option<(String, String, u32)> {
     let mut parts = s.rsplitn(3, '/');
     let attempt_str = parts.next()?;
@@ -1737,6 +1753,23 @@ mod tests {
         );
         // A dash placeholder appears for the missing workflow/step fields.
         assert!(out.contains('-'), "expected dash placeholder, got: {out}");
+    }
+
+    #[test]
+    fn sort_runner_rows_orders_executing_idle_drained_then_by_id() {
+        let mut rows = vec![
+            runner_row("run-c", "drained", None, None, None, None),
+            runner_row("run-b", "idle", None, None, None, None),
+            runner_row("run-d", "executing", Some("w"), Some("e"), Some("s"), Some(1)),
+            runner_row("run-a", "idle", None, None, None, None),
+        ];
+        sort_runner_rows(&mut rows);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["run-d", "run-a", "run-b", "run-c"],
+            "expected executing → idle(by id) → drained"
+        );
     }
 
     #[test]
