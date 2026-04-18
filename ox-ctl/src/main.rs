@@ -79,9 +79,10 @@ enum Commands {
     /// Start the local ensemble (server + herder + seguro runners)
     /// for the current directory.
     Up {
-        /// Number of seguro runners to launch.
-        #[arg(long, env = "OX_RUNNERS", default_value = "2")]
-        runners: usize,
+        /// Number of seguro runners to launch. When unset, reads
+        /// `runners` from config.toml; absent everywhere defaults to 2.
+        #[arg(long, env = "OX_RUNNERS")]
+        runners: Option<usize>,
         /// Server port (bound on localhost).
         #[arg(long, env = "OX_PORT", default_value = "4840")]
         port: u16,

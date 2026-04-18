@@ -265,9 +265,15 @@ pub fn stage_cx_binary_from(
 /// Start the local ensemble: server, herder, seguro runners. Seeds
 /// claude_credentials if the host has them. Writes pidfile and logs to
 /// `.ox/run/`. Returns after the children are spawned.
-pub async fn cmd_up(runners: usize, port: u16) -> Result<()> {
+pub async fn cmd_up(runners: Option<usize>, port: u16) -> Result<()> {
     let repo = std::env::current_dir().context("cwd")?;
     let paths = RunPaths::for_repo(&repo);
+
+    // Resolve pool size: flag/env override config.toml, which overrides
+    // the hardcoded default baked into `OxConfig`.
+    let search_path = ox_core::config::resolve_search_path(&repo);
+    let ox_config = ox_core::config::load_config(&search_path);
+    let runners = resolve_runners(runners, ox_config.runners);
 
     if paths.pidfile.is_file() {
         let content = std::fs::read_to_string(&paths.pidfile).unwrap_or_default();
@@ -446,9 +452,8 @@ pub async fn cmd_up(runners: usize, port: u16) -> Result<()> {
 /// also absorbs `OX_RUNNERS` via clap `env`) wins when set, otherwise
 /// fall back to the `runners` value from `config.toml` (which itself
 /// defaults to `DEFAULT_RUNNERS` when absent everywhere).
-#[allow(dead_code)] // wired into cmd_up in a follow-up commit
-fn resolve_runners(_flag: Option<usize>, _config_value: usize) -> usize {
-    0
+fn resolve_runners(flag: Option<usize>, config_value: usize) -> usize {
+    flag.unwrap_or(config_value)
 }
 
 fn runner_ids_to_drain(pool: &serde_json::Value) -> Vec<String> {
