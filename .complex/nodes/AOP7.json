@@ -1,11 +1,11 @@
 {
   "id": "AOP7",
   "title": "Slice 2: wire into check_loop; emit step.failed",
-  "state": "latent",
+  "state": "claimed",
   "shadowed": false,
-  "part": null,
+  "part": "unknown",
   "created_at": "2026-04-18T19:47:55.375360717Z",
-  "updated_at": "2026-04-18T19:47:55.375360717Z",
+  "updated_at": "2026-04-18T19:52:31.111371317Z",
   "tags": [
     "bug"
   ],

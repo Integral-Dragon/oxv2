@@ -902,6 +902,174 @@ mod tests {
         assert_eq!(orphans[0].reason, OrphanReason::Gone);
     }
 
+    // ── check_tick orphan-attempt emission ─────────────────────────
+
+    /// Helper: emit execution.created so the execution appears in
+    /// projections with status=Running.
+    fn seed_execution(bus: &EventBus, exec_id: &str) {
+        use ox_core::events::ExecutionCreatedData;
+        let data = ExecutionCreatedData {
+            execution_id: ExecutionId(exec_id.into()),
+            workflow: "test-wf".into(),
+            trigger: "manual".into(),
+            vars: HashMap::new(),
+            origin: Default::default(),
+            start_step: None,
+        };
+        bus.append_ox(
+            kinds::EXECUTION_CREATED,
+            exec_id,
+            serde_json::to_value(data).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Helper: emit step.dispatched + step.running to put an attempt
+    /// into Running state bound to the given runner.
+    fn seed_running_attempt(bus: &EventBus, exec_id: &str, step: &str, attempt: u32, runner_id: &str) {
+        use ox_core::events::{StepDispatchedData, StepRunningData};
+        bus.append_ox(
+            kinds::STEP_DISPATCHED,
+            exec_id,
+            serde_json::to_value(StepDispatchedData {
+                execution_id: ExecutionId(exec_id.into()),
+                step: step.into(),
+                attempt,
+                runner_id: RunnerId(runner_id.into()),
+                secret_refs: vec![],
+                runtime: serde_json::json!({}),
+                workspace: serde_json::json!({}),
+                artifacts: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        bus.append_ox(
+            kinds::STEP_RUNNING,
+            exec_id,
+            serde_json::to_value(StepRunningData {
+                execution_id: ExecutionId(exec_id.into()),
+                step: step.into(),
+                attempt,
+                connect_addr: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn failed_events_for(bus: &EventBus, exec_id: &str, step: &str) -> Vec<serde_json::Value> {
+        bus.replay_after(0)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == kinds::STEP_FAILED && e.subject_id == exec_id)
+            .filter_map(|e| {
+                let d = e.data.as_object()?;
+                if d.get("step")?.as_str()? == step {
+                    Some(e.data)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// The live-bug reproduction: runner gets dispatched to exec-B
+    /// while exec-A's attempt still claims it. After a check_tick, the
+    /// orphaned exec-A attempt must be closed with step.failed, and no
+    /// further ticks should re-emit.
+    #[test]
+    fn check_tick_emits_step_failed_when_runner_reassigned() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.0.as_str();
+        let now = Utc::now();
+        set_heartbeat(&bus, runner_id, now);
+
+        seed_execution(&bus, "e-A");
+        seed_running_attempt(&bus, "e-A", "implement", 1, runner_id);
+
+        // Runner is now reassigned to exec-B without a terminal event for e-A.
+        seed_execution(&bus, "e-B");
+        seed_running_attempt(&bus, "e-B", "implement", 1, runner_id);
+
+        let mut missed: HashSet<String> = HashSet::new();
+        let mut timed_out: HashSet<String> = HashSet::new();
+        check_tick(&bus, &mut missed, &mut timed_out, now, 60);
+
+        let failed = failed_events_for(&bus, "e-A", "implement");
+        assert_eq!(failed.len(), 1, "exactly one step.failed for orphaned e-A");
+        assert!(
+            failed[0]["error"].as_str().unwrap().contains("orphan"),
+            "error message should mention orphan: got {:?}",
+            failed[0]["error"]
+        );
+
+        let execs = bus.projections.executions();
+        let att = execs
+            .executions
+            .get("e-A")
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|a| a.step == "implement" && a.attempt == 1)
+            .unwrap();
+        assert_eq!(
+            att.status,
+            crate::projections::StepStatus::Failed,
+            "e-A attempt must be Failed after the tick"
+        );
+
+        // Idempotency: a second tick must not re-emit because the
+        // attempt is now terminal.
+        check_tick(&bus, &mut missed, &mut timed_out, now, 60);
+        let failed_again = failed_events_for(&bus, "e-A", "implement");
+        assert_eq!(failed_again.len(), 1, "must not re-emit on repeat tick");
+    }
+
+    /// When the runner is drained mid-step, the next tick must close
+    /// the orphan. This covers the manual-drain path.
+    #[test]
+    fn check_tick_emits_step_failed_when_runner_drained_mid_step() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.0.as_str();
+        let now = Utc::now();
+        set_heartbeat(&bus, runner_id, now);
+
+        seed_execution(&bus, "e-A");
+        seed_running_attempt(&bus, "e-A", "implement", 1, runner_id);
+
+        drain(&bus, runner_id, "manual");
+
+        let mut missed: HashSet<String> = HashSet::new();
+        let mut timed_out: HashSet<String> = HashSet::new();
+        check_tick(&bus, &mut missed, &mut timed_out, now, 60);
+
+        let failed = failed_events_for(&bus, "e-A", "implement");
+        assert_eq!(failed.len(), 1, "drain-orphaned attempt must be closed");
+    }
+
+    /// Healthy runner + attempt must not be spuriously flagged.
+    #[test]
+    fn check_tick_does_not_emit_step_failed_for_healthy_attempt() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.0.as_str();
+        let now = Utc::now();
+        set_heartbeat(&bus, runner_id, now);
+
+        seed_execution(&bus, "e-A");
+        seed_running_attempt(&bus, "e-A", "implement", 1, runner_id);
+
+        let mut missed: HashSet<String> = HashSet::new();
+        let mut timed_out: HashSet<String> = HashSet::new();
+        check_tick(&bus, &mut missed, &mut timed_out, now, 60);
+
+        let failed = failed_events_for(&bus, "e-A", "implement");
+        assert_eq!(failed.len(), 0, "healthy attempt must not be flagged");
+    }
+
     /// Idempotency: running the sweep when a runner is already drained
     /// must not emit a second `runner.drained`. Guards against startup
     /// loops or multiple invocations inflating the event log.

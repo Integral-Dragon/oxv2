@@ -1,11 +1,11 @@
 {
   "id": "yxAj",
   "title": "Slice 1: scan_orphan_attempts pure helper + unit tests",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "unknown",
   "created_at": "2026-04-18T19:47:55.372909771Z",
-  "updated_at": "2026-04-18T19:48:16.249490026Z",
+  "updated_at": "2026-04-18T19:52:28.940624786Z",
   "tags": [
     "bug"
   ],
