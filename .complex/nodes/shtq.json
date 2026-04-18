@@ -1,11 +1,11 @@
 {
   "id": "shtq",
   "title": "RunnerId: encode server start epoch to prevent ID collision across restarts",
-  "state": "latent",
+  "state": "claimed",
   "shadowed": false,
-  "part": null,
+  "part": "unknown",
   "created_at": "2026-04-18T20:16:53.239042547Z",
-  "updated_at": "2026-04-18T20:16:53.239042547Z",
+  "updated_at": "2026-04-18T20:19:20.265589661Z",
   "tags": [
     "bug",
     "workflow:code-task-tdd"

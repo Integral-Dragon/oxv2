@@ -1,11 +1,11 @@
 {
   "id": "eIvH",
   "title": "dispatch_step auto-closes orphan when target runner is already busy",
-  "state": "claimed",
+  "state": "integrated",
   "shadowed": false,
   "part": "unknown",
   "created_at": "2026-04-18T20:16:53.237222068Z",
-  "updated_at": "2026-04-18T20:16:56.210114564Z",
+  "updated_at": "2026-04-18T20:19:07.025741832Z",
   "tags": [
     "bug",
     "workflow:code-task-tdd"
