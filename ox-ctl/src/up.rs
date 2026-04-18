@@ -442,14 +442,26 @@ pub async fn cmd_up(runners: usize, port: u16) -> Result<()> {
 /// Pick runner ids that should be drained before SIGTERM. Skips runners
 /// already marked `drained` and malformed entries. Takes the parsed JSON
 /// from `GET /api/state/pool` so it's unit-testable without HTTP.
-#[allow(dead_code)] // wired into cmd_down in a follow-up commit
-fn runner_ids_to_drain(_pool: &serde_json::Value) -> Vec<String> {
-    Vec::new()
+fn runner_ids_to_drain(pool: &serde_json::Value) -> Vec<String> {
+    pool.get("runners")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    let id = r.get("id").and_then(|v| v.as_str())?;
+                    let status = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    (status != "drained").then(|| id.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-/// Stop the local ensemble. Reads the pidfile, sends SIGTERM to every
-/// alive entry, wipes runner workspaces, and prunes seguro sessions.
-pub fn cmd_down() -> Result<()> {
+/// Stop the local ensemble. Best-effort drains registered runners via
+/// the server (so `RUNNER_DRAINED` events are emitted and startup
+/// replay won't resurrect them as ghosts), then SIGTERMs every alive
+/// pidfile entry, wipes runner workspaces, and prunes seguro sessions.
+pub async fn cmd_down(server_url: &str) -> Result<()> {
     let repo = std::env::current_dir().context("cwd")?;
     let paths = RunPaths::for_repo(&repo);
 
@@ -459,6 +471,25 @@ pub fn cmd_down() -> Result<()> {
     }
 
     println!("stopping ox...");
+
+    // Best-effort drain: if the server has already died, skip straight
+    // to SIGTERM. A failed drain must not block shutdown.
+    if let Ok(pool) = reqwest::Client::new()
+        .get(format!("{server_url}/api/state/pool"))
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        && let Ok(json) = pool.json::<serde_json::Value>().await
+    {
+        let client = ox_core::client::OxClient::new(server_url);
+        for id in runner_ids_to_drain(&json) {
+            let runner_id = ox_core::types::RunnerId(id.clone());
+            if client.drain_runner(&runner_id).await.is_ok() {
+                println!("  drained {id}");
+            }
+        }
+    }
+
     let content = std::fs::read_to_string(&paths.pidfile)?;
     for entry in parse_pidfile(&content) {
         if is_running(entry.pid) {

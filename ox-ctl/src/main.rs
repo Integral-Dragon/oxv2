@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
             ConfigCommands::Check => cmd_config_check(&client, json).await,
         },
         Commands::Up { runners, port } => up::cmd_up(runners, port).await,
-        Commands::Down => up::cmd_down(),
+        Commands::Down => up::cmd_down(&cli.server).await,
         Commands::Reset => up::cmd_reset(),
     }
 }
