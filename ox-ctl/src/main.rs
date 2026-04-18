@@ -316,8 +316,13 @@ fn status_sort_key(status: &str) -> u8 {
 }
 
 /// In-place sort: by status priority, then id ascending.
-#[allow(dead_code)] // wired into cmd_status in a follow-up commit
-fn sort_runner_rows(_rows: &mut [RunnerRow]) {}
+fn sort_runner_rows(rows: &mut [RunnerRow]) {
+    rows.sort_by(|a, b| {
+        status_sort_key(&a.status)
+            .cmp(&status_sort_key(&b.status))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
 
 fn parse_step_attempt(s: &str) -> Option<(String, String, u32)> {
     let mut parts = s.rsplitn(3, '/');
@@ -403,7 +408,8 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
-    let runners = collect_runner_rows(client).await.unwrap_or_default();
+    let mut runners = collect_runner_rows(client).await.unwrap_or_default();
+    sort_runner_rows(&mut runners);
 
     if json {
         println!(
@@ -413,6 +419,7 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
                 "pool_size": s.pool_size,
                 "pool_executing": s.pool_executing,
                 "pool_idle": s.pool_idle,
+                "pool_drained": s.pool_drained,
                 "executions_running": s.executions_running,
                 "workflows_loaded": s.workflows_loaded,
                 "event_seq": s.event_seq,
@@ -423,8 +430,8 @@ async fn cmd_status(client: &OxClient, json: bool) -> Result<()> {
     } else {
         println!("ox-server   {}   seq {}", s.status, s.event_seq);
         println!(
-            "pool        {} runners ({} executing, {} idle)",
-            s.pool_size, s.pool_executing, s.pool_idle
+            "pool        {} runners ({} executing, {} idle, {} drained)",
+            s.pool_size, s.pool_executing, s.pool_idle, s.pool_drained
         );
         println!("executions  {} running", s.executions_running);
         println!("workflows   {} loaded", s.workflows_loaded);
