@@ -1,0 +1,17 @@
+{
+  "id": "mBGe",
+  "title": "Slice 1: server splits pool_size from pool_drained",
+  "state": "claimed",
+  "shadowed": false,
+  "part": "unknown",
+  "created_at": "2026-04-18T16:40:29.994561416Z",
+  "updated_at": "2026-04-18T16:41:56.033759300Z",
+  "filed_by": "claude",
+  "parent": "fzWD",
+  "edges": [
+    {
+      "to": "fP5D",
+      "type": "blocks"
+    }
+  ]
+}

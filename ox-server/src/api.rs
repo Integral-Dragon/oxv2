@@ -134,6 +134,28 @@ struct StatusResponse {
     event_seq: u64,
 }
 
+/// Aggregated counts over the pool projection. `size` is the live pool
+/// (executing + idle); `drained` is surfaced separately so headline
+/// counts don't include shutdown/orphan runners still lingering in the
+/// projection. Invariant: `size() == executing + idle`.
+#[derive(Debug, PartialEq, Eq)]
+struct PoolCounts {
+    executing: usize,
+    idle: usize,
+    drained: usize,
+}
+
+impl PoolCounts {
+    fn size(&self) -> usize {
+        self.executing + self.idle
+    }
+}
+
+#[allow(dead_code)] // wired into status() in a follow-up commit
+fn aggregate_pool(_pool: &projections::PoolState) -> PoolCounts {
+    PoolCounts { executing: 0, idle: 0, drained: 0 }
+}
+
 async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     let pool = state.bus.projections.pool();
     let execs = state.bus.projections.executions();
@@ -1211,6 +1233,73 @@ mod tests {
         )
         .expect_err("running execution must not be retriable");
         assert_eq!(err, RetryError::NotEscalated);
+    }
+
+    // ── aggregate_pool ──────────────────────────────────────────────────
+
+    fn runner(id: &str, status: crate::projections::RunnerStatus) -> crate::projections::RunnerState {
+        crate::projections::RunnerState {
+            id: RunnerId(id.into()),
+            environment: "default".into(),
+            labels: HashMap::new(),
+            status,
+            current_step: None,
+            registered_at: Utc::now(),
+            dispatched_at: None,
+            step_timeout_secs: None,
+        }
+    }
+
+    fn pool_with(runners: Vec<crate::projections::RunnerState>) -> crate::projections::PoolState {
+        let mut pool = crate::projections::PoolState::default();
+        for r in runners {
+            pool.runners.insert(r.id.0.clone(), r);
+        }
+        pool
+    }
+
+    /// Headline bug: a drained runner alongside an idle one must not
+    /// inflate `size`. Live pool is just the idle one; drained is its
+    /// own bucket.
+    #[test]
+    fn aggregate_pool_excludes_drained_from_size() {
+        use crate::projections::RunnerStatus;
+        let pool = pool_with(vec![
+            runner("run-0000", RunnerStatus::Idle),
+            runner("run-0001", RunnerStatus::Drained),
+        ]);
+        let counts = aggregate_pool(&pool);
+        assert_eq!(counts.idle, 1);
+        assert_eq!(counts.drained, 1);
+        assert_eq!(counts.executing, 0);
+        assert_eq!(counts.size(), 1, "size must exclude drained");
+    }
+
+    /// Assigned runners are mid-dispatch but not yet heartbeating as
+    /// executing — they count toward `executing` for the live pool.
+    #[test]
+    fn aggregate_pool_counts_assigned_as_executing() {
+        use crate::projections::RunnerStatus;
+        let pool = pool_with(vec![
+            runner("run-a", RunnerStatus::Executing),
+            runner("run-b", RunnerStatus::Assigned),
+            runner("run-c", RunnerStatus::Idle),
+        ]);
+        let counts = aggregate_pool(&pool);
+        assert_eq!(counts.executing, 2);
+        assert_eq!(counts.idle, 1);
+        assert_eq!(counts.drained, 0);
+        assert_eq!(counts.size(), 3);
+    }
+
+    #[test]
+    fn aggregate_pool_empty_returns_zeros() {
+        let counts = aggregate_pool(&crate::projections::PoolState::default());
+        assert_eq!(
+            counts,
+            PoolCounts { executing: 0, idle: 0, drained: 0 }
+        );
+        assert_eq!(counts.size(), 0);
     }
 }
 
