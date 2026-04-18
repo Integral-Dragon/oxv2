@@ -429,6 +429,25 @@ pub fn sweep_orphan_attempts(bus: &EventBus) {
     }
 }
 
+/// Preventive guard for the dispatch path: if `runner_id` already has
+/// a `current_step` pointing to a *different* `(exec, step, attempt)`
+/// than the one about to be dispatched, emit `step.failed` for that
+/// prior attempt first so the runner's lease is released cleanly.
+///
+/// A no-op when the runner is idle, unknown, or already bound to the
+/// same `(exec, step, attempt)` (the orphan-recovery re-dispatch path
+/// at `projections.rs:202` is designed to be idempotent).
+pub fn close_prior_attempt_on_dispatch(
+    bus: &EventBus,
+    runner_id: &RunnerId,
+    new_exec: &ExecutionId,
+    new_step: &str,
+    new_attempt: u32,
+) {
+    let _ = (bus, runner_id, new_exec, new_step, new_attempt);
+    todo!("implement in green")
+}
+
 pub(crate) fn scan_orphan_attempts(
     pool: &crate::projections::PoolState,
     execs: &crate::projections::ExecutionsState,
@@ -1166,6 +1185,114 @@ mod tests {
 
         let failed = failed_events_for(&bus, "e-A", "implement");
         assert_eq!(failed.len(), 1, "repeat sweeps must not accrue events");
+    }
+
+    // ── close_prior_attempt_on_dispatch (preventive guard) ─────────
+
+    /// The reproduction of the live-race: a runner has an in-flight
+    /// attempt on exec-A; the dispatcher calls the guard for exec-B on
+    /// the same runner. The guard must emit step.failed for exec-A so
+    /// the dispatcher can safely append step.dispatched for exec-B
+    /// without leaving an orphan.
+    #[test]
+    fn close_prior_closes_exec_a_before_dispatch_to_exec_b() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.clone();
+
+        seed_execution(&bus, "e-A");
+        seed_running_attempt(&bus, "e-A", "implement", 1, runner_id.0.as_str());
+
+        close_prior_attempt_on_dispatch(
+            &bus,
+            &runner_id,
+            &ExecutionId("e-B".into()),
+            "implement",
+            1,
+        );
+
+        let failed = failed_events_for(&bus, "e-A", "implement");
+        assert_eq!(failed.len(), 1, "prior attempt must be closed");
+        assert!(
+            failed[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("reassigned at dispatch time"),
+            "error must mention dispatch-time reassignment: got {:?}",
+            failed[0]["error"]
+        );
+
+        let execs = bus.projections.executions();
+        let att = execs
+            .executions
+            .get("e-A")
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|a| a.step == "implement" && a.attempt == 1)
+            .unwrap();
+        assert_eq!(
+            att.status,
+            crate::projections::StepStatus::Failed,
+            "e-A attempt must be Failed"
+        );
+    }
+
+    /// Same-attempt re-dispatch (the orphan-recovery path) must NOT
+    /// close the attempt — the herder intentionally re-dispatches the
+    /// same (exec, step, attempt) after a heartbeat_missed, and the
+    /// projection folds it in place.
+    #[test]
+    fn close_prior_is_noop_for_same_attempt_redispatch() {
+        let bus = test_bus();
+        let runner = register(&bus, "test-env".into(), HashMap::new());
+        let runner_id = runner.clone();
+
+        seed_execution(&bus, "e-A");
+        seed_running_attempt(&bus, "e-A", "implement", 1, runner_id.0.as_str());
+
+        close_prior_attempt_on_dispatch(
+            &bus,
+            &runner_id,
+            &ExecutionId("e-A".into()),
+            "implement",
+            1,
+        );
+
+        let failed = failed_events_for(&bus, "e-A", "implement");
+        assert_eq!(
+            failed.len(),
+            0,
+            "same-attempt re-dispatch must not close the attempt"
+        );
+    }
+
+    /// Idle/unknown runner: the guard must be a no-op — any prior
+    /// attempt on a fresh runner is someone else's problem.
+    #[test]
+    fn close_prior_is_noop_for_idle_or_unknown_runner() {
+        let bus = test_bus();
+        let known = register(&bus, "test-env".into(), HashMap::new());
+
+        // Known but idle runner.
+        close_prior_attempt_on_dispatch(
+            &bus,
+            &known,
+            &ExecutionId("e-A".into()),
+            "implement",
+            1,
+        );
+        assert_eq!(failed_events_for(&bus, "e-A", "implement").len(), 0);
+
+        // Unknown runner id.
+        close_prior_attempt_on_dispatch(
+            &bus,
+            &RunnerId("run-does-not-exist".into()),
+            &ExecutionId("e-A".into()),
+            "implement",
+            1,
+        );
+        assert_eq!(failed_events_for(&bus, "e-A", "implement").len(), 0);
     }
 
     /// Idempotency: running the sweep when a runner is already drained
