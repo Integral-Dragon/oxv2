@@ -35,7 +35,7 @@ This is critical — without isolation, agents escape to the host repo:
 - Merge operations fail because the host worktree is out of sync
 
 **With seguro:**
-- The agent only sees `/tmp/ox-work/current` (the cloned workspace)
+- The agent only sees `/work/current` (the cloned workspace)
 - `cx` operates on `.complex/` inside the clone
 - `git push` goes to ox-server's HTTP endpoint, not the host filesystem
 - The host repo stays clean on main

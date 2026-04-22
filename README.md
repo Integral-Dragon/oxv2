@@ -512,7 +512,7 @@ ox-herder --server http://localhost:4840
 # runner(s) — run directly on the host or inside your own sandbox.
 # If you're using seguro, the runner reaches the host via 10.0.2.2.
 ox-runner --server http://10.0.2.2:4840 --environment seguro \
-          --workspace-dir /tmp/ox-work
+          --workspace-dir /work
 
 # seed Claude credentials
 ox-ctl secrets set claude_credentials \
@@ -526,4 +526,5 @@ Herder flags: `--server`, `--pool-target` (default `2`),
 `--heartbeat-grace`, `--tick-interval` (default `5s`).
 
 Runner flags: `--server`, `--environment` (default `seguro`),
-`--workspace-dir` (default `/tmp/ox-work`).
+`--workspace-dir` (default `/work`, the host-backed virtiofs share in
+the seguro VM layout — see `docs/vm-layout.md`).

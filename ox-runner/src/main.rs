@@ -19,8 +19,11 @@ struct Args {
     #[arg(long, env = "OX_ENVIRONMENT", default_value = "local")]
     environment: String,
 
-    /// Directory for step workspaces.
-    #[arg(long, env = "OX_WORKSPACE_DIR", default_value = "/tmp/ox-work")]
+    /// Directory for step workspaces. Defaults to `/work`, which in the
+    /// seguro VM layout is a host-backed virtiofs share (see
+    /// `docs/vm-layout.md`). Avoid tmpfs paths like `/tmp/...` — cargo
+    /// targets run into multi-GB and will exhaust guest RAM.
+    #[arg(long, env = "OX_WORKSPACE_DIR", default_value = "/work")]
     workspace_dir: String,
 }
 

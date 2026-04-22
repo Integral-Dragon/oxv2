@@ -177,7 +177,7 @@ pub fn seguro_runner_argv(
     bin_dir: &Path,
     scripts_dir: &Path,
     sccache_dir: &Path,
-    _workspace_dir: &Path,
+    workspace_dir: &Path,
     server_url: &str,
 ) -> Result<Vec<String>> {
     let bin_s = bin_dir
@@ -189,13 +189,23 @@ pub fn seguro_runner_argv(
     let sccache_s = sccache_dir
         .to_str()
         .ok_or_else(|| anyhow!("sccache_dir is not utf-8"))?;
+    let workspace_s = workspace_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("workspace_dir is not utf-8"))?;
     let guest_cmd = format!(
         "export HOME=/home/agent && \
          export PATH=/ox/bin:/ox/scripts:$HOME/.cargo/bin:$PATH && \
          export SCCACHE_DIR=/cache/sccache && \
          export RUSTC_WRAPPER=sccache && \
-         /ox/bin/ox-runner --server {server_url} --environment seguro --workspace-dir /tmp/ox-work"
+         /ox/bin/ox-runner --server {server_url} --environment seguro --workspace-dir /work"
     );
+    // Shares (host → guest). The host-disk ones carry anything that can
+    // grow large — cargo targets and sccache artifacts — keeping them off
+    // the guest's tmpfs /tmp.
+    //   /ox/bin        ro, host fs     ox-runner + agent CLIs
+    //   /ox/scripts    ro, host fs     staged helpers (cx)
+    //   /cache/sccache rw, host disk   shared sccache across runner VMs
+    //   /work          rw, host disk   step workspace + cargo target
     Ok(vec![
         "run".into(),
         "--share".into(),
@@ -204,6 +214,8 @@ pub fn seguro_runner_argv(
         format!("{scripts_s}:/ox/scripts:ro"),
         "--share".into(),
         format!("{sccache_s}:/cache/sccache"),
+        "--share".into(),
+        format!("{workspace_s}:/work:rw"),
         "--net".into(),
         "dev-bridge".into(),
         "--unsafe-dev-bridge".into(),
