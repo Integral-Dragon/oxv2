@@ -177,6 +177,7 @@ pub fn seguro_runner_argv(
     bin_dir: &Path,
     scripts_dir: &Path,
     sccache_dir: &Path,
+    _workspace_dir: &Path,
     server_url: &str,
 ) -> Result<Vec<String>> {
     let bin_s = bin_dir
@@ -424,6 +425,7 @@ pub async fn cmd_up(runners: Option<usize>, port: u16) -> Result<()> {
             &bins.bin_dir,
             &paths.scripts_dir,
             &sccache_cache_dir()?,
+            &workspace,
             &guest_server,
         )?;
         let pid = spawn_detached(Path::new("seguro"), &args, &log)?;
@@ -862,8 +864,15 @@ mod tests {
         let bin = PathBuf::from("/ox-bin");
         let scripts = PathBuf::from("/ox-scripts");
         let sccache = PathBuf::from("/sccache-host");
-        let args =
-            seguro_runner_argv(&bin, &scripts, &sccache, "http://10.0.2.2:4840").unwrap();
+        let workspace = PathBuf::from("/runner-workspace");
+        let args = seguro_runner_argv(
+            &bin,
+            &scripts,
+            &sccache,
+            &workspace,
+            "http://10.0.2.2:4840",
+        )
+        .unwrap();
         assert_eq!(args[0], "run");
         // Shares in the correct order and format.
         let joined = args.join(" ");
@@ -879,6 +888,12 @@ mod tests {
             !joined.contains("/sccache-host:/cache/sccache:ro"),
             "sccache share must not be read-only"
         );
+        // Workspace share is host-backed so cargo targets land on real disk,
+        // not the guest's tmpfs /tmp. Guest path /work matches docs/vm-layout.md.
+        assert!(
+            joined.contains("--share /runner-workspace:/work:rw"),
+            "missing workspace share in: {joined}"
+        );
         // Dev bridge + unsafe flags present.
         assert!(joined.contains("--net dev-bridge"));
         assert!(joined.contains("--unsafe-dev-bridge"));
@@ -892,6 +907,10 @@ mod tests {
         assert!(guest.contains("--server http://10.0.2.2:4840"));
         assert!(guest.contains("--environment seguro"));
         assert!(guest.contains("HOME=/home/agent"));
+        assert!(
+            guest.contains("--workspace-dir /work"),
+            "workspace-dir must point at the host-backed /work share: {guest}"
+        );
         // sccache env vars for rustc wrapping inside the guest.
         assert!(
             guest.contains("SCCACHE_DIR=/cache/sccache"),
