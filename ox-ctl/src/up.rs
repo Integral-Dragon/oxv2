@@ -902,9 +902,20 @@ mod tests {
         );
         // Workspace share is host-backed so cargo targets land on real disk,
         // not the guest's tmpfs /tmp. Guest path /work matches docs/vm-layout.md.
+        // Must be writable, which in seguro's share grammar means *no* suffix
+        // at all — ":rw" is not a valid form and seguro rejects it.
         assert!(
-            joined.contains("--share /runner-workspace:/work:rw"),
+            joined.contains("--share /runner-workspace:/work "),
             "missing workspace share in: {joined}"
+        );
+        assert!(
+            !joined.contains("/runner-workspace:/work:rw"),
+            "workspace share must not use :rw suffix — seguro rejects it; \
+             omit the suffix entirely for writable mounts"
+        );
+        assert!(
+            !joined.contains("/runner-workspace:/work:ro"),
+            "workspace share must not be read-only"
         );
         // Dev bridge + unsafe flags present.
         assert!(joined.contains("--net dev-bridge"));
