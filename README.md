@@ -101,14 +101,19 @@ runtime.
 
 ### 4. install ox
 
+ox is a cargo workspace with no root package, so `cargo install` needs
+the binary crates listed explicitly:
+
 ```bash
-cargo install --git https://github.com/integral-dragon/oxv2
+cargo install --git https://github.com/integral-dragon/oxv2 \
+  ox-server ox-herder ox-cx-watcher ox-runner ox-ctl ox-rt
 ```
 
-That installs all five binaries (`ox-server`, `ox-herder`, `ox-runner`,
-`ox-ctl`, `ox-rt`) into `~/.cargo/bin`. The shipped defaults for
-workflows, runtimes, and personas are baked into the binaries and
-extracted to `~/.ox/defaults/` (read-only) on first run.
+That installs all six binaries (`ox-server`, `ox-herder`,
+`ox-cx-watcher`, `ox-runner`, `ox-ctl`, `ox-rt`) into `~/.cargo/bin`.
+The shipped defaults for workflows, runtimes, and personas are baked
+into the binaries and extracted to `~/.ox/defaults/` (read-only) on
+first run.
 
 Building ox from source? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -129,14 +134,16 @@ starting ox for my-project (repo=/home/you/projects/my-project, port=4840)
   server    pid=12345  port=4840
   secrets   claude_credentials seeded
   herder    pid=12346
-  runner-1  pid=12347  (seguro) workspace=.../.ox/run/runner-1
-  runner-2  pid=12348  (seguro) workspace=.../.ox/run/runner-2
+  cx-watcher  pid=12347
+  runner-1  pid=12348  (seguro) workspace=.../.ox/run/runner-1
+  runner-2  pid=12349  (seguro) workspace=.../.ox/run/runner-2
 ```
 
-`ox-ctl up` spawns `ox-server` and `ox-herder` on the host, launches
-seguro VMs as runners (`--runners N` to change the count, default 2),
-seeds `claude_credentials` from `~/.claude/.credentials.json`, and
-points everything at the current repo.
+`ox-ctl up` spawns `ox-server`, `ox-herder`, and `ox-cx-watcher` on the
+host, launches seguro VMs as runners (`--runners N` to change the
+count, default 2), seeds `claude_credentials` from
+`~/.claude/.credentials.json`, and points everything at the current
+repo.
 
 Everything ox writes for the project lives under `.ox/run/` in the repo
 (`ox.db`, per-process logs, runner workspaces, pidfile). Runners reach
@@ -247,9 +254,9 @@ ox-ctl workflows                      # list loaded workflows
 ox-ctl runners list                   # show registered runners
 
 ox-ctl exec list                      # list executions
-ox-ctl exec show aJuO-e1              # execution detail
-ox-ctl exec cancel aJuO-e1            # cancel an execution
-ox-ctl exec logs aJuO-e1 propose -f   # follow step logs
+ox-ctl exec show e-1776865672-556              # execution detail
+ox-ctl exec cancel e-1776865672-556            # cancel an execution
+ox-ctl exec logs e-1776865672-556 propose -f   # follow step logs
 
 ox-ctl events                         # stream all events (SSE)
 ox-ctl events --type step.done        # filter by event type

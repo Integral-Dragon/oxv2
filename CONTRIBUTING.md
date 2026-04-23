@@ -13,7 +13,7 @@ update stable`) and `make`.
 
 ## building
 
-Clone the repo and install all five binaries into `~/.cargo/bin`:
+Clone the repo and install all six binaries into `~/.cargo/bin`:
 
 ```bash
 git clone https://github.com/integral-dragon/oxv2
@@ -22,9 +22,10 @@ make install
 ```
 
 Cargo can't install a whole workspace in one command, so `make install`
-loops the binary crates (`ox-server`, `ox-herder`, `ox-runner`,
-`ox-ctl`, `ox-rt`) and runs `cargo install --path <crate> --locked` on
-each. Re-run `make install` after local changes to pick them up.
+loops the binary crates (`ox-server`, `ox-herder`, `ox-cx-watcher`,
+`ox-runner`, `ox-ctl`, `ox-rt`) and runs
+`cargo install --path <crate> --locked` on each. Re-run `make install`
+after local changes to pick them up.
 
 Other targets:
 
@@ -44,14 +45,15 @@ commit.
 
 ## workspace layout
 
-| Crate       | Role                                                    |
-|-------------|---------------------------------------------------------|
-| `ox-core`   | Shared types, storage, event log (library only)         |
-| `ox-server` | HTTP + SSE API, trigger poller, SQLite event store      |
-| `ox-herder` | Runner pool manager — keeps N runners alive             |
-| `ox-runner` | Step executor — spawns step processes, proxies APIs    |
-| `ox-ctl`    | Operator CLI (`ox-ctl up/down/status/events/…`)         |
-| `ox-rt`     | In-step helper (`ox-rt done`, `metric`, `artifact`)     |
+| Crate            | Role                                                    |
+|------------------|---------------------------------------------------------|
+| `ox-core`        | Shared types, storage, event log (library only)         |
+| `ox-server`      | HTTP + SSE API, trigger poller, SQLite event store      |
+| `ox-herder`      | Runner pool manager — keeps N runners alive             |
+| `ox-cx-watcher`  | Watches `cx log`, ingests cx node state into ox-server  |
+| `ox-runner`      | Step executor — spawns step processes, proxies APIs     |
+| `ox-ctl`         | Operator CLI (`ox-ctl up/down/status/events/…`)         |
+| `ox-rt`          | In-step helper (`ox-rt done`, `metric`, `artifact`)     |
 
 Shipped defaults (`defaults/workflows`, `defaults/runtimes`,
 `defaults/personas`) are embedded into the binaries at build time and
