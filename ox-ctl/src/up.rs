@@ -201,7 +201,9 @@ pub fn seguro_runner_argv(
     );
     // Shares (host → guest). The host-disk ones carry anything that can
     // grow large — cargo targets and sccache artifacts — keeping them off
-    // the guest's tmpfs /tmp.
+    // the guest's tmpfs /tmp. Seguro's share grammar: writable is the
+    // default (no suffix); only `:ro` is accepted as a suffix — `:rw` is
+    // an error.
     //   /ox/bin        ro, host fs     ox-runner + agent CLIs
     //   /ox/scripts    ro, host fs     staged helpers (cx)
     //   /cache/sccache rw, host disk   shared sccache across runner VMs
@@ -215,7 +217,7 @@ pub fn seguro_runner_argv(
         "--share".into(),
         format!("{sccache_s}:/cache/sccache"),
         "--share".into(),
-        format!("{workspace_s}:/work:rw"),
+        format!("{workspace_s}:/work"),
         "--net".into(),
         "dev-bridge".into(),
         "--unsafe-dev-bridge".into(),
